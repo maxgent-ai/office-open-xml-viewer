@@ -1,0 +1,177 @@
+name: Publish Maxgent npm package
+
+on:
+  push:
+    tags:
+      - 'maxgent-v*-maxgent.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Dry-run version, for example 0.75.0-maxgent.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-maxgent-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            packages/pptx/parser
+            packages/xlsx/parser
+            packages/docx/parser
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve Maxgent release version
+        id: version
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            release_version="${GITHUB_REF_NAME#maxgent-v}"
+          else
+            release_version="$DISPATCH_VERSION"
+          fi
+
+          if [[ ! "$release_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-maxgent\.([1-9][0-9]*)$ ]]; then
+            echo "Invalid Maxgent version: $release_version" >&2
+            echo "Expected format: 0.75.0-maxgent.1" >&2
+            exit 1
+          fi
+
+          upstream_version="${BASH_REMATCH[1]}"
+          source_version="$(node -p "require('./package.json').version")"
+          package_name="$(node -p "require('./package.json').name")"
+
+          if [[ "$source_version" != "$upstream_version" ]]; then
+            echo "Release base $upstream_version does not match source version $source_version" >&2
+            exit 1
+          fi
+
+          if [[ "$package_name" != "@maxgent/ooxml" ]]; then
+            echo "Unexpected package name: $package_name" >&2
+            exit 1
+          fi
+
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify upstream release source
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
+          UPSTREAM_VERSION: ${{ steps.version.outputs.upstream_version }}
+        run: |
+          upstream_tag="v${UPSTREAM_VERSION}"
+          git remote add upstream-release https://github.com/yukiyokotani/office-open-xml-viewer.git
+          git fetch --no-tags upstream-release \
+            "refs/heads/main:refs/remotes/upstream-release/main"
+          git fetch --no-tags upstream-release \
+            "refs/tags/${upstream_tag}:refs/tags/upstream-${upstream_tag}"
+
+          upstream_tag_commit="$(git rev-parse "refs/tags/upstream-${upstream_tag}^{commit}")"
+          if ! git merge-base --is-ancestor "$upstream_tag_commit" HEAD; then
+            echo "Upstream tag $upstream_tag ($upstream_tag_commit) is not an ancestor of the release commit" >&2
+            exit 1
+          fi
+
+          shared_upstream_commit="$(git merge-base HEAD refs/remotes/upstream-release/main)"
+          if [[ "$shared_upstream_commit" != "$upstream_tag_commit" ]]; then
+            echo "The latest shared upstream commit is $shared_upstream_commit, not $upstream_tag_commit from $upstream_tag" >&2
+            echo "Update package.json and the release tag to a published upstream version before publishing" >&2
+            exit 1
+          fi
+
+          {
+            echo "## Maxgent upstream verification"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Release version | \`$RELEASE_VERSION\` |"
+            echo "| Upstream tag | \`$upstream_tag\` |"
+            echo "| Upstream commit | \`$upstream_tag_commit\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Inject package version
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+
+      - name: Build WASM
+        run: pnpm build:wasm
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build library
+        run: pnpm build
+
+      - name: Guard against base64-inlined WASM
+        run: pnpm check:no-inline-wasm
+
+      - name: Verify package exports
+        run: |
+          npx --yes publint
+          npx --yes @arethetypeswrong/cli --pack . --profile esm-only
+
+      - name: Pack and smoke test
+        run: |
+          npm pack
+          mkdir -p /tmp/maxgent-pack-smoke
+          cd /tmp/maxgent-pack-smoke
+          npm init -y
+          npm install "$GITHUB_WORKSPACE"/maxgent-ooxml-*.tgz
+          node --input-type=module -e "const d = await import('@maxgent/ooxml/docx'); if (!d.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@maxgent/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@maxgent/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); console.log('Maxgent package smoke test passed');"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: maxgent-ooxml-${{ steps.version.outputs.release_version }}
+          path: maxgent-ooxml-*.tgz
+          if-no-files-found: error
+
+      - name: Publish to npm
+        if: github.event_name == 'push'
+        run: pnpm publish --no-git-checks --tag latest
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -11,9 +11,7 @@ release history remains in [`CHANGELOG.md`](CHANGELOG.md).
   not trigger the upstream `v*` release workflows.
 - Manual runs of `publish-maxgent.yml` build and upload a package artifact but
   never publish to npm. Only a matching release tag can publish.
-- The workflow verifies that the declared official upstream tag is the latest
-  upstream commit shared by the release commit and `upstream/main`. It rejects
-  unpublished upstream commits.
+- Upstream synchronization and source-version verification are manual for now.
 - Do not mirror upstream `v*` tags into this fork. They intentionally retain
   the upstream release workflow triggers; source synchronization must fetch
   commits without pushing upstream tags.

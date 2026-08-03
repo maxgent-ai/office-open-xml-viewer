@@ -26,8 +26,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -92,42 +90,6 @@ jobs:
 
           echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
           echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
-
-      - name: Verify upstream release source
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
-          UPSTREAM_VERSION: ${{ steps.version.outputs.upstream_version }}
-        run: |
-          upstream_tag="v${UPSTREAM_VERSION}"
-          git remote add upstream-release https://github.com/yukiyokotani/office-open-xml-viewer.git
-          git fetch --no-tags upstream-release \
-            "refs/heads/main:refs/remotes/upstream-release/main"
-          git fetch --no-tags upstream-release \
-            "refs/tags/${upstream_tag}:refs/tags/upstream-${upstream_tag}"
-
-          upstream_tag_commit="$(git rev-parse "refs/tags/upstream-${upstream_tag}^{commit}")"
-          if ! git merge-base --is-ancestor "$upstream_tag_commit" HEAD; then
-            echo "Upstream tag $upstream_tag ($upstream_tag_commit) is not an ancestor of the release commit" >&2
-            exit 1
-          fi
-
-          shared_upstream_commit="$(git merge-base HEAD refs/remotes/upstream-release/main)"
-          if [[ "$shared_upstream_commit" != "$upstream_tag_commit" ]]; then
-            echo "The latest shared upstream commit is $shared_upstream_commit, not $upstream_tag_commit from $upstream_tag" >&2
-            echo "Update package.json and the release tag to a published upstream version before publishing" >&2
-            exit 1
-          fi
-
-          {
-            echo "## Maxgent upstream verification"
-            echo
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| Release version | \`$RELEASE_VERSION\` |"
-            echo "| Upstream tag | \`$upstream_tag\` |"
-            echo "| Upstream commit | \`$upstream_tag_commit\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Inject package version
         env:

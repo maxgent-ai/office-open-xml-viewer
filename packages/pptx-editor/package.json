@@ -1,0 +1,15 @@
+{
+  "name": "@maxgent/ooxml-pptx-editor",
+  "private": true,
+  "version": "0.0.0",
+  "description": "PPTX editor mutation contracts",
+  "type": "module",
+  "sideEffects": false,
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

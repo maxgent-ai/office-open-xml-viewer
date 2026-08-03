@@ -199,6 +199,16 @@ importers:
         specifier: ^4.1.4
         version: 4.1.4(@types/node@25.6.0)(@vitest/browser-playwright@4.1.4)(@vitest/coverage-v8@4.1.4)(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7))
 
+  packages/pptx-editor:
+    dependencies:
+      '@silurus/ooxml-pptx':
+        specifier: workspace:*
+        version: link:../pptx
+    devDependencies:
+      vitest:
+        specifier: ^4.1.4
+        version: 4.1.4(@types/node@25.6.0)(@vitest/browser-playwright@4.1.4)(@vitest/coverage-v8@4.1.4)(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7))
+
   packages/vscode-extension:
     dependencies:
       '@silurus/ooxml-core':

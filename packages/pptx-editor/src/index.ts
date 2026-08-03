@@ -1,5 +1,5 @@
-export { MUTATION_TYPES } from './mutation-types';
-export type { MutationType } from './mutation-types';
+export { MUTATION_TYPES } from './domain/mutation-types';
+export type { MutationType } from './domain/mutation-types';
 
 export type {
   ElementRef,
@@ -8,6 +8,26 @@ export type {
   RemoveElementMutation,
   UpdateTextMutation,
   UpdateTransformMutation,
-} from './mutation';
+} from './domain/mutation';
 
-export type { Command, NonEmptyReadonlyArray } from './command';
+export type { Command, NonEmptyReadonlyArray } from './domain/command';
+
+export {
+  POSITIONAL_ELEMENT_ID_PREFIX,
+  createElementRef,
+  getElementMutationId,
+  getSlideMutationId,
+} from './adapters/pptx-json-adapter';
+export type { ResolvedElementRef } from './adapters/pptx-json-adapter';
+
+export {
+  CommandExecutionError,
+  MutationExecutionError,
+  applyCommand,
+  applyMutation,
+} from './engine/mutation-engine';
+export type {
+  CommandExecutionResult,
+  MutationExecutionErrorCode,
+  MutationExecutionResult,
+} from './engine/mutation-engine';

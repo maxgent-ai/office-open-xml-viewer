@@ -31,3 +31,21 @@ export type {
   MutationExecutionErrorCode,
   MutationExecutionResult,
 } from './engine/mutation-engine';
+
+export { PptxEditorStore } from './store/editor-store';
+export { EditorStoreError } from './store/errors';
+export type { EditorStoreErrorCode } from './store/errors';
+export {
+  PENDING_COMMAND_STATUSES,
+} from './store/pending-command';
+export type {
+  PendingCommand,
+  PendingCommandStatus,
+} from './store/pending-command';
+export { EDITOR_STORE_CHANGE_REASONS } from './store/types';
+export type {
+  EditorStoreChange,
+  EditorStoreChangeReason,
+  EditorStoreListener,
+  EditorStoreSnapshot,
+} from './store/types';

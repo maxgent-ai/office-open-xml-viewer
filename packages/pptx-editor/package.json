@@ -11,7 +11,7 @@
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "@silurus/ooxml-pptx": "workspace:*"

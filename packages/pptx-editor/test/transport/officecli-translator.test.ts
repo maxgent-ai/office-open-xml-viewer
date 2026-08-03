@@ -4,7 +4,9 @@ import type { PictureElement, Presentation } from '@silurus/ooxml-pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
-import { MUTATION_TYPES } from '../../src/domain/mutation-types';
+import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
+import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
+import { UpdateTransformMutation } from '../../src/mutations/update-transform-mutation';
 import {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_VERSION,
@@ -21,8 +23,7 @@ describe('toOfficeCliBatch', () => {
 
     const batch = toOfficeCliBatch(presentation, {
       id: 'transform-1',
-      mutations: [{
-        type: MUTATION_TYPES.UPDATE_TRANSFORM,
+      mutations: [new UpdateTransformMutation({
         target: ref,
         value: {
           x: 914400,
@@ -33,7 +34,7 @@ describe('toOfficeCliBatch', () => {
           flipH: true,
           flipV: false,
         },
-      }],
+      })],
     });
 
     expect(batch).toEqual({
@@ -63,8 +64,8 @@ describe('toOfficeCliBatch', () => {
     const command: Command = {
       id: 'compound-1',
       mutations: [
-        { type: MUTATION_TYPES.UPDATE_TEXT, target: ref, value: 'after' },
-        { type: MUTATION_TYPES.REMOVE_ELEMENT, target: ref },
+        new UpdateTextMutation({ target: ref, value: 'after' }),
+        new RemoveElementMutation({ target: ref }),
       ],
     };
 
@@ -98,10 +99,13 @@ describe('toOfficeCliBatch', () => {
 
     const batch = toOfficeCliBatch(presentation, {
       id: 'text-1',
-      mutations: [{ type: MUTATION_TYPES.UPDATE_TEXT, target: ref, value: 'after' }],
+      mutations: [new UpdateTextMutation({ target: ref, value: 'after' })],
     });
 
-    expect(batch.commands[0].path).toBe('/slide[2]/shape[@id=7]');
+    const command = batch.commands[0];
+    expect(command.command).toBe('set');
+    if (command.command !== 'set') throw new TypeError('Expected an OfficeCLI set command');
+    expect(command.path).toBe('/slide[2]/shape[@id=7]');
   });
 
   it('rejects positional element references that cannot form a stable OfficeCLI path', () => {
@@ -111,7 +115,7 @@ describe('toOfficeCliBatch', () => {
 
     expect(() => toOfficeCliBatch(presentation, {
       id: 'text-1',
-      mutations: [{ type: MUTATION_TYPES.UPDATE_TEXT, target: ref, value: 'after' }],
+      mutations: [new UpdateTextMutation({ target: ref, value: 'after' })],
     })).toThrowError(expect.objectContaining<Partial<OfficeCliTranslatorError>>({
       code: 'target.unstableElementId',
       commandId: 'text-1',
@@ -138,7 +142,7 @@ describe('toOfficeCliBatch', () => {
 
     expect(() => toOfficeCliBatch(presentation, {
       id: 'remove-1',
-      mutations: [{ type: MUTATION_TYPES.REMOVE_ELEMENT, target: ref }],
+      mutations: [new RemoveElementMutation({ target: ref })],
     })).toThrowError(expect.objectContaining<Partial<OfficeCliTranslatorError>>({
       code: 'target.unsupportedElement',
     }));
@@ -151,8 +155,7 @@ describe('toOfficeCliBatch', () => {
 
     expect(() => toOfficeCliBatch(presentation, {
       id: 'transform-1',
-      mutations: [{
-        type: MUTATION_TYPES.UPDATE_TRANSFORM,
+      mutations: [new UpdateTransformMutation({
         target: ref,
         value: {
           x: 0.5,
@@ -163,7 +166,7 @@ describe('toOfficeCliBatch', () => {
           flipH: false,
           flipV: false,
         },
-      }],
+      })],
     })).toThrowError(expect.objectContaining<Partial<OfficeCliTranslatorError>>({
       code: 'value.invalidTransform',
     }));

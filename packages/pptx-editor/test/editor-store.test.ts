@@ -5,7 +5,8 @@ import type { ShapeElement } from '@silurus/ooxml-pptx';
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
 import type { Command } from '../src/domain/command';
 import type { ElementRef, ElementTransform } from '../src/domain/mutation';
-import { MUTATION_TYPES } from '../src/domain/mutation-types';
+import { UpdateTextMutation } from '../src/mutations/update-text-mutation';
+import { UpdateTransformMutation } from '../src/mutations/update-transform-mutation';
 import { EditorStoreError } from '../src/store/errors';
 import { PptxEditorStore } from '../src/store/editor-store';
 import { EDITOR_SYNC_STATUSES } from '../src/store/sync-state';
@@ -155,7 +156,7 @@ describe('PptxEditorStore', () => {
 function updateTextCommand(id: string, target: ElementRef, value: string): Command {
   return {
     id,
-    mutations: [{ type: MUTATION_TYPES.UPDATE_TEXT, target, value }],
+    mutations: [new UpdateTextMutation({ target, value })],
   };
 }
 
@@ -166,8 +167,7 @@ function updateTransformCommand(
 ): Command {
   return {
     id,
-    mutations: [{
-      type: MUTATION_TYPES.UPDATE_TRANSFORM,
+    mutations: [new UpdateTransformMutation({
       target,
       value: {
         x: 0,
@@ -179,7 +179,7 @@ function updateTransformCommand(
         flipV: false,
         ...overrides,
       },
-    }],
+    })],
   };
 }
 

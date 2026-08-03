@@ -34,9 +34,5 @@ export function textNotEditable(mutation: Mutation): MutationExecutionError {
 }
 
 export function elementRefKey(target: ElementRef): string {
-  return `${target.slideId}\u0000${target.elementId}`;
-}
-
-export function assertNever(value: never): never {
-  throw new TypeError(`Unsupported mutation: ${JSON.stringify(value)}`);
+  return `${target.origin}\u0000${target.slideId}\u0000${target.elementId}`;
 }

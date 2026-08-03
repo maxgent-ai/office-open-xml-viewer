@@ -5,7 +5,8 @@ import type { ShapeElement } from '@silurus/ooxml-pptx';
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
 import type { ElementRef } from '../../src/domain/mutation';
-import { MUTATION_TYPES } from '../../src/domain/mutation-types';
+import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
+import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
 import { PptxEditorStore } from '../../src/store/editor-store';
 import { EDITOR_SYNC_STATUSES } from '../../src/store/sync-state';
 import { EDITOR_STORE_CHANGE_REASONS } from '../../src/store/types';
@@ -96,6 +97,45 @@ describe('SerialOfficeCliSubmitter', () => {
     });
     expect(sendBatch).toHaveBeenCalledTimes(2);
     expect(textOfBase(store)).toBe('three');
+  });
+
+  it('queues commands submitted by rejection listeners instead of invalidating them', async () => {
+    const target = shape('7', 'before');
+    const store = new PptxEditorStore(deck([target]));
+    const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
+    const failure = new Error('backend rejected command');
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockResolvedValueOnce(rejectedSendResult(failure))
+      .mockResolvedValueOnce(confirmedSendResult());
+    const submitter = new SerialOfficeCliSubmitter(store, sendBatch);
+
+    let retry: ReturnType<SerialOfficeCliSubmitter['submit']> | undefined;
+    store.subscribe((change) => {
+      if (change.reason === EDITOR_STORE_CHANGE_REASONS.COMMAND_REJECTED && !retry) {
+        retry = submitter.submit(updateTextCommand('retry-1', ref, 'retried'));
+      }
+    });
+
+    const first = submitter.submit(updateTextCommand('text-1', ref, 'one'));
+
+    await expect(first.settled).resolves.toEqual({
+      commandId: 'text-1',
+      status: COMMAND_SUBMISSION_STATUSES.REJECTED,
+      cause: failure,
+    });
+    expect(retry).toBeDefined();
+    await expect((retry as ReturnType<SerialOfficeCliSubmitter['submit']>).settled)
+      .resolves.toEqual({
+        commandId: 'retry-1',
+        status: COMMAND_SUBMISSION_STATUSES.CONFIRMED,
+      });
+    expect(sendBatch).toHaveBeenCalledTimes(2);
+    expect(sendBatch.mock.calls[1][0].commandId).toBe('retry-1');
+    expect(textOfBase(store)).toBe('retried');
+    expect(textOf(store)).toBe('retried');
+    expect(store.getSnapshot().pendingCommands).toEqual([]);
+    expect(store.getSnapshot().syncState).toEqual({ status: EDITOR_SYNC_STATUSES.READY });
+    expect(submitter.isIdle).toBe(true);
   });
 
   it('halts on an unknown transport outcome and recovers from an authoritative presentation', async () => {
@@ -208,7 +248,7 @@ describe('SerialOfficeCliSubmitter', () => {
 
     const submission = submitter.submit({
       id: 'remove-1',
-      mutations: [{ type: MUTATION_TYPES.REMOVE_ELEMENT, target: ref }],
+      mutations: [new RemoveElementMutation({ target: ref })],
     });
 
     expect(store.getSnapshot().presentation.slides[0].elements).toEqual([]);
@@ -243,7 +283,7 @@ describe('SerialOfficeCliSubmitter', () => {
 function updateTextCommand(id: string, target: ElementRef, value: string): Command {
   return {
     id,
-    mutations: [{ type: MUTATION_TYPES.UPDATE_TEXT, target, value }],
+    mutations: [new UpdateTextMutation({ target, value })],
   };
 }
 

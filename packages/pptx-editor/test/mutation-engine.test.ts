@@ -4,12 +4,14 @@ import type { ShapeElement } from '@silurus/ooxml-pptx';
 
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
 import type { Command } from '../src/domain/command';
-import { MUTATION_TYPES } from '../src/domain/mutation-types';
 import {
   applyCommand,
   applyMutation,
   CommandExecutionError,
 } from '../src/engine/mutation-engine';
+import { RemoveElementMutation } from '../src/mutations/remove-element-mutation';
+import { UpdateTextMutation } from '../src/mutations/update-text-mutation';
+import { UpdateTransformMutation } from '../src/mutations/update-transform-mutation';
 import { deck, shape } from './fixtures/presentation';
 
 describe('mutation engine', () => {
@@ -19,8 +21,7 @@ describe('mutation engine', () => {
     const presentation = deck([target, untouched]);
     const ref = createElementRef(presentation.slides[0], target, 0);
 
-    const result = applyMutation(presentation, {
-      type: MUTATION_TYPES.UPDATE_TRANSFORM,
+    const result = applyMutation(presentation, new UpdateTransformMutation({
       target: ref,
       value: {
         x: 100,
@@ -31,7 +32,7 @@ describe('mutation engine', () => {
         flipH: true,
         flipV: false,
       },
-    });
+    }));
 
     expect(result.presentation).not.toBe(presentation);
     expect(result.presentation.slides[0]).not.toBe(presentation.slides[0]);
@@ -55,10 +56,9 @@ describe('mutation engine', () => {
     const ref = createElementRef(presentation.slides[0], target, 0);
 
     expect(ref.elementId).toBe('index:0');
-    expect(applyMutation(presentation, {
-      type: MUTATION_TYPES.REMOVE_ELEMENT,
+    expect(applyMutation(presentation, new RemoveElementMutation({
       target: ref,
-    }).presentation.slides[0].elements).toEqual([]);
+    })).presentation.slides[0].elements).toEqual([]);
   });
 
   it('replaces plain text while retaining formatting and removing field semantics', () => {
@@ -66,11 +66,10 @@ describe('mutation engine', () => {
     const presentation = deck([target]);
     const ref = createElementRef(presentation.slides[0], target, 0);
 
-    const result = applyMutation(presentation, {
-      type: MUTATION_TYPES.UPDATE_TEXT,
+    const result = applyMutation(presentation, new UpdateTextMutation({
       target: ref,
       value: 'first\nsecond',
-    });
+    }));
     const updated = result.presentation.slides[0].elements[0] as ShapeElement;
 
     expect(updated.textBody?.paragraphs).toHaveLength(2);
@@ -92,15 +91,13 @@ describe('mutation engine', () => {
     const result = applyCommand(presentation, {
       id: 'command-success',
       mutations: [
-        {
-          type: MUTATION_TYPES.UPDATE_TEXT,
+        new UpdateTextMutation({
           target: textRef,
           value: 'after',
-        },
-        {
-          type: MUTATION_TYPES.REMOVE_ELEMENT,
+        }),
+        new RemoveElementMutation({
           target: removeRef,
-        },
+        }),
       ],
     });
 
@@ -119,15 +116,13 @@ describe('mutation engine', () => {
     const command: Command = {
       id: 'command-1',
       mutations: [
-        {
-          type: MUTATION_TYPES.UPDATE_TEXT,
+        new UpdateTextMutation({
           target: ref,
           value: 'changed',
-        },
-        {
-          type: MUTATION_TYPES.REMOVE_ELEMENT,
-          target: { slideId: ref.slideId, elementId: 'missing' },
-        },
+        }),
+        new RemoveElementMutation({
+          target: { ...ref, elementId: 'missing' },
+        }),
       ],
     };
 

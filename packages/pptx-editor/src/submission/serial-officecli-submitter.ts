@@ -54,6 +54,13 @@ export class SerialOfficeCliSubmitter {
         'Cannot resync an OfficeCLI submitter that is not halted',
       );
     }
+    if (!this.isIdle) {
+      throw new CommandSubmitterError(
+        'submitter.busy',
+        this.#haltError.commandId,
+        'Cannot resync before halted submissions have settled',
+      );
+    }
     const change = this.store.resync(authoritativePresentation);
     this.#haltError = undefined;
     return change;
@@ -105,9 +112,14 @@ export class SerialOfficeCliSubmitter {
             break;
 
           case OFFICECLI_BATCH_SEND_STATUSES.REJECTED: {
+            // Capture the invalidated tail before store.reject notifies listeners
+            // synchronously; commands submitted from those listeners are based on
+            // the rolled-back state and must stay queued for the next iteration.
+            const invalidatedTail = this.#queue.splice(0);
             try {
               this.store.reject(current.commandId);
             } catch (cause) {
+              this.#queue.unshift(...invalidatedTail);
               throw reconciliationError(
                 current.commandId,
                 'reject',
@@ -121,7 +133,7 @@ export class SerialOfficeCliSubmitter {
               cause: sendResult.cause,
             }));
             current = undefined;
-            for (const queued of this.#queue.splice(0)) {
+            for (const queued of invalidatedTail) {
               queued.resolve(Object.freeze({
                 commandId: queued.commandId,
                 status: COMMAND_SUBMISSION_STATUSES.INVALIDATED,

@@ -63,6 +63,10 @@ pub(crate) struct Slide {
     pub(crate) part_name: Option<String>,
     pub(crate) background: Option<Fill>,
     pub(crate) elements: Vec<SlideElement>,
+    /// Provenance for each entry in `elements`, in the same order. The editor
+    /// uses this to distinguish inherited decorations from direct slide-tree
+    /// elements without changing the renderer-facing element union.
+    pub(crate) element_sources: Vec<SlideElementSource>,
     /// `ppt/notesSlides/notesSlideN.xml` plain text — the speaker-notes pane
     /// content as a single string (paragraphs joined with '\n'). `None` when
     /// the slide has no notes part. Renderer ignores this; surfaced for tools.
@@ -84,6 +88,24 @@ pub(crate) struct Slide {
     /// byte-for-byte unchanged. The renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) parse_error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SlideElementOrigin {
+    Master,
+    Layout,
+    Slide,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SlideElementSource {
+    pub(crate) origin: SlideElementOrigin,
+    /// Zero-based position in the direct slide shape tree. Present only when
+    /// one rendered element maps to one direct, editable slide shape node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) slide_tree_index: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

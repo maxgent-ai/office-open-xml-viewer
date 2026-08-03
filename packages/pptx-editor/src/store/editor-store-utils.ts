@@ -26,5 +26,5 @@ export function collectCommandInvalidations(
 }
 
 function elementRefKey(target: ElementRef): string {
-  return `${target.slideId}\u0000${target.elementId}`;
+  return `${target.origin}\u0000${target.slideId}\u0000${target.elementId}`;
 }

@@ -1,6 +1,12 @@
-import type { MUTATION_TYPES } from './mutation-types';
+import type { Presentation } from '@silurus/ooxml-pptx';
+
+import type { MutationExecutionResult } from '../engine/types';
+import type { OfficeCliCommand } from '../transport/officecli/types';
+import type { ElementOrigin } from './element-origin';
+import type { MutationType } from './mutation-types';
 
 export interface ElementRef {
+  readonly origin: ElementOrigin;
   readonly slideId: string;
   readonly elementId: string;
 }
@@ -20,27 +26,25 @@ export interface ElementTransform {
   readonly flipV: boolean;
 }
 
-export interface UpdateTransformMutation {
-  readonly type: typeof MUTATION_TYPES.UPDATE_TRANSFORM;
-  readonly target: ElementRef;
-  /** Complete transform after the mutation, not a relative delta. */
-  readonly value: ElementTransform;
+export interface MutationCommandContext {
+  readonly commandId: string;
+  readonly mutationIndex: number;
 }
 
-export interface UpdateTextMutation {
-  readonly type: typeof MUTATION_TYPES.UPDATE_TEXT;
-  readonly target: ElementRef;
-  /** Plain text for the first MVP; rich text is intentionally deferred. */
-  readonly value: string;
-}
+/**
+ * An immutable editor operation. Public fields are its JSON representation;
+ * prototype methods provide local behavior after construction or hydration.
+ */
+export abstract class Mutation {
+  abstract readonly type: MutationType;
+  abstract readonly target: ElementRef;
 
-export interface RemoveElementMutation {
-  readonly type: typeof MUTATION_TYPES.REMOVE_ELEMENT;
-  readonly target: ElementRef;
-}
+  abstract apply(presentation: Presentation): MutationExecutionResult;
 
-/** A single atomic change to the editor scene. */
-export type Mutation =
-  | UpdateTransformMutation
-  | UpdateTextMutation
-  | RemoveElementMutation;
+  abstract inverse(presentation: Presentation): Mutation | undefined;
+
+  abstract toOfficeCli(
+    presentation: Presentation,
+    context: MutationCommandContext,
+  ): OfficeCliCommand;
+}

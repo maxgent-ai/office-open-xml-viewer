@@ -168,6 +168,12 @@ export interface Slide {
   background: Fill | null;
   elements: SlideElement[];
   /**
+   * Provenance for each entry in {@link Slide.elements}, at the same index.
+   * Rendered master/layout decorations share the element array with direct
+   * slide content, while only direct slide shapes carry `slideTreeIndex`.
+   */
+  elementSources?: SlideElementSource[];
+  /**
    * Speaker-notes pane text from `ppt/notesSlides/notesSlideN.xml`
    * (ECMA-376 §13.3.5 — Notes Slide). The full notes-body text as a single
    * string, paragraphs joined with `\n`. Absent (`undefined`) when the slide
@@ -196,6 +202,14 @@ export interface Slide {
    * slide. The renderer paints a visible error box instead of slide content.
    */
   parseError?: string;
+}
+
+export type SlideElementOrigin = 'master' | 'layout' | 'slide';
+
+export interface SlideElementSource {
+  origin: SlideElementOrigin;
+  /** Zero-based index in the direct slide shape tree. */
+  slideTreeIndex?: number;
 }
 
 /**

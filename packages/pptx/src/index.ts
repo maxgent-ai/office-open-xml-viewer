@@ -50,6 +50,8 @@ export {
 export type {
   Presentation,
   Slide,
+  SlideElementOrigin,
+  SlideElementSource,
   // Reachable via Slide.comments — exported so consumers reading legacy slide
   // comments have a name for the element type.
   PptxComment,

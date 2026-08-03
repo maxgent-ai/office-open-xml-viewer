@@ -1,7 +1,8 @@
 export type CommandSubmitterErrorCode =
   | 'store.reconciliationFailed'
   | 'transport.outcomeUnknown'
-  | 'submitter.notHalted';
+  | 'submitter.notHalted'
+  | 'submitter.busy';
 
 export class CommandSubmitterError extends Error {
   readonly name = 'CommandSubmitterError';

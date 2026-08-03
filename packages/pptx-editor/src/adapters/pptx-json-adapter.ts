@@ -4,19 +4,22 @@ import type {
   ShapeElement,
   Slide,
   SlideElement,
+  SlideElementSource,
   TextBody,
   TextRunData,
 } from '@silurus/ooxml-pptx';
 
 import type { ElementRef } from '../domain/mutation';
+import { ELEMENT_ORIGINS } from '../domain/element-origin';
 
 export const POSITIONAL_ELEMENT_ID_PREFIX = 'index:';
 
 export interface ResolvedElementRef {
   readonly slideIndex: number;
-  readonly elementIndex: number;
+  readonly presentationElementIndex: number;
   readonly slide: Slide;
   readonly element: SlideElement;
+  readonly source: SlideElementSource;
 }
 
 /** Uses the stable slide part name when available and falls back to its parsed index. */
@@ -41,7 +44,14 @@ export function createElementRef(
   element: SlideElement,
   elementIndex: number,
 ): ElementRef {
+  const source = getElementSource(slide, elementIndex);
+  if (!source) {
+    throw new TypeError(
+      `Cannot create an editable reference without element source metadata at index ${elementIndex}`,
+    );
+  }
   return {
+    origin: source.origin,
     slideId: getSlideMutationId(slide),
     elementId: getElementMutationId(element, elementIndex),
   };
@@ -57,17 +67,29 @@ export function resolveElementRef(
   if (slideIndex < 0) return undefined;
 
   const slide = presentation.slides[slideIndex];
-  const elementIndex = slide.elements.findIndex(
-    (element, index) => getElementMutationId(element, index) === target.elementId,
+  const elementSources = getElementSources(slide);
+  if (!elementSources) return undefined;
+  const presentationElementIndex = slide.elements.findIndex(
+    (element, index) => elementSources[index].origin === target.origin
+      && getElementMutationId(element, index) === target.elementId,
   );
-  if (elementIndex < 0) return undefined;
+  if (presentationElementIndex < 0) return undefined;
 
   return {
     slideIndex,
-    elementIndex,
+    presentationElementIndex,
     slide,
-    element: slide.elements[elementIndex],
+    element: slide.elements[presentationElementIndex],
+    source: elementSources[presentationElementIndex],
   };
+}
+
+export function getElementSources(
+  slide: Slide,
+): readonly SlideElementSource[] | undefined {
+  return slide.elementSources?.length === slide.elements.length
+    ? slide.elementSources
+    : undefined;
 }
 
 export function hasSlideMutationId(presentation: Presentation, slideId: string): boolean {
@@ -80,15 +102,78 @@ export function replaceResolvedElement(
   replacement: SlideElement | null,
 ): Presentation {
   const elements = resolved.slide.elements.slice();
+  const elementSources = getElementSources(resolved.slide)?.slice();
+  if (!elementSources) {
+    throw new TypeError('Cannot update a slide without complete element source metadata');
+  }
   if (replacement) {
-    elements[resolved.elementIndex] = replacement;
+    elements[resolved.presentationElementIndex] = replacement;
   } else {
-    elements.splice(resolved.elementIndex, 1);
+    const [removedSource] = elementSources.splice(resolved.presentationElementIndex, 1);
+    elements.splice(resolved.presentationElementIndex, 1);
+    if (
+      removedSource.origin === ELEMENT_ORIGINS.SLIDE
+      && removedSource.slideTreeIndex !== undefined
+    ) {
+      shiftSlideTreeIndexes(elementSources, removedSource.slideTreeIndex + 1, -1);
+    }
   }
 
   const slides = presentation.slides.slice();
-  slides[resolved.slideIndex] = { ...resolved.slide, elements };
+  slides[resolved.slideIndex] = { ...resolved.slide, elements, elementSources };
   return { ...presentation, slides };
+}
+
+export function insertSlideElement(
+  presentation: Presentation,
+  slideIndex: number,
+  element: SlideElement,
+  presentationElementIndex: number,
+  slideTreeIndex: number,
+): Presentation {
+  const slide = presentation.slides[slideIndex];
+  const elementSources = getElementSources(slide)?.slice();
+  if (!elementSources) {
+    throw new TypeError('Cannot update a slide without complete element source metadata');
+  }
+
+  const elements = slide.elements.slice();
+  elements.splice(presentationElementIndex, 0, element);
+  shiftSlideTreeIndexes(elementSources, slideTreeIndex, 1);
+  elementSources.splice(presentationElementIndex, 0, {
+    origin: ELEMENT_ORIGINS.SLIDE,
+    slideTreeIndex,
+  });
+
+  const slides = presentation.slides.slice();
+  slides[slideIndex] = { ...slide, elements, elementSources };
+  return { ...presentation, slides };
+}
+
+function getElementSource(
+  slide: Slide,
+  elementIndex: number,
+): SlideElementSource | undefined {
+  return getElementSources(slide)?.[elementIndex];
+}
+
+function shiftSlideTreeIndexes(
+  sources: SlideElementSource[],
+  fromIndex: number,
+  delta: number,
+): void {
+  for (const [index, source] of sources.entries()) {
+    if (
+      source.origin === ELEMENT_ORIGINS.SLIDE
+      && source.slideTreeIndex !== undefined
+      && source.slideTreeIndex >= fromIndex
+    ) {
+      sources[index] = {
+        ...source,
+        slideTreeIndex: source.slideTreeIndex + delta,
+      };
+    }
+  }
 }
 
 /** Replaces rich text with plain text while retaining the nearest paragraph and run styling. */

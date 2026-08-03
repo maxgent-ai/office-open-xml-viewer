@@ -1,14 +1,33 @@
 export { MUTATION_TYPES } from './domain/mutation-types';
 export type { MutationType } from './domain/mutation-types';
+export { ELEMENT_ORIGINS } from './domain/element-origin';
+export type { ElementOrigin } from './domain/element-origin';
 
+export { Mutation } from './domain/mutation';
 export type {
   ElementRef,
   ElementTransform,
-  Mutation,
-  RemoveElementMutation,
-  UpdateTextMutation,
-  UpdateTransformMutation,
+  MutationCommandContext,
 } from './domain/mutation';
+
+export { AddElementMutation } from './mutations/add-element-mutation';
+export type { AddElementMutationParams } from './mutations/add-element-mutation';
+export { RemoveElementMutation } from './mutations/remove-element-mutation';
+export type { RemoveElementMutationParams } from './mutations/remove-element-mutation';
+export { UpdateTextMutation } from './mutations/update-text-mutation';
+export type { UpdateTextMutationParams } from './mutations/update-text-mutation';
+export { UpdateTransformMutation } from './mutations/update-transform-mutation';
+export type {
+  UpdateTransformMutationParams,
+} from './mutations/update-transform-mutation';
+export { mutationFromJson } from './mutations/mutation-from-json';
+export type {
+  AddElementMutationJson,
+  MutationJson,
+  RemoveElementMutationJson,
+  UpdateTextMutationJson,
+  UpdateTransformMutationJson,
+} from './mutations/mutation-from-json';
 
 export type { Command, NonEmptyReadonlyArray } from './domain/command';
 
@@ -55,6 +74,7 @@ export type {
 export {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_COMMAND_TYPES,
+  OFFICECLI_ELEMENT_TYPES,
   OFFICECLI_VERSION,
 } from './transport/officecli/constants';
 export { OfficeCliTranslatorError } from './transport/officecli/errors';
@@ -63,6 +83,7 @@ export type {
 } from './transport/officecli/errors';
 export { toOfficeCliBatch } from './transport/officecli/officecli-translator';
 export type {
+  OfficeCliAddCommand,
   OfficeCliBatch,
   OfficeCliCommand,
   OfficeCliCommandType,
@@ -70,6 +91,18 @@ export type {
   OfficeCliRemoveCommand,
   OfficeCliSetCommand,
 } from './transport/officecli/types';
+
+export { UNDO_REDO_DIRECTIONS } from './history/constants';
+export { UndoRedoStackError } from './history/errors';
+export type { UndoRedoStackErrorCode } from './history/errors';
+export { UndoRedoStack } from './history/undo-redo-stack';
+export type {
+  UndoRedoCommandIdContext,
+  UndoRedoCommandIdFactory,
+  UndoRedoDirection,
+  UndoRedoStackListener,
+  UndoRedoStackSnapshot,
+} from './history/types';
 
 export {
   COMMAND_SUBMISSION_STATUSES,

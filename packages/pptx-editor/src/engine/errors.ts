@@ -2,7 +2,12 @@ import type { Mutation } from '../domain/mutation';
 
 export type MutationExecutionErrorCode =
   | 'slide.notFound'
+  | 'element.alreadyExists'
+  | 'element.invalidIndex'
+  | 'element.metadataUnavailable'
+  | 'element.notDirectSlide'
   | 'element.notFound'
+  | 'element.unsupportedOrigin'
   | 'element.textNotEditable';
 
 export class MutationExecutionError extends Error {

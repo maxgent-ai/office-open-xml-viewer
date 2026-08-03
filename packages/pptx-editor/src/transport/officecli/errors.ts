@@ -3,7 +3,10 @@ import type { Mutation } from '../../domain/mutation';
 export type OfficeCliTranslatorErrorCode =
   | 'target.slideNotFound'
   | 'target.elementNotFound'
+  | 'target.metadataUnavailable'
+  | 'target.notDirectSlide'
   | 'target.unsupportedElement'
+  | 'target.unsupportedOrigin'
   | 'target.unstableElementId'
   | 'value.invalidTransform'
   | 'value.invalidText';

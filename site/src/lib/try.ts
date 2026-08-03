@@ -155,7 +155,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
   return { format: 'docx', units: viewer.pageCount, unitLabel: 'page' };
 }
 
-// Hot standby: warm each WASM engine (and the Google Fonts CSS) on an idle tick
+// Hot standby: warm each WASM engine on an idle tick
 // so the user's first real file parses without paying the cold cost of fetching
 // + compiling the parser binaries. Each `renderFile` spawns a fresh inline
 // worker that re-fetches its `*_parser_bg.wasm`; pre-loading the bundled demo of
@@ -174,16 +174,19 @@ export function prewarmEngines(): void {
   const sample = (f: string) => `${base}samples/${f}`.replace(/([^:])\/\/+/g, '$1/');
 
   const run = (): void => {
-    void PptxPresentation.load(sample('sample-1.pptx'), { useGoogleFonts: true })
+    // Fonts are intentionally disabled here. Prewarming should prime only the
+    // parser binaries; downloading fonts used by bundled samples would compete
+    // with (and may be irrelevant to) the user's own file.
+    void PptxPresentation.load(sample('sample-1.pptx'), { useGoogleFonts: false })
       .then((d) => d.destroy())
       .catch(() => {});
-    void DocxDocument.load(sample('sample-1.docx'), { useGoogleFonts: true })
+    void DocxDocument.load(sample('sample-1.docx'), { useGoogleFonts: false })
       .then((d) => d.destroy())
       .catch(() => {});
     // XlsxViewer needs a container; mount into a detached node never added to the
     // DOM, then dispose. The parse + one render warms the xlsx WASM engine.
     const host = document.createElement('div');
-    const v = new XlsxViewer(host, { useGoogleFonts: true });
+    const v = new XlsxViewer(host, { useGoogleFonts: false });
     void v.load(sample('sample-1.xlsx')).then(() => v.destroy()).catch(() => v.destroy());
   };
 

@@ -1,76 +1,141 @@
-// Client-side mounts for the three real viewers, used by the Live Showcase.
-// PPTX/DOCX render every page/slide stacked on a backdrop (Storybook-style),
-// scrolled vertically. XLSX uses its own full viewer. Each mount returns a
-// destroy() so the showcase can swap formats cleanly.
-import { PptxPresentation } from '@silurus/ooxml-pptx';
-import { DocxDocument } from '@silurus/ooxml-docx';
+// Client-side mounts for the three real viewers used by the home-page showcase.
+// Each format is mounted at most once and retained while the page is open, so a
+// tab switch is a DOM visibility change rather than another parse.
+import { EMU_PER_PX, PT_TO_PX } from '@silurus/ooxml-core';
+import { PptxPresentation, PptxScrollViewer } from '@silurus/ooxml-pptx';
+import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
 
-export type LiveController = { destroy: () => void };
+export type LiveController = {
+  destroy: () => void;
+  /** Re-fit a retained viewer after its hidden pane becomes visible again. */
+  activate?: () => void;
+};
 
-const DPR = () => Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2);
-
-function scroller(): HTMLDivElement {
-  const s = document.createElement('div');
-  s.className = 'lv-scroll';
-  return s;
-}
+const MAX_SAMPLE_WIDTH = 880;
 
 function statusLine(text: string): HTMLDivElement {
-  const d = document.createElement('div');
-  d.className = 'lv-status';
-  d.textContent = text;
-  return d;
+  const status = document.createElement('div');
+  status.className = 'lv-status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  const circle = document.createElement('span');
+  circle.className = 'lv-progress-circle';
+  circle.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.textContent = text;
+  status.append(circle, label);
+  return status;
+}
+
+function mountPaginated(
+  root: HTMLElement,
+  kind: 'docx' | 'pptx',
+  url: string,
+): LiveController {
+  root.innerHTML = '';
+  const host = document.createElement('div');
+  host.className = 'lv-scroll-viewer';
+  const status = statusLine('Parsing document…');
+  root.append(host, status);
+
+  let destroyed = false;
+  let viewer: PptxScrollViewer | DocxScrollViewer | null = null;
+  let engine: PptxPresentation | DocxDocument | null = null;
+  let maxScale = Number.POSITIVE_INFINITY;
+  let resizeObserver: ResizeObserver | null = null;
+  let frame: number | null = null;
+
+  const enforceWidthCap = (): void => {
+    if (!viewer || destroyed) return;
+    const current = viewer.getScale();
+    if (current > maxScale) viewer.setScale(maxScale);
+  };
+  const relayout = (): void => {
+    if (!viewer || destroyed) return;
+    viewer.relayout();
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = null;
+      enforceWidthCap();
+    });
+  };
+  const observeWidth = (): void => {
+    if (typeof ResizeObserver === 'undefined') return;
+    resizeObserver = new ResizeObserver(() => relayout());
+    resizeObserver.observe(host);
+  };
+
+  if (kind === 'pptx') {
+    void PptxPresentation.load(url, { useGoogleFonts: true }).then((presentation) => {
+      if (destroyed) {
+        presentation.destroy();
+        return;
+      }
+      engine = presentation;
+      maxScale = MAX_SAMPLE_WIDTH / (presentation.slideWidth / EMU_PER_PX);
+      viewer = new PptxScrollViewer(host, {
+        presentation,
+        gap: 26,
+        overscan: presentation.slideCount,
+        enableTextSelection: true,
+        pageShadow: 'var(--document-shadow)',
+        background: 'transparent',
+      });
+      enforceWidthCap();
+      observeWidth();
+      status.remove();
+    }).catch((error: unknown) => {
+      if (!destroyed) status.textContent = message(error);
+    });
+  } else {
+    void DocxDocument.load(url, { useGoogleFonts: true }).then((document) => {
+      if (destroyed) {
+        document.destroy();
+        return;
+      }
+      engine = document;
+      let widestPage = 0;
+      for (let index = 0; index < document.pageCount; index++) {
+        widestPage = Math.max(widestPage, document.pageSize(index).widthPt * PT_TO_PX);
+      }
+      maxScale = widestPage > 0 ? MAX_SAMPLE_WIDTH / widestPage : Number.POSITIVE_INFINITY;
+      viewer = new DocxScrollViewer(host, {
+        document,
+        gap: 26,
+        overscan: document.pageCount,
+        enableTextSelection: true,
+        pageShadow: 'var(--document-shadow)',
+        background: 'transparent',
+      });
+      enforceWidthCap();
+      observeWidth();
+      status.remove();
+    }).catch((error: unknown) => {
+      if (!destroyed) status.textContent = message(error);
+    });
+  }
+
+  return {
+    activate: () => relayout(),
+    destroy: () => {
+      if (destroyed) return;
+      destroyed = true;
+      resizeObserver?.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
+      viewer?.destroy();
+      engine?.destroy();
+      root.replaceChildren();
+    },
+  };
 }
 
 export function mountPptx(root: HTMLElement, url: string): LiveController {
-  root.innerHTML = '';
-  const sc = scroller();
-  const status = statusLine('Parsing…');
-  sc.appendChild(status);
-  root.append(sc);
-  let destroyed = false;
-
-  PptxPresentation.load(url, { useGoogleFonts: true })
-    .then(async (deck) => {
-      if (destroyed) return;
-      status.remove();
-      for (let i = 0; i < deck.slideCount; i++) {
-        if (destroyed) return;
-        const canvas = document.createElement('canvas');
-        canvas.className = 'lv-page';
-        sc.appendChild(canvas);
-        await deck.renderSlide(canvas, i, { width: 1280, dpr: DPR() });
-      }
-    })
-    .catch((e: unknown) => { status.textContent = msg(e); });
-
-  return { destroy: () => { destroyed = true; root.innerHTML = ''; } };
+  return mountPaginated(root, 'pptx', url);
 }
 
 export function mountDocx(root: HTMLElement, url: string): LiveController {
-  root.innerHTML = '';
-  const sc = scroller();
-  const status = statusLine('Parsing…');
-  sc.appendChild(status);
-  root.append(sc);
-  let destroyed = false;
-
-  DocxDocument.load(url, { useGoogleFonts: true })
-    .then(async (doc) => {
-      if (destroyed) return;
-      status.remove();
-      for (let i = 0; i < doc.pageCount; i++) {
-        if (destroyed) return;
-        const canvas = document.createElement('canvas');
-        canvas.className = 'lv-page';
-        sc.appendChild(canvas);
-        await doc.renderPage(canvas, i, { width: 1000, dpr: DPR() });
-      }
-    })
-    .catch((e: unknown) => { status.textContent = msg(e); });
-
-  return { destroy: () => { destroyed = true; root.innerHTML = ''; } };
+  return mountPaginated(root, 'docx', url);
 }
 
 export function mountXlsx(root: HTMLElement, url: string): LiveController {
@@ -82,13 +147,18 @@ export function mountXlsx(root: HTMLElement, url: string): LiveController {
   const viewer = new XlsxViewer(host, {
     useGoogleFonts: true,
     showZoomSlider: true,
-    onError: (err: Error) => { host.setAttribute('data-error', err.message); },
+    onError: (error: Error) => host.setAttribute('data-error', error.message),
   });
-  viewer.load(url).catch(() => { /* surfaced via onError */ });
+  void viewer.load(url).catch(() => { /* surfaced through onError */ });
 
-  return { destroy: () => { root.innerHTML = ''; } };
+  return {
+    destroy: () => {
+      viewer.destroy();
+      root.replaceChildren();
+    },
+  };
 }
 
-function msg(e: unknown): string {
-  return `Failed: ${e instanceof Error ? e.message : String(e)}`;
+function message(error: unknown): string {
+  return `Failed: ${error instanceof Error ? error.message : String(error)}`;
 }

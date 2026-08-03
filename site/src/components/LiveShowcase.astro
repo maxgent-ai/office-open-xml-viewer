@@ -24,7 +24,16 @@ const formats = [
       <span class="panel-file" data-file>sample-1.docx</span>
       <span class="panel-badge">live · WASM</span>
     </div>
-    <div class="panel-body" data-mount></div>
+    <div class="panel-body" data-mount>
+      {formats.map((format, index) => (
+        <div
+          class="panel-pane"
+          data-format-pane={format.id}
+          data-active={index === 0 ? 'true' : 'false'}
+          aria-hidden={index === 0 ? 'false' : 'true'}
+        ></div>
+      ))}
+    </div>
   </div>
 </div>
 
@@ -38,17 +47,51 @@ const formats = [
     const mount = root.querySelector<HTMLElement>('[data-mount]')!;
     const fileLabel = root.querySelector<HTMLElement>('[data-file]')!;
     const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-tab]'));
-    let current: LiveController | null = null;
+    type CachedViewer = { pane: HTMLDivElement; controller: LiveController };
+    const cache = new Map<string, CachedViewer>();
     let loaded: string | null = null;
+
+    function ensureViewer(id: string): CachedViewer {
+      let entry = cache.get(id);
+      if (!entry) {
+        const pane = mount.querySelector<HTMLDivElement>(`[data-format-pane="${id}"]`);
+        if (!pane) throw new Error(`Missing showcase pane for ${id}`);
+        const url = sample(`sample-1.${id}`);
+        const controller = id === 'pptx'
+          ? mountPptx(pane, url)
+          : id === 'docx'
+            ? mountDocx(pane, url)
+            : mountXlsx(pane, url);
+        entry = { pane, controller };
+        cache.set(id, entry);
+      }
+      return entry;
+    }
 
     function show(id: string): void {
       if (loaded === id) return;
       loaded = id;
       root.dataset.format = id;
-      current?.destroy();
-      if (id === 'pptx') { fileLabel.textContent = 'sample-1.pptx'; current = mountPptx(mount, sample('sample-1.pptx')); }
-      else if (id === 'docx') { fileLabel.textContent = 'sample-1.docx'; current = mountDocx(mount, sample('sample-1.docx')); }
-      else { fileLabel.textContent = 'sample-1.xlsx'; current = mountXlsx(mount, sample('sample-1.xlsx')); }
+      fileLabel.textContent = `sample-1.${id}`;
+      const active = ensureViewer(id);
+      for (const [format, entry] of cache) {
+        const selected = format === id;
+        entry.pane.dataset.active = String(selected);
+        entry.pane.setAttribute('aria-hidden', String(!selected));
+      }
+      active.controller.activate?.();
+    }
+
+    function warmFormats(activeId: string): void {
+      // The showcase has exactly three small, bundled files. Start the two
+      // inactive viewers after the active pane has been scheduled for paint so
+      // even the first tab switch reuses a parsed, rendered viewer.
+      setTimeout(() => {
+        for (const tab of tabs) {
+          const id = tab.dataset.tab;
+          if (id && id !== activeId) ensureViewer(id);
+        }
+      }, 0);
     }
 
     tabs.forEach((tab) => {
@@ -64,14 +107,20 @@ const formats = [
     const nearViewport = () => root.getBoundingClientRect().top < window.innerHeight + 600;
     if (nearViewport()) {
       show(first);
+      warmFormats(first);
     } else {
       const io = new IntersectionObserver((entries) => {
         for (const e of entries) {
-          if (e.isIntersecting) { show(first); io.disconnect(); }
+          if (e.isIntersecting) { show(first); warmFormats(first); io.disconnect(); }
         }
       }, { rootMargin: '600px' });
       io.observe(root);
     }
+
+    window.addEventListener('pagehide', () => {
+      for (const entry of cache.values()) entry.controller.destroy();
+      cache.clear();
+    }, { once: true });
   });
 </script>
 
@@ -106,6 +155,8 @@ const formats = [
     background: var(--border);
   }
   .panel {
+    min-width: 0;
+    max-width: 100%;
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--panel);
@@ -130,10 +181,48 @@ const formats = [
     border-radius: 0;
     padding: 3px 10px;
   }
-  .panel-body { padding: 0; }
-  .panel-body :global(.lv-scroll) { border-radius: 0; }
-  .showcase[data-format='xlsx'] .panel-body :global(.lv-xlsx) { border-radius: 0; }
+  .panel-body {
+    position: relative;
+    width: 100%;
+    height: min(74vh, 680px);
+    min-width: 0;
+    max-width: 100%;
+    min-height: 420px;
+    padding: 0;
+    overflow: hidden;
+  }
+  .panel-pane {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .panel-pane[data-active='true'] { visibility: visible; pointer-events: auto; }
+  .panel-pane :global(.lv-scroll-viewer),
+  .panel-pane :global(.lv-xlsx) { width: 100%; height: 100%; border-radius: 0; }
+  .panel-pane[data-format-pane='docx'] :global(.lv-scroll-viewer),
+  .panel-pane[data-format-pane='pptx'] :global(.lv-scroll-viewer) {
+    max-width: none;
+  }
+  .panel-pane :global(.lv-status) {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    pointer-events: none;
+  }
+  .panel-pane[data-format-pane='docx'] :global(.lv-scroll-viewer canvas),
+  .panel-pane[data-format-pane='pptx'] :global(.lv-scroll-viewer canvas) {
+    border-radius: 4px;
+  }
   @media (max-width: 620px) {
+    .panel-body { height: min(68vh, 520px); min-height: 340px; }
     .panel-file { display: none; }
     .panel-head { gap: 8px; }
     .panel-badge { margin-left: auto; }

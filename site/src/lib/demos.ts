@@ -70,7 +70,14 @@ export function mountDemoInto(el: HTMLElement, kind: DemoKind, format: Format, u
 function status(el: HTMLElement, text: string): HTMLDivElement {
   const d = document.createElement('div');
   d.className = 'demo-status';
-  d.textContent = text;
+  d.setAttribute('role', 'status');
+  d.setAttribute('aria-live', 'polite');
+  const circle = document.createElement('span');
+  circle.className = 'demo-progress-circle';
+  circle.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.textContent = text;
+  d.append(circle, label);
   el.appendChild(d);
   return d;
 }
@@ -90,10 +97,14 @@ function mountDemo(el: HTMLElement, format: Format, url: string): void {
   stage.className = 'demo-stage';
   const canvas = document.createElement('canvas');
   canvas.className = 'demo-page';
+  canvas.hidden = true;
   stage.appendChild(canvas);
+  const st = status(stage, 'Parsing document…');
   el.append(bar, stage);
 
   const v = makeViewer(format, canvas, 960);
+  const viewerWrapper = canvas.parentElement as HTMLDivElement;
+  viewerWrapper.hidden = true;
   const sync = () => {
     const n = v.count();
     info.textContent = n ? `${UNIT(format)} ${v.index() + 1} / ${n}` : 'Loading…';
@@ -102,7 +113,15 @@ function mountDemo(el: HTMLElement, format: Format, url: string): void {
   };
   prev.addEventListener('click', () => void v.prev().then(sync));
   next.addEventListener('click', () => void v.next().then(sync));
-  v.load(url).then(sync).catch((e) => { info.textContent = err(e); });
+  v.load(url).then(() => {
+    canvas.hidden = false;
+    viewerWrapper.hidden = false;
+    st.remove();
+    sync();
+  }).catch((e) => {
+    st.textContent = err(e);
+    info.textContent = 'Failed';
+  });
 }
 
 // ScrollView — every page stacked on a backdrop
@@ -127,7 +146,7 @@ function mountThumbnails(el: HTMLElement, format: Format, url: string): void {
   const grid = document.createElement('div');
   grid.className = 'demo-grid';
   el.appendChild(grid);
-  const st = status(el, 'Rendering thumbnails…');
+  const st = status(grid, 'Rendering thumbnails…');
   loadDoc(format, url).then(async (doc) => {
     for (let i = 0; i < doc.count; i++) {
       const cell = document.createElement('div');
@@ -155,14 +174,19 @@ function mountMasterDetail(el: HTMLElement, format: Format, url: string): void {
   detail.className = 'demo-detail';
   const detailCanvas = document.createElement('canvas');
   detailCanvas.className = 'demo-page';
+  detailCanvas.hidden = true;
   detail.appendChild(detailCanvas);
+  const st = status(detail, 'Parsing document…');
   layout.append(rail, detail);
   el.appendChild(layout);
-  const st = status(el, 'Loading…');
 
   const viewer = makeViewer(format, detailCanvas, 960);
+  const detailViewerWrapper = detailCanvas.parentElement as HTMLDivElement;
+  detailViewerWrapper.hidden = true;
   Promise.all([loadDoc(format, url), viewer.load(url)])
     .then(async ([doc]) => {
+      detailCanvas.hidden = false;
+      detailViewerWrapper.hidden = false;
       st.remove();
       const cells: HTMLDivElement[] = [];
       const select = async (i: number) => {

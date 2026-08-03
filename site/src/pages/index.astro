@@ -168,8 +168,11 @@ const base = import.meta.env.BASE_URL;
   }
   @media (max-width: 680px) {
     .hero-overline span:first-child { grid-column: 1 / 8; }.hero-overline span:last-child { grid-column: 8 / 13; text-align: right; }
-    .hero-grid { min-height: auto; padding-bottom: 46px; }.hero-copy { grid-column: 1 / 13; }.hero-art { grid-column: 2 / 13; min-height: 390px; margin-top: 20px; }
+    .hero-grid { min-height: auto; padding-bottom: 46px; }.hero-copy { grid-column: 1 / 13; }.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; }
+    .hero-icon { width: min(62%, 260px); }
     .hero h1 { font-size: clamp(42px, 12vw, 60px); }.hero-lead, .hero-cta { margin-left: 0; padding-left: 0; }
     .format-rail a { grid-column: span 6; border-bottom: 1px solid var(--hero-line); }.format-rail a:nth-child(2) { border-right: 0; }
+    .format-rail a + a:nth-child(odd) { padding-left: 0; }
+    .format-rail a:nth-child(even) { padding-left: 18px; }
   }
 </style>

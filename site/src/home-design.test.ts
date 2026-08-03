@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const showcase = readFileSync(new URL('./components/LiveShowcase.astro', import.meta.url), 'utf8');
+const live = readFileSync(new URL('./lib/live.ts', import.meta.url), 'utf8');
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const home = readFileSync(new URL('./pages/index.astro', import.meta.url), 'utf8');
 
@@ -57,5 +58,40 @@ describe('official-site home design', () => {
 
   it('lets the live showcase blend into the dark page background', () => {
     expect(home).toContain('.showcase-section { background: var(--showcase-bg); }');
+  });
+
+  it('keeps one lazily-created viewer per format instead of reparsing on every tab switch', () => {
+    expect(showcase).toContain('data-format-pane={format.id}');
+    expect(showcase).toContain('const cache = new Map<string, CachedViewer>();');
+    expect(showcase).toContain('cache.get(id)');
+    expect(showcase).toContain('cache.set(id, entry)');
+    expect(showcase).toContain('function warmFormats(activeId: string): void');
+    expect(showcase).not.toContain('current?.destroy()');
+    expect(showcase).toContain('for (const entry of cache.values()) entry.controller.destroy();');
+  });
+
+  it('uses selectable scroll viewers for the DOCX and PPTX samples', () => {
+    expect(live).toContain('new DocxScrollViewer');
+    expect(live).toContain('new PptxScrollViewer');
+    expect(live.match(/enableTextSelection:\s*true/g)).toHaveLength(2);
+  });
+
+  it('centres a smaller hero icon and aligns the second-row format links on mobile', () => {
+    expect(home).toContain('.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; }');
+    expect(home).toContain('.hero-icon { width: min(62%, 260px); }');
+    expect(home).toContain('.format-rail a + a:nth-child(odd) { padding-left: 0; }');
+    expect(home).toContain('.format-rail a:nth-child(even) { padding-left: 18px; }');
+  });
+
+  it('keeps cached mobile previews constrained to the showcase width', () => {
+    expect(showcase).toContain('min-width: 0;');
+    expect(showcase).toMatch(/@media \(max-width: 620px\)[\s\S]*?\.panel-body \{ height: min\(68vh, 520px\); min-height: 340px; \}/);
+  });
+
+  it('caps paginated samples on wide screens while leaving XLSX full width', () => {
+    expect(live).toContain('const MAX_SAMPLE_WIDTH = 880;');
+    expect(live).toContain('MAX_SAMPLE_WIDTH / (presentation.slideWidth / EMU_PER_PX)');
+    expect(live).toContain('document.pageSize(index).widthPt * PT_TO_PX');
+    expect(showcase).toContain('max-width: none;');
   });
 });

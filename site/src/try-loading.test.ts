@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const source = readFileSync(new URL('./pages/try.astro', import.meta.url), 'utf8');
+const renderer = readFileSync(new URL('./lib/try.ts', import.meta.url), 'utf8');
 
 describe('Try Yours parsing progress', () => {
   it('uses concise, functional copy for the file workflow', () => {
@@ -28,5 +29,15 @@ describe('Try Yours parsing progress', () => {
 
   it('hides the progress UI on both the current render success and failure paths', () => {
     expect(source.match(/stageProgress\.hidden = true;/g)).toHaveLength(2);
+  });
+
+  it('keeps the preview frame for XLSX as well as DOCX and PPTX', () => {
+    expect(source).not.toContain(".try-preview[data-format='xlsx'] { border: 0; }");
+  });
+
+  it('prewarms parser engines without downloading fonts for bundled samples', () => {
+    const prewarm = renderer.slice(renderer.indexOf('export function prewarmEngines'));
+    expect(prewarm).not.toContain('useGoogleFonts: true');
+    expect(prewarm.match(/useGoogleFonts:\s*false/g)).toHaveLength(3);
   });
 });

@@ -8,7 +8,7 @@ import type { ElementRef, ElementTransform } from '../src/domain/mutation';
 import { MUTATION_TYPES } from '../src/domain/mutation-types';
 import { EditorStoreError } from '../src/store/errors';
 import { PptxEditorStore } from '../src/store/editor-store';
-import { PENDING_COMMAND_STATUSES } from '../src/store/pending-command';
+import { EDITOR_SYNC_STATUSES } from '../src/store/sync-state';
 import { EDITOR_STORE_CHANGE_REASONS } from '../src/store/types';
 import { deck, shape } from './fixtures/presentation';
 
@@ -26,9 +26,7 @@ describe('PptxEditorStore', () => {
 
     expect(textOf(snapshot.basePresentation)).toBe('before');
     expect(textOf(snapshot.presentation)).toBe('after');
-    expect(snapshot.pendingCommands).toEqual([
-      expect.objectContaining({ status: PENDING_COMMAND_STATUSES.PENDING }),
-    ]);
+    expect(snapshot.pendingCommands).toEqual([expect.objectContaining({ id: 'text-1' })]);
     expect(change).toMatchObject({
       reason: EDITOR_STORE_CHANGE_REASONS.COMMAND_DISPATCHED,
       commandId: 'text-1',
@@ -44,16 +42,19 @@ describe('PptxEditorStore', () => {
     const ref = createElementRef(base.slides[0], target, 0);
     const store = new PptxEditorStore(base);
     store.dispatch(updateTextCommand('text-1', ref, 'after'));
+    store.dispatch(updateTransformCommand('transform-1', ref, { x: 100 }));
+    const optimisticPresentation = store.getSnapshot().presentation;
 
     const change = store.confirm('text-1');
 
     expect(textOf(change.snapshot.basePresentation)).toBe('after');
     expect(textOf(change.snapshot.presentation)).toBe('after');
-    expect(change.snapshot.pendingCommands).toEqual([]);
+    expect(change.snapshot.presentation).toBe(optimisticPresentation);
+    expect(change.snapshot.pendingCommands.map(({ id }) => id)).toEqual(['transform-1']);
     expect(change.changedElements).toEqual([]);
   });
 
-  it('supports out-of-order confirmations and drains the contiguous confirmed prefix', () => {
+  it('rejects out-of-order confirmations and rejections', () => {
     const target = shape('7', 'before');
     const base = deck([target]);
     const ref = createElementRef(base.slides[0], target, 0);
@@ -61,20 +62,20 @@ describe('PptxEditorStore', () => {
     store.dispatch(updateTextCommand('text-1', ref, 'after'));
     store.dispatch(updateTransformCommand('transform-1', ref, { x: 100 }));
 
-    store.confirm('transform-1');
-    expect(store.getSnapshot().pendingCommands.map(({ status }) => status)).toEqual([
-      PENDING_COMMAND_STATUSES.PENDING,
-      PENDING_COMMAND_STATUSES.CONFIRMED,
-    ]);
+    expect(() => store.confirm('transform-1')).toThrowError(
+      expect.objectContaining<Partial<EditorStoreError>>({ code: 'command.outOfOrder' }),
+    );
+    expect(() => store.reject('transform-1')).toThrowError(
+      expect.objectContaining<Partial<EditorStoreError>>({ code: 'command.outOfOrder' }),
+    );
     expect(textOf(store.getSnapshot().basePresentation)).toBe('before');
-
-    store.confirm('text-1');
-    expect(store.getSnapshot().pendingCommands).toEqual([]);
-    expect(textOf(store.getSnapshot().basePresentation)).toBe('after');
-    expect(shapeOf(store.getSnapshot().basePresentation).x).toBe(100);
+    expect(store.getSnapshot().pendingCommands.map(({ id }) => id)).toEqual([
+      'text-1',
+      'transform-1',
+    ]);
   });
 
-  it('rejects one command and replays the remaining optimistic commands', () => {
+  it('rejects the head command and invalidates the optimistic tail', () => {
     const target = shape('7', 'before');
     const base = deck([target]);
     const ref = createElementRef(base.slides[0], target, 0);
@@ -86,26 +87,47 @@ describe('PptxEditorStore', () => {
 
     expect(shapeOf(change.snapshot.basePresentation).x).toBe(0);
     expect(shapeOf(change.snapshot.presentation).x).toBe(0);
-    expect(textOf(change.snapshot.presentation)).toBe('after');
-    expect(change.snapshot.pendingCommands.map(({ command }) => command.id)).toEqual(['text-1']);
+    expect(textOf(change.snapshot.presentation)).toBe('before');
+    expect(change.snapshot.pendingCommands).toEqual([]);
+    expect(change.invalidatedCommandIds).toEqual(['text-1']);
     expect(change.changedElements).toEqual([ref]);
   });
 
-  it('drains an out-of-order confirmation when the preceding command is rejected', () => {
+  it('replaces untrusted state with an authoritative presentation', () => {
     const target = shape('7', 'before');
     const base = deck([target]);
     const ref = createElementRef(base.slides[0], target, 0);
     const store = new PptxEditorStore(base);
-    store.dispatch(updateTextCommand('text-1', ref, 'after'));
-    store.dispatch(updateTransformCommand('transform-1', ref, { x: 100 }));
-    store.confirm('transform-1');
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.dispatch(updateTextCommand('text-1', ref, 'optimistic'));
+    const failure = new Error('outcome unknown');
+    const haltedChange = store.halt('text-1', failure);
+    const authoritative = deck([shape('7', 'server')]);
 
-    store.reject('text-1');
+    expect(haltedChange.reason).toBe(EDITOR_STORE_CHANGE_REASONS.SUBMISSION_HALTED);
+    expect(haltedChange.snapshot.syncState).toEqual({
+      status: EDITOR_SYNC_STATUSES.HALTED,
+      blockedByCommandId: 'text-1',
+      cause: failure,
+    });
+    expect(() => store.dispatch(updateTextCommand('text-2', ref, 'blocked'))).toThrowError(
+      expect.objectContaining<Partial<EditorStoreError>>({ code: 'store.halted' }),
+    );
 
-    expect(store.getSnapshot().pendingCommands).toEqual([]);
-    expect(textOf(store.getSnapshot().basePresentation)).toBe('before');
-    expect(shapeOf(store.getSnapshot().basePresentation).x).toBe(100);
-    expect(store.getSnapshot().presentation).toBe(store.getSnapshot().basePresentation);
+    const change = store.resync(authoritative);
+
+    expect(change.reason).toBe(EDITOR_STORE_CHANGE_REASONS.PRESENTATION_RESYNCED);
+    expect(change.snapshot.basePresentation).toBe(authoritative);
+    expect(change.snapshot.presentation).toBe(authoritative);
+    expect(change.snapshot.pendingCommands).toEqual([]);
+    expect(change.snapshot.syncState).toEqual({ status: EDITOR_SYNC_STATUSES.READY });
+    expect(change.changedSlideIds).toEqual([ref.slideId]);
+    expect(listener.mock.calls.map(([published]) => published.reason)).toEqual([
+      EDITOR_STORE_CHANGE_REASONS.COMMAND_DISPATCHED,
+      EDITOR_STORE_CHANGE_REASONS.SUBMISSION_HALTED,
+      EDITOR_STORE_CHANGE_REASONS.PRESENTATION_RESYNCED,
+    ]);
   });
 
   it('rejects duplicate and unknown command ids and supports unsubscribe', () => {

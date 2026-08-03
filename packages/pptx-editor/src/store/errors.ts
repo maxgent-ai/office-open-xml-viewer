@@ -1,8 +1,9 @@
 export type EditorStoreErrorCode =
   | 'command.duplicate'
   | 'command.notFound'
-  | 'command.alreadyConfirmed'
-  | 'command.rebaseFailed';
+  | 'command.outOfOrder'
+  | 'command.rebaseFailed'
+  | 'store.halted';
 
 export class EditorStoreError extends Error {
   readonly name = 'EditorStoreError';

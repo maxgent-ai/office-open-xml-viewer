@@ -1,17 +1,15 @@
 import type { Presentation } from '@silurus/ooxml-pptx';
 
+import { getSlideMutationId } from '../adapters/pptx-json-adapter';
 import type { Command } from '../domain/command';
 import { applyCommand } from '../engine/mutation-engine';
 import { EditorStoreError } from './errors';
+import { collectCommandInvalidations } from './editor-store-utils';
 import {
-  collectCommandInvalidations,
-  drainConfirmedCommands,
-  replayPendingCommands,
-} from './editor-store-utils';
-import {
-  PENDING_COMMAND_STATUSES,
-  type PendingCommand,
-} from './pending-command';
+  EDITOR_SYNC_STATUSES,
+  READY_EDITOR_SYNC_STATE,
+  type EditorSyncState,
+} from './sync-state';
 import {
   EDITOR_STORE_CHANGE_REASONS,
   type EditorStoreChange,
@@ -23,7 +21,8 @@ export class PptxEditorStore {
   readonly #listeners = new Set<EditorStoreListener>();
   #basePresentation: Presentation;
   #presentation: Presentation;
-  #pendingCommands: readonly PendingCommand[] = [];
+  #pendingCommands: readonly Command[] = [];
+  #syncState: EditorSyncState = READY_EDITOR_SYNC_STATE;
   #snapshot: EditorStoreSnapshot;
 
   constructor(initialPresentation: Presentation) {
@@ -44,6 +43,7 @@ export class PptxEditorStore {
   }
 
   dispatch(command: Command): EditorStoreChange {
+    this.#assertReady();
     if (this.#findCommandIndex(command.id) >= 0) {
       throw new EditorStoreError(
         'command.duplicate',
@@ -55,7 +55,7 @@ export class PptxEditorStore {
     this.#presentation = result.presentation;
     this.#pendingCommands = [
       ...this.#pendingCommands,
-      Object.freeze({ command, status: PENDING_COMMAND_STATUSES.PENDING }),
+      command,
     ];
     this.#snapshot = this.#createSnapshot();
 
@@ -68,27 +68,16 @@ export class PptxEditorStore {
   }
 
   confirm(commandId: string): EditorStoreChange {
-    const commandIndex = this.#requireCommandIndex(commandId);
-    if (this.#pendingCommands[commandIndex].status === PENDING_COMMAND_STATUSES.CONFIRMED) {
-      throw new EditorStoreError(
-        'command.alreadyConfirmed',
-        `Command ${commandId} is already confirmed`,
-      );
-    }
-
-    const confirmedCommands = this.#pendingCommands.slice();
-    confirmedCommands[commandIndex] = Object.freeze({
-      command: confirmedCommands[commandIndex].command,
-      status: PENDING_COMMAND_STATUSES.CONFIRMED,
-    });
+    this.#assertReady();
+    const confirmedCommand = this.#requireHeadCommand(commandId);
+    const nextPendingCommands = this.#pendingCommands.slice(1);
 
     try {
-      const drained = drainConfirmedCommands(this.#basePresentation, confirmedCommands);
-      const nextPresentation = replayPendingCommands(
-        drained.basePresentation,
-        drained.pendingCommands,
-      );
-      this.#setState(drained.basePresentation, nextPresentation, drained.pendingCommands);
+      const nextBasePresentation = applyCommand(
+        this.#basePresentation,
+        confirmedCommand,
+      ).presentation;
+      this.#setState(nextBasePresentation, this.#presentation, nextPendingCommands);
     } catch (cause) {
       throw this.#rebaseError('confirm', commandId, cause);
     }
@@ -102,46 +91,61 @@ export class PptxEditorStore {
   }
 
   reject(commandId: string): EditorStoreChange {
-    const commandIndex = this.#requireCommandIndex(commandId);
-    const rejectedCommand = this.#pendingCommands[commandIndex];
-    if (rejectedCommand.status === PENDING_COMMAND_STATUSES.CONFIRMED) {
-      throw new EditorStoreError(
-        'command.alreadyConfirmed',
-        `Confirmed command ${commandId} cannot be rejected`,
-      );
-    }
-
-    const commandsAfterRejection = this.#pendingCommands.filter((_, index) => index !== commandIndex);
-    let nextBasePresentation: Presentation;
-    let nextPendingCommands: readonly PendingCommand[];
-    let nextPresentation: Presentation;
-    try {
-      const drained = drainConfirmedCommands(this.#basePresentation, commandsAfterRejection);
-      nextBasePresentation = drained.basePresentation;
-      nextPendingCommands = drained.pendingCommands;
-      nextPresentation = replayPendingCommands(nextBasePresentation, nextPendingCommands);
-    } catch (cause) {
-      throw this.#rebaseError('reject', commandId, cause);
-    }
-
-    const invalidations = collectCommandInvalidations([
-      rejectedCommand.command,
-      ...commandsAfterRejection.map(({ command }) => command),
-    ]);
-    this.#setState(nextBasePresentation, nextPresentation, nextPendingCommands);
+    this.#assertReady();
+    this.#requireHeadCommand(commandId);
+    const rejectedCommands = this.#pendingCommands;
+    const invalidations = collectCommandInvalidations(rejectedCommands);
+    const invalidatedCommandIds = rejectedCommands.slice(1).map((command) => command.id);
+    this.#setState(this.#basePresentation, this.#basePresentation, []);
 
     return this.#publish({
       reason: EDITOR_STORE_CHANGE_REASONS.COMMAND_REJECTED,
       commandId,
+      invalidatedCommandIds,
       ...invalidations,
     });
   }
 
-  #findCommandIndex(commandId: string): number {
-    return this.#pendingCommands.findIndex(({ command }) => command.id === commandId);
+  halt(blockedByCommandId: string, cause: unknown): EditorStoreChange {
+    this.#syncState = Object.freeze({
+      status: EDITOR_SYNC_STATUSES.HALTED,
+      blockedByCommandId,
+      cause,
+    });
+    this.#snapshot = this.#createSnapshot();
+
+    return this.#publish({
+      reason: EDITOR_STORE_CHANGE_REASONS.SUBMISSION_HALTED,
+      commandId: blockedByCommandId,
+      changedSlideIds: [],
+      changedElements: [],
+    });
   }
 
-  #requireCommandIndex(commandId: string): number {
+  resync(authoritativePresentation: Presentation): EditorStoreChange {
+    const changedSlideIds = new Set([
+      ...this.#presentation.slides.map(getSlideMutationId),
+      ...authoritativePresentation.slides.map(getSlideMutationId),
+    ]);
+    this.#setState(
+      authoritativePresentation,
+      authoritativePresentation,
+      [],
+      READY_EDITOR_SYNC_STATE,
+    );
+
+    return this.#publish({
+      reason: EDITOR_STORE_CHANGE_REASONS.PRESENTATION_RESYNCED,
+      changedSlideIds: [...changedSlideIds],
+      changedElements: [],
+    });
+  }
+
+  #findCommandIndex(commandId: string): number {
+    return this.#pendingCommands.findIndex((command) => command.id === commandId);
+  }
+
+  #requireHeadCommand(commandId: string): Command {
     const index = this.#findCommandIndex(commandId);
     if (index < 0) {
       throw new EditorStoreError(
@@ -149,17 +153,34 @@ export class PptxEditorStore {
         `Command ${commandId} is not pending`,
       );
     }
-    return index;
+    if (index !== 0) {
+      throw new EditorStoreError(
+        'command.outOfOrder',
+        `Command ${commandId} cannot settle before ${this.#pendingCommands[0].id}`,
+      );
+    }
+    return this.#pendingCommands[0];
+  }
+
+  #assertReady(): void {
+    if (this.#syncState.status === EDITOR_SYNC_STATUSES.HALTED) {
+      throw new EditorStoreError(
+        'store.halted',
+        `Cannot modify a halted editor store; command ${this.#syncState.blockedByCommandId} requires resync`,
+      );
+    }
   }
 
   #setState(
     basePresentation: Presentation,
     presentation: Presentation,
-    pendingCommands: readonly PendingCommand[],
+    pendingCommands: readonly Command[],
+    syncState: EditorSyncState = this.#syncState,
   ): void {
     this.#basePresentation = basePresentation;
     this.#presentation = presentation;
     this.#pendingCommands = pendingCommands;
+    this.#syncState = syncState;
     this.#snapshot = this.#createSnapshot();
   }
 
@@ -168,6 +189,7 @@ export class PptxEditorStore {
       basePresentation: this.#basePresentation,
       presentation: this.#presentation,
       pendingCommands: Object.freeze([...this.#pendingCommands]),
+      syncState: this.#syncState,
     });
   }
 
@@ -184,7 +206,7 @@ export class PptxEditorStore {
   ): EditorStoreError {
     return new EditorStoreError(
       'command.rebaseFailed',
-      `Cannot ${operation} command ${commandId} because optimistic commands could not be replayed`,
+      `Cannot ${operation} command ${commandId} because editor state could not be reconciled`,
       { cause },
     );
   }

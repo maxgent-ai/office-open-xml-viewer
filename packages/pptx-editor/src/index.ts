@@ -35,13 +35,6 @@ export type {
 export { PptxEditorStore } from './store/editor-store';
 export { EditorStoreError } from './store/errors';
 export type { EditorStoreErrorCode } from './store/errors';
-export {
-  PENDING_COMMAND_STATUSES,
-} from './store/pending-command';
-export type {
-  PendingCommand,
-  PendingCommandStatus,
-} from './store/pending-command';
 export { EDITOR_STORE_CHANGE_REASONS } from './store/types';
 export type {
   EditorStoreChange,
@@ -49,6 +42,15 @@ export type {
   EditorStoreListener,
   EditorStoreSnapshot,
 } from './store/types';
+export {
+  EDITOR_SYNC_STATUSES,
+  READY_EDITOR_SYNC_STATE,
+} from './store/sync-state';
+export type {
+  EditorSyncState,
+  HaltedEditorSyncState,
+  ReadyEditorSyncState,
+} from './store/sync-state';
 
 export {
   OFFICECLI_BATCH_SCHEMA_VERSION,
@@ -68,3 +70,27 @@ export type {
   OfficeCliRemoveCommand,
   OfficeCliSetCommand,
 } from './transport/officecli/types';
+
+export {
+  COMMAND_SUBMISSION_STATUSES,
+  OFFICECLI_BATCH_SEND_STATUSES,
+} from './submission/constants';
+export { CommandSubmitterError } from './submission/errors';
+export type {
+  CommandSubmitterErrorCode,
+} from './submission/errors';
+export { SerialOfficeCliSubmitter } from './submission/serial-officecli-submitter';
+export type {
+  CommandSubmission,
+  CommandSubmissionResult,
+  CommandSubmissionStatus,
+  ConfirmedOfficeCliBatchSendResult,
+  ConfirmedCommandSubmissionResult,
+  HaltedCommandSubmissionResult,
+  InvalidatedCommandSubmissionResult,
+  OfficeCliBatchSendResult,
+  OfficeCliBatchSender,
+  RejectedOfficeCliBatchSendResult,
+  RejectedCommandSubmissionResult,
+  UnknownOfficeCliBatchSendResult,
+} from './submission/types';

@@ -1445,11 +1445,6 @@ fn slide_is_hidden(root: roxmltree::Node) -> bool {
     matches!(root.attribute("show"), Some("0") | Some("false"))
 }
 
-// Threads the full master+layout inheritance context (per-type font sizes,
-// bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
-// maps) plus zip/theme into one slide parse; this is the inheritance chain
-// ECMA-376 requires, not an arbitrary parameter bag.
-#[allow(clippy::too_many_arguments)]
 fn is_slide_shape_tree_entry(node_name: &str) -> bool {
     matches!(
         node_name,
@@ -1457,6 +1452,11 @@ fn is_slide_shape_tree_entry(node_name: &str) -> bool {
     )
 }
 
+// Threads the full master+layout inheritance context (per-type font sizes,
+// bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
+// maps) plus zip/theme into one slide parse; this is the inheritance chain
+// ECMA-376 requires, not an arbitrary parameter bag.
+#[allow(clippy::too_many_arguments)]
 fn parse_slide(
     xml: &str,
     slide_dir: &str,

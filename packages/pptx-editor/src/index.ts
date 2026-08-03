@@ -49,3 +49,22 @@ export type {
   EditorStoreListener,
   EditorStoreSnapshot,
 } from './store/types';
+
+export {
+  OFFICECLI_BATCH_SCHEMA_VERSION,
+  OFFICECLI_COMMAND_TYPES,
+  OFFICECLI_VERSION,
+} from './transport/officecli/constants';
+export { OfficeCliTranslatorError } from './transport/officecli/errors';
+export type {
+  OfficeCliTranslatorErrorCode,
+} from './transport/officecli/errors';
+export { toOfficeCliBatch } from './transport/officecli/officecli-translator';
+export type {
+  OfficeCliBatch,
+  OfficeCliCommand,
+  OfficeCliCommandType,
+  OfficeCliProps,
+  OfficeCliRemoveCommand,
+  OfficeCliSetCommand,
+} from './transport/officecli/types';

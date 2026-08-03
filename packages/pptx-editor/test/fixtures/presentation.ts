@@ -2,11 +2,12 @@ import type {
   Paragraph,
   Presentation,
   ShapeElement,
+  SlideElement,
   TextBody,
   TextRunData,
 } from '@silurus/ooxml-pptx';
 
-export function deck(elements: ShapeElement[]): Presentation {
+export function deck(elements: SlideElement[]): Presentation {
   return {
     slideWidth: 10,
     slideHeight: 10,

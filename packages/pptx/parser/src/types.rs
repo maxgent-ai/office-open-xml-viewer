@@ -63,8 +63,8 @@ pub(crate) struct Slide {
     pub(crate) part_name: Option<String>,
     pub(crate) background: Option<Fill>,
     pub(crate) elements: Vec<SlideElement>,
-    /// Provenance for each entry in `elements`, in the same order. The editor
-    /// uses this to distinguish inherited decorations from direct slide-tree
+    /// Provenance for each entry in `elements`, in the same order. Consumers
+    /// use this to distinguish inherited decorations from direct slide-tree
     /// elements without changing the renderer-facing element union.
     pub(crate) element_sources: Vec<SlideElementSource>,
     /// `ppt/notesSlides/notesSlideN.xml` plain text — the speaker-notes pane

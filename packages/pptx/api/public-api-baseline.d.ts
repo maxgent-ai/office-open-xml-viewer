@@ -958,12 +958,18 @@ export interface Slide {
     partName?: string;
     background: Fill | null;
     elements: SlideElement[];
+    elementSources?: SlideElementSource[];
     notes?: string;
     comments?: PptxComment[];
     hidden?: boolean;
     parseError?: string;
 }
 export type SlideElement = ShapeElement | PictureElement | TableElement | ChartElement | MediaElement;
+export type SlideElementOrigin = 'master' | 'layout' | 'slide';
+export interface SlideElementSource {
+    origin: SlideElementOrigin;
+    slideTreeIndex?: number;
+}
 type SlideRenderOptions = RenderOptions & {
     math?: MathRenderer;
     dim?: DimOptions;

@@ -1,4 +1,4 @@
-import type { Presentation, TextBody } from '@silurus/ooxml-pptx';
+import type { Presentation, TextBody } from '@maxgent/ooxml/pptx';
 
 import {
   getElementSources,

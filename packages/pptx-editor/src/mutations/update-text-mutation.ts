@@ -1,4 +1,4 @@
-import type { Presentation, ShapeElement } from '@silurus/ooxml-pptx';
+import type { Presentation, ShapeElement } from '@maxgent/ooxml/pptx';
 
 import {
   replaceResolvedElement,

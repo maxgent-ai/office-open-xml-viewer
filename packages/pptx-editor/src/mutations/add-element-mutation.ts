@@ -1,4 +1,4 @@
-import type { Presentation, SlideElement } from '@silurus/ooxml-pptx';
+import type { Presentation, SlideElement } from '@maxgent/ooxml/pptx';
 
 import {
   getElementSources,

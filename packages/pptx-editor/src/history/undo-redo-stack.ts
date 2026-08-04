@@ -1,4 +1,4 @@
-import type { Presentation } from '@silurus/ooxml-pptx';
+import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import type { Command } from '../domain/command';
 import { EDITOR_SYNC_STATUSES } from '../store/sync-state';

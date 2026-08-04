@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Presentation } from '@silurus/ooxml-pptx';
+import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
 import { RemoveElementMutation } from '../src/mutations/remove-element-mutation';

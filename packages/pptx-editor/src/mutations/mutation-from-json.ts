@@ -1,4 +1,4 @@
-import type { SlideElement } from '@silurus/ooxml-pptx';
+import type { SlideElement } from '@maxgent/ooxml/pptx';
 
 import type { ElementRef, ElementTransform, Mutation } from '../domain/mutation';
 import { MUTATION_TYPES } from '../domain/mutation-types';

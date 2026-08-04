@@ -1,4 +1,4 @@
-import type { Presentation } from '@silurus/ooxml-pptx';
+import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import type { Command, NonEmptyReadonlyArray } from '../../domain/command';
 import type { Mutation } from '../../domain/mutation';

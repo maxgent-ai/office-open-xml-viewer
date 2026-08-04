@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { Presentation, ShapeElement } from '@silurus/ooxml-pptx';
+import type { Presentation, ShapeElement } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';

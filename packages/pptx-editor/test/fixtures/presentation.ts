@@ -5,7 +5,7 @@ import type {
   SlideElement,
   TextBody,
   TextRunData,
-} from '@silurus/ooxml-pptx';
+} from '@maxgent/ooxml/pptx';
 
 export function deck(elements: SlideElement[]): Presentation {
   return {

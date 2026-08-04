@@ -4,9 +4,7 @@
     "composite": false,
     "noEmit": true,
     "paths": {
-      "@silurus/ooxml-core": ["../core/src/index.ts"],
-      "@silurus/ooxml-core/*": ["../core/src/*"],
-      "@silurus/ooxml-pptx": ["../pptx/src/types.ts"]
+      "@maxgent/ooxml/pptx": ["../pptx/src/types.ts"]
     }
   },
   "include": ["src"]

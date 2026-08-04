@@ -1,33 +1,54 @@
 {
-  "name": "@silurus/ooxml-pptx-editor",
-  "private": true,
-  "version": "0.75.0",
-  "description": "PPTX editor mutation contracts (internal workspace package of @maxgent/ooxml)",
+  "name": "@maxgent/ooxml-pptx-editor",
+  "version": "0.1.0",
+  "description": "Optimistic PPTX editor session, mutations, and view binding for @maxgent/ooxml",
   "license": "MIT",
-  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
+  "author": "Maxgent",
+  "keywords": [
+    "ooxml",
+    "pptx",
+    "powerpoint",
+    "editor",
+    "officecli"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
     "directory": "packages/pptx-editor"
   },
-  "homepage": "https://github.com/yukiyokotani/office-open-xml-viewer#readme",
+  "homepage": "https://github.com/yukiyokotani/office-open-xml-viewer/tree/main/packages/pptx-editor#readme",
   "bugs": {
     "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "type": "module",
   "sideEffects": false,
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
   },
-  "dependencies": {
-    "@silurus/ooxml-pptx": "workspace:*"
+  "peerDependencies": {
+    "@maxgent/ooxml": ">=0.75.0-0"
   },
   "devDependencies": {
+    "@maxgent/ooxml": "workspace:*",
     "vitest": "^4.1.4"
   }
 }

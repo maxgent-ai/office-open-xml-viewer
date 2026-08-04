@@ -1,4 +1,4 @@
-import type { Presentation } from '@silurus/ooxml-pptx';
+import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import type { Command } from '../domain/command';
 import type { PptxEditorStore } from '../store/editor-store';

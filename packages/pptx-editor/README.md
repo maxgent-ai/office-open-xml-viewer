@@ -1,23 +1,17 @@
-# PPTX editor (`packages/pptx-editor`)
+# `@maxgent/ooxml-pptx-editor`
 
-Optimistic PPTX editing contracts for this monorepo: mutate an in-memory
-[`Presentation`](../pptx/src/types.ts), translate commands to OfficeCLI batches,
-and paint the result through a host such as
-[`PptxViewer.applyPresentation`](../pptx/src/viewer.ts).
+Optimistic PPTX editing for Maxgent's `@maxgent/ooxml` fork: mutate an
+in-memory `Presentation`, translate commands to OfficeCLI batches, and paint
+through a host such as `PptxViewer.applyPresentation`.
 
-## Package names
-
-| Context | Name | Published? |
-| --- | --- | --- |
-| npm SDK (planned) | `@maxgent/ooxml/pptx-editor` | Via the umbrella package only |
-| Workspace / monorepo | `@silurus/ooxml-pptx-editor` | No (`private: true`) |
-
-Same pattern as `@silurus/ooxml-pptx` → `@maxgent/ooxml/pptx`:
-**do not publish this workspace package separately.** External consumers should
-only install `@maxgent/ooxml` and import the editor subpath once it is wired.
-
-This package is still evolving. Prefer the high-level `PptxEditorSession` +
+This package is published **separately** from `@maxgent/ooxml` so upstream
+viewer syncs stay thin. Prefer the high-level `PptxEditorSession` +
 `PptxEditorViewBinding` surface unless you are extending the editor itself.
+
+| Package | Role |
+| --- | --- |
+| `@maxgent/ooxml` | Viewer / parser SDK (peer dependency) |
+| `@maxgent/ooxml-pptx-editor` | Editor session, mutations, view binding |
 
 ## Architecture
 
@@ -53,10 +47,8 @@ into a host that already loaded the same package.
 
 ## Install
 
-### External apps (once the umbrella subpath ships)
-
 ```bash
-pnpm add @maxgent/ooxml
+pnpm add @maxgent/ooxml @maxgent/ooxml-pptx-editor
 ```
 
 ```ts
@@ -69,34 +61,19 @@ import {
   createElementRef,
   OFFICECLI_BATCH_SEND_STATUSES,
   COMMAND_SUBMISSION_STATUSES,
-} from '@maxgent/ooxml/pptx-editor';
+} from '@maxgent/ooxml-pptx-editor';
 ```
 
-Until `./pptx-editor` is exported from the root package, that import will not
-resolve on npm. Use the workspace path below inside this monorepo.
-
-### Workspace (this monorepo)
+Requires a Maxgent `@maxgent/ooxml` build that exposes
+`PptxViewer.applyPresentation` (main-thread mode). Inside this monorepo, depend
+on the workspace package:
 
 ```json
 {
   "dependencies": {
-    "@silurus/ooxml-pptx-editor": "workspace:*",
-    "@silurus/ooxml-pptx": "workspace:*"
+    "@maxgent/ooxml-pptx-editor": "workspace:*"
   }
 }
-```
-
-```ts
-import {
-  PptxEditorSession,
-  PptxEditorViewBinding,
-  UpdateTextMutation,
-  createElementRef,
-  OFFICECLI_BATCH_SEND_STATUSES,
-  COMMAND_SUBMISSION_STATUSES,
-} from '@silurus/ooxml-pptx-editor';
-import { PptxViewer } from '@silurus/ooxml-pptx';
-import type { Presentation } from '@silurus/ooxml-pptx';
 ```
 
 ## Quick start
@@ -114,7 +91,7 @@ import {
   OFFICECLI_BATCH_SEND_STATUSES,
   type OfficeCliBatch,
   type OfficeCliBatchSendResult,
-} from '@maxgent/ooxml/pptx-editor';
+} from '@maxgent/ooxml-pptx-editor';
 import { PptxViewer } from '@maxgent/ooxml/pptx';
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
@@ -223,7 +200,7 @@ Build refs with `createElementRef(slide, element, elementIndex)` rather than
 hand-writing ids.
 
 ```ts
-import { createElementRef, ELEMENT_ORIGINS } from '@maxgent/ooxml/pptx-editor';
+import { createElementRef, ELEMENT_ORIGINS } from '@maxgent/ooxml-pptx-editor';
 
 const target = createElementRef(slide, element, elementIndex);
 // target.origin === ELEMENT_ORIGINS.SLIDE for editable slide shapes
@@ -234,7 +211,7 @@ const target = createElementRef(slide, element, elementIndex);
 A **command** is the atomic unit of optimistic update, history, and transport:
 
 ```ts
-import type { Command } from '@maxgent/ooxml/pptx-editor';
+import type { Command } from '@maxgent/ooxml-pptx-editor';
 
 const command: Command = {
   id: 'cmd-1',                 // unique per submission
@@ -256,7 +233,7 @@ Built-in mutations:
 Hydrate from JSON with `mutationFromJson`:
 
 ```ts
-import { mutationFromJson, MUTATION_TYPES } from '@maxgent/ooxml/pptx-editor';
+import { mutationFromJson, MUTATION_TYPES } from '@maxgent/ooxml-pptx-editor';
 
 const mutation = mutationFromJson({
   type: MUTATION_TYPES.UPDATE_TEXT,
@@ -268,7 +245,7 @@ const mutation = mutationFromJson({
 Low-level apply without a session:
 
 ```ts
-import { applyCommand, applyMutation } from '@maxgent/ooxml/pptx-editor';
+import { applyCommand, applyMutation } from '@maxgent/ooxml-pptx-editor';
 
 const { presentation, changedSlideIds, changedElements } = applyCommand(
   currentPresentation,
@@ -373,7 +350,7 @@ When transport returns `unknown`, the session enters
 presentation and reset:
 
 ```ts
-import { EDITOR_SYNC_STATUSES } from '@maxgent/ooxml/pptx-editor';
+import { EDITOR_SYNC_STATUSES } from '@maxgent/ooxml-pptx-editor';
 
 const { syncState } = session.getSnapshot();
 if (syncState.status === EDITOR_SYNC_STATUSES.HALTED) {
@@ -458,7 +435,7 @@ direct slide shapes only.
 You can translate without submitting:
 
 ```ts
-import { toOfficeCliBatch } from '@maxgent/ooxml/pptx-editor';
+import { toOfficeCliBatch } from '@maxgent/ooxml-pptx-editor';
 
 const batch = toOfficeCliBatch(presentation, command);
 ```
@@ -489,55 +466,31 @@ Document these in product code rather than papering over them:
    theme / size fields on the session snapshot are not pushed into the viewer.
 4. **Slide-origin shapes only.** Master/layout elements are not editable.
 5. **Complete `elementSources` required** for any editable slide.
-6. **Umbrella subpath not wired yet.** `@maxgent/ooxml/pptx-editor` is the
-   intended public import; until the checklist below is done, only the workspace
-   package resolves.
-7. **Bootstrap `Presentation`.** The viewer does not yet export a ready-made
+6. **Bootstrap `Presentation`.** The viewer does not yet export a ready-made
    editor `Presentation` from a loaded package. Supply parser JSON (or an
    equivalent model) that matches the loaded file’s slides, including
    `partName` / `elementSources` where available.
 
-## Umbrella integration checklist
+## Publishing / fork sync
 
-Wire this package into `@maxgent/ooxml` the same way `./pptx` is wired — **do
-not** flip `"private": false` or publish `@silurus/ooxml-pptx-editor` on its own.
+- Published as `@maxgent/ooxml-pptx-editor` (independent semver, currently
+  `0.1.0`).
+- Peer-depends on `@maxgent/ooxml` — not wired into the umbrella `exports` map,
+  so upstream sync of the viewer SDK does not fight editor packaging.
+- Keep Maxgent-only viewer hooks (`applyPresentation` / `replaceSlides`) as a
+  small, documented patch set on `packages/pptx`; that remains the main sync
+  surface with upstream.
 
-Prerequisite product gaps (decide before or with the wiring PR):
-
-- [ ] Stable way for integrators to obtain a `Presentation` that matches a
-      loaded `PptxViewer` (including `elementSources` / `partName`)
-- [ ] Documented MVP surface (session + view binding + the four mutations) vs
-      internal-only exports
-- [ ] Agree whether editor stays opt-in (`@maxgent/ooxml/pptx-editor`) so viewer
-      bundles do not pull editor code by default — recommended, like `./math`
-
-Root package wiring (mirror `./pptx` / `./math`):
-
-- [ ] Add `src/pptx-editor.ts` → `export * from '../packages/pptx-editor/src/index.js'`
-- [ ] Add Vite lib entry `pptx-editor` in `vite.config.ts`
-- [ ] Add `package.json` `exports["./pptx-editor"]` (`types` + `import`)
-- [ ] Include `packages/pptx-editor/src/**/*` in `tsconfig.lib.json` (and any
-      path aliases needed for `@silurus/ooxml-pptx`)
-- [ ] Optionally namespace-export from `src/index.ts` only if the root barrel
-      should expose it (prefer **not** — keep editor opt-in)
-- [ ] Extend `scripts/check-public-type-exports.mjs` / `check:public-api:built`
-      with a PPTX-editor baseline under `packages/pptx-editor/api/`
-- [ ] Bump / keep version in lockstep with the umbrella (`0.x.0`)
-- [ ] Mention `@maxgent/ooxml/pptx-editor` in root `README.md`, `CHANGELOG.md`,
-      and `site/src/lib/api-reference.ts` when public
-- [ ] Smoke: `pnpm build` then import the built `dist/pptx-editor.mjs` in a
-      small consumer script (and publish workflow `attw` / import checks)
-
-Keep private after wiring:
-
-- [ ] Confirm `packages/pptx-editor/package.json` stays `"private": true`
-- [ ] Confirm release publishes only the root `@maxgent/ooxml` tarball
+```bash
+pnpm --filter @maxgent/ooxml-pptx-editor build
+pnpm --filter @maxgent/ooxml-pptx-editor publish --access public
+```
 
 ## Testing
 
 ```bash
-pnpm --filter @silurus/ooxml-pptx-editor test
-pnpm --filter @silurus/ooxml-pptx-editor typecheck
+pnpm --filter @maxgent/ooxml-pptx-editor test
+pnpm --filter @maxgent/ooxml-pptx-editor typecheck
 ```
 
 Focused suites live under `test/` (`session/`, `rendering/`, `history/`,

@@ -7,7 +7,7 @@ import type {
   SlideElementSource,
   TextBody,
   TextRunData,
-} from '@silurus/ooxml-pptx';
+} from '@maxgent/ooxml/pptx';
 
 import type { ElementRef } from '../domain/mutation';
 import { ELEMENT_ORIGINS } from '../domain/element-origin';

@@ -1,4 +1,4 @@
-import type { Presentation } from '@silurus/ooxml-pptx';
+import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import { getSlideMutationId } from '../adapters/pptx-json-adapter';
 import type { Command } from '../domain/command';

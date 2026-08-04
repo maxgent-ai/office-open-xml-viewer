@@ -721,6 +721,10 @@ export class PptxPresentation {
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
     presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: RenderSlideOptions): Promise<PresentationHandle>;
+    replaceSlides(replacements: ReadonlyArray<{
+        readonly index: number;
+        readonly slide: Slide;
+    }>): void;
     destroy(): void;
     private __privatePresence;
     private constructor();
@@ -814,6 +818,9 @@ export class PptxViewer implements ZoomableViewer {
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
+    applyPresentation(presentation: Presentation, options?: {
+        readonly changedSlideIndexes?: readonly number[];
+    }): Promise<void>;
     destroy(): void;
     private __privatePresence;
 }

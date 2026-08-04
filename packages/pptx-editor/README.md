@@ -413,6 +413,48 @@ Viewer-side notes for `applyPresentation`:
   visible slide is not redrawn.
 - Throws if slide counts differ, or if the presentation is in `mode: 'worker'`.
 
+## Shape selection
+
+`PptxEditorSelectionController` maps canvas pointer coordinates into slide EMUs,
+hit-tests direct slide shapes from front to back, and exposes the selected
+`ElementRef` used by mutations:
+
+```ts
+const selection = new PptxEditorSelectionController({
+  session,
+  host: viewer,
+});
+
+selection.subscribe(({ snapshot }) => {
+  const selected = snapshot.selection;
+  if (!selected) return hideSelectionOverlay();
+  showSelectionOverlay(selected.element, selected.target);
+});
+```
+
+Selection is transient UI state: it is not part of `Presentation`, command
+history, or OfficeCLI transport. The controller follows optimistic element
+updates, clears itself when the selected element disappears, and reconciles the
+selection against the host's current slide before snapshot reads and pointer
+input. Pass the viewer itself so `slideIndex` remains a live getter; do not copy
+`viewer.slideIndex` into a plain host object, because that freezes its initial
+numeric value. Dispose the controller before the session:
+
+```ts
+selection.dispose();
+binding.dispose();
+session.dispose();
+viewer.destroy();
+```
+
+The MVP hit test uses each rotated shape frame, reverse render order, and a
+4-CSS-pixel tolerance for lines. It skips layout/master decorations, and stops
+at a topmost non-shape slide element (picture, table, chart, media) instead of
+selecting a covered shape underneath. Shapes without a stable numeric OOXML id
+can be selected for UI feedback but report `isOfficeCliTargetable: false`. In
+edit mode, keep viewer text selection and hyperlink overlays disabled unless
+the app forwards their pointer events into `selectAtClientPoint`.
+
 ## OfficeCLI transport
 
 Mutations translate to an `OfficeCliBatch` via `toOfficeCliBatch` /

@@ -152,3 +152,28 @@ export type {
   PptxEditorViewErrorHandler,
   PptxEditorViewHost,
 } from './rendering/types';
+
+export { EDITOR_SELECTION_CHANGE_REASONS } from './interaction/constants';
+export { PptxEditorSelectionControllerError } from './interaction/errors';
+export type {
+  PptxEditorSelectionControllerErrorCode,
+} from './interaction/errors';
+export {
+  clientPointToSlidePoint,
+  hitTestSlideShape,
+  resolveShapeSelection,
+} from './interaction/hit-test';
+export { PptxEditorSelectionController } from './interaction/pptx-editor-selection-controller';
+export type {
+  ClientPoint,
+  PptxEditorInteractionHost,
+  PptxEditorSelectionChange,
+  PptxEditorSelectionChangeReason,
+  PptxEditorSelectionControllerOptions,
+  PptxEditorSelectionListener,
+  PptxEditorSelectionListenerErrorHandler,
+  PptxEditorSelectionSnapshot,
+  PptxEditorShapeSelection,
+  ShapeHitTestOptions,
+  SlidePoint,
+} from './interaction/types';

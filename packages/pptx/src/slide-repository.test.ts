@@ -348,4 +348,27 @@ describe('PptxSlideRepository', () => {
     expect(() => repository.withSlide(0.5, () => undefined)).toThrow(RangeError);
     expect(loadSlide).not.toHaveBeenCalled();
   });
+
+  it('serves replace() overrides instead of reloading the producer', async () => {
+    const original = slide(0, 'original');
+    const replacement = slide(0, 'edited');
+    const loadSlide = vi.fn(async () => original);
+    const repository = new PptxSlideRepository({
+      slideCount: 1,
+      maxCachedSlides: 1,
+      maxCachedStructuralBytes: 1024,
+      loadSlide,
+    });
+
+    await expect(repository.withSlide(0, (value) => value)).resolves.toBe(original);
+    expect(loadSlide).toHaveBeenCalledTimes(1);
+
+    repository.replace(0, replacement);
+    await expect(repository.withSlide(0, (value) => value)).resolves.toBe(replacement);
+    expect(loadSlide).toHaveBeenCalledTimes(1);
+
+    repository.clear();
+    await expect(repository.withSlide(0, (value) => value)).resolves.toBe(original);
+    expect(loadSlide).toHaveBeenCalledTimes(2);
+  });
 });

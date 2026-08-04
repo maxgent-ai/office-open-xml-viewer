@@ -141,3 +141,14 @@ export type {
   PptxEditorSessionSnapshot,
   PptxEditorSessionSubmission,
 } from './session/types';
+
+export { PptxEditorViewBindingError } from './rendering/errors';
+export type {
+  PptxEditorViewBindingErrorCode,
+} from './rendering/errors';
+export { PptxEditorViewBinding } from './rendering/pptx-editor-view-binding';
+export type {
+  PptxEditorViewBindingOptions,
+  PptxEditorViewErrorHandler,
+  PptxEditorViewHost,
+} from './rendering/types';

@@ -34,6 +34,8 @@ export class PptxSlideRepository {
   readonly #slideCount: number;
   readonly #loadSlide: (slideIndex: number) => Slide | PromiseLike<Slide>;
   readonly #cache: BoundedAsyncLruCache<number, Slide>;
+  /** Editor / in-memory replacements that win over {@link #loadSlide}. */
+  readonly #overrides = new Map<number, Slide>();
   #generation = 0;
   #consumerTail: Promise<void> = Promise.resolve();
   #resourceFailure: OoxmlResourceLimitError | undefined;
@@ -98,8 +100,22 @@ export class PptxSlideRepository {
     return result;
   }
 
+  /**
+   * Replace the slide model at `slideIndex` for subsequent {@link withSlide}
+   * consumers. The replacement wins over the original {@link loadSlide}
+   * producer (including after cache eviction) until {@link clear}.
+   */
+  replace(slideIndex: number, slide: Slide): void {
+    this.#assertSlideIndex(slideIndex);
+    this.#overrides.set(slideIndex, slide);
+    this.#cache.delete(slideIndex);
+  }
+
   async #load(slideIndex: number, generation: number): Promise<Slide> {
     return this.#cache.getOrLoad(slideIndex, async () => {
+      const override = this.#overrides.get(slideIndex);
+      if (override !== undefined) return override;
+
       let slide: Slide;
       try {
         slide = await this.#loadSlide(slideIndex);
@@ -130,6 +146,7 @@ export class PptxSlideRepository {
     this.#generation += 1;
     this.#resourceFailure = undefined;
     this.#resourceFailureGeneration = undefined;
+    this.#overrides.clear();
     this.#cache.clear();
   }
 

@@ -1,8 +1,19 @@
 {
-  "name": "@maxgent/ooxml-pptx-editor",
+  "name": "@silurus/ooxml-pptx-editor",
   "private": true,
-  "version": "0.0.0",
-  "description": "PPTX editor mutation contracts",
+  "version": "0.75.0",
+  "description": "PPTX editor mutation contracts (internal workspace package of @maxgent/ooxml)",
+  "license": "MIT",
+  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
+    "directory": "packages/pptx-editor"
+  },
+  "homepage": "https://github.com/yukiyokotani/office-open-xml-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
+  },
   "type": "module",
   "sideEffects": false,
   "types": "./src/index.ts",

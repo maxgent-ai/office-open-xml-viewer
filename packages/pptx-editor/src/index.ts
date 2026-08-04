@@ -127,3 +127,17 @@ export type {
   RejectedCommandSubmissionResult,
   UnknownOfficeCliBatchSendResult,
 } from './submission/types';
+
+export { EDITOR_SESSION_CHANGE_REASONS } from './session/constants';
+export { PptxEditorSessionError } from './session/errors';
+export type { PptxEditorSessionErrorCode } from './session/errors';
+export { PptxEditorSession } from './session/pptx-editor-session';
+export type {
+  PptxEditorSessionChange,
+  PptxEditorSessionChangeReason,
+  PptxEditorSessionListener,
+  PptxEditorSessionListenerErrorHandler,
+  PptxEditorSessionOptions,
+  PptxEditorSessionSnapshot,
+  PptxEditorSessionSubmission,
+} from './session/types';

@@ -179,9 +179,9 @@ describe('UndoRedoStack', () => {
       command: 'add',
       parent: '/slide[1]',
       type: 'shape',
-      index: 0,
       props: expect.objectContaining({
         id: '7',
+        zorder: '1',
         text: 'before',
         x: '0emu',
         y: '0emu',

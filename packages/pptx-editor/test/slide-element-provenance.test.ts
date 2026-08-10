@@ -36,7 +36,7 @@ describe('slide element provenance', () => {
     expect(inverse.toOfficeCli(presentation, {
       commandId: 'undo-remove-1',
       mutationIndex: 0,
-    })).toMatchObject({ index: 0 });
+    })).toMatchObject({ props: expect.objectContaining({ zorder: '1' }) });
 
     const removed = new RemoveElementMutation({ target: ref }).apply(presentation).presentation;
     expect(removed.slides[0].elementSources).toEqual([

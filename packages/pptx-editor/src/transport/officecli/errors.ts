@@ -9,7 +9,8 @@ export type OfficeCliTranslatorErrorCode =
   | 'target.unsupportedOrigin'
   | 'target.unstableElementId'
   | 'value.invalidTransform'
-  | 'value.invalidText';
+  | 'value.invalidText'
+  | 'value.unsupportedFidelity';
 
 export class OfficeCliTranslatorError extends Error {
   readonly name = 'OfficeCliTranslatorError';

@@ -42,6 +42,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run --config vitest.config.ts",
+    "test:officecli-live": "vitest run --config vitest.officecli-live.config.ts",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
   },
   "peerDependencies": {
@@ -49,6 +50,7 @@
   },
   "devDependencies": {
     "@maxgent/ooxml": "workspace:*",
+    "@types/node": "^25.6.0",
     "vitest": "^4.1.4"
   }
 }

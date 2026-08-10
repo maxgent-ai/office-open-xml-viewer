@@ -15,7 +15,6 @@ export interface OfficeCliAddCommand {
   readonly command: typeof OFFICECLI_COMMAND_TYPES.ADD;
   readonly parent: string;
   readonly type: typeof OFFICECLI_ELEMENT_TYPES.SHAPE;
-  readonly index: number;
   readonly props: OfficeCliProps;
 }
 

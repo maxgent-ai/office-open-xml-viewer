@@ -10,5 +10,8 @@ export default defineConfig({
   },
   test: {
     include: ['test/**/*.test.ts'],
+    // Live OfficeCLI contract tests execute the real binary; they run only
+    // through `pnpm test:officecli-live` (vitest.officecli-live.config.ts).
+    exclude: ['**/node_modules/**', 'test/officecli-live/**'],
   },
 });

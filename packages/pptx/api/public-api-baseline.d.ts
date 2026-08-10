@@ -762,7 +762,7 @@ export class PptxPresentation {
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
-    presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: RenderSlideOptions): Promise<PresentationHandle>;
+    presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: PresentSlideOptions): Promise<PresentationHandle>;
     destroy(): void;
     private __privatePresence;
     private constructor();

@@ -1413,13 +1413,6 @@ fn slide_is_hidden(root: roxmltree::Node) -> bool {
     matches!(root.attribute("show"), Some("0") | Some("false"))
 }
 
-fn is_slide_shape_tree_entry(node_name: &str) -> bool {
-    matches!(
-        node_name,
-        "sp" | "grpSp" | "graphicFrame" | "cxnSp" | "pic" | "contentPart" | "AlternateContent"
-    )
-}
-
 // Threads the full master+layout inheritance context (per-type font sizes,
 // bullets, anchors, transforms, alignments, spacing, bold/italic/caps/color
 // maps) plus zip/theme into one slide parse; this is the inheritance chain
@@ -1643,7 +1636,6 @@ fn parse_slide(
     }
 
     // ── Slide shapes ─────────────────────────────────────────────────────
-    let mut slide_tree_index = 0;
     for node in sp_tree.children().filter(|n| n.is_element()) {
         let start = elements.len();
         parse_sp_tree_node(
@@ -6352,11 +6344,6 @@ mod tests {
             Some(false) => r#" showMasterSp="0""#.to_string(),
             None => String::new(),
         };
-        let layout_shape = if include_layout_and_slide_shapes {
-            r#"<p:sp><p:nvSpPr><p:cNvPr id="20" name="LayoutBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="300000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
-        } else {
-            ""
-        };
         let slide_shape = if include_layout_and_slide_shapes {
             r#"<p:sp><p:nvSpPr><p:cNvPr id="30" name="SlideShape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="500000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
         } else {
@@ -6563,33 +6550,6 @@ mod tests {
                 SlideElementOrigin::Slide,
             ],
         );
-    }
-
-    #[test]
-    fn element_sources_distinguish_inherited_and_direct_shapes() {
-        let data = build_master_sp_pptx(None, true);
-        let pres = parse_presentation_from_bytes(&data).expect("parse");
-        let slide = &pres.slides[0];
-
-        assert_eq!(slide.elements.len(), 4);
-        assert_eq!(slide.element_sources.len(), slide.elements.len());
-        assert_eq!(
-            slide
-                .element_sources
-                .iter()
-                .map(|source| source.origin)
-                .collect::<Vec<_>>(),
-            vec![
-                SlideElementOrigin::Master,
-                SlideElementOrigin::Master,
-                SlideElementOrigin::Layout,
-                SlideElementOrigin::Slide,
-            ]
-        );
-        assert_eq!(slide.element_sources[0].slide_tree_index, None);
-        assert_eq!(slide.element_sources[1].slide_tree_index, None);
-        assert_eq!(slide.element_sources[2].slide_tree_index, None);
-        assert_eq!(slide.element_sources[3].slide_tree_index, Some(0));
     }
 
     /// §19.3.1.39: a layout with showMasterSp="0" suppresses the master's

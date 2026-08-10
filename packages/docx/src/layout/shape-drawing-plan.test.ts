@@ -86,6 +86,49 @@ describe('ShapeRun drawing command planner', () => {
     });
   });
 
+  it('plans a stretched blip fill as a resource clipped by the shape geometry', () => {
+    const result = planShapeDrawing(shape({
+      fill: {
+        fillType: 'image', imagePath: 'word/media/overlay.png', mimeType: 'image/png',
+        fillRect: { l: 0, t: 0, r: -0.07574, b: 0 }, alpha: 0.5,
+      },
+    }), { xPt: 1, yPt: 2, widthPt: 100, heightPt: 40 }, undefined, undefined, 'image:key');
+
+    expect(result).toMatchObject({
+      status: 'planned',
+      command: {
+        kind: 'drawingml-image-fill',
+        resourceKey: 'image:key',
+        fillRect: { l: 0, t: 0, r: -0.07574, b: 0 },
+        plan: {
+          rect: { x: 1, y: 2, w: 100, h: 40 },
+          fill: null,
+          geometry: { kind: 'preset', name: 'rect' },
+        },
+      },
+    });
+    expect(structuredClone(result.command)).toEqual(result.command);
+  });
+
+  it('diagnoses tiled blip fills instead of silently stretching them', () => {
+    const result = planShapeDrawing(shape({
+      fill: {
+        fillType: 'image', imagePath: 'word/media/tile.png', mimeType: 'image/png',
+        tile: { tx: 0, ty: 0, sx: 1, sy: 1, flip: 'none' },
+      },
+    }), { xPt: 0, yPt: 0, widthPt: 100, heightPt: 40 }, undefined, undefined, 'image:tile');
+
+    expect(result).toEqual({
+      status: 'unsupported',
+      command: { kind: 'noop' },
+      diagnostics: [{
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'error',
+        message: 'Tiled DrawingML shape image fills are not rendered',
+      }],
+    });
+  });
+
   it('retains authored textPath shaping and fitshape geometry as a clone-safe command', () => {
     const requests: Parameters<TextLayoutService['shape']>[0][] = [];
     const text = {

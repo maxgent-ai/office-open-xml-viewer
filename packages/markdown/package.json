@@ -1,7 +1,8 @@
 {
   "name": "@silurus/ooxml-markdown",
-  "version": "0.75.0",
-  "description": "Convert .pptx / .docx / .xlsx to GitHub-flavoured markdown using the workspace WASM parsers — browser / Node / CLI",
+  "private": true,
+  "version": "0.77.0",
+  "description": "Internal workspace adapter for DOCX / XLSX / PPTX Markdown projection",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
@@ -42,10 +43,6 @@
     "dist",
     "bin"
   ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:ci": "tsc -p tsconfig.build.json",
@@ -58,6 +55,6 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "@typescript/native": "npm:typescript@^7.0.2"
+    "typescript": "^7.0.2"
   }
 }

@@ -128,9 +128,9 @@ interface AnyRun {
 }
 
 describe.skipIf(!docxMod)('VML text watermark (§19.1.2.23) end-to-end parse', () => {
-  it('surfaces the header watermark shape with text, rotation, fill and opacity', () => {
-    const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => unknown };
-    const doc = parseDocx(watermarkDocx()) as {
+  it('surfaces the header watermark shape with text, rotation, fill and opacity', async () => {
+    const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (b: Uint8Array) => Promise<unknown> };
+    const doc = await materializeDocxDocument(watermarkDocx()) as {
       headers: { default: { body: { runs?: AnyRun[] }[] } | null };
       body: { runs?: AnyRun[] }[];
     };

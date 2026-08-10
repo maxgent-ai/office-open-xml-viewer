@@ -69,6 +69,9 @@ export function nextTabStop(
   let custom: ResolvedTabStop | null = null;
   let maxCustomPx = 0;
   for (const stop of customStopsPx) {
+    // ECMA-376 §17.18.84: bar draws a vertical rule but "does not result in a
+    // custom tab stop" and is skipped when positioning a tab character.
+    if (stop.alignment === 'bar') continue;
     if (stop.pos > maxCustomPx) maxCustomPx = stop.pos;
     if (stop.pos > curMarginPx && (custom === null || stop.pos < custom.pos)) custom = stop;
   }

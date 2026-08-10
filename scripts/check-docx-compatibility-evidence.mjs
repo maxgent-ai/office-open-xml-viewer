@@ -10,8 +10,11 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 
-const require = createRequire(new URL('../packages/docx/package.json', import.meta.url));
-const ts = require('typescript');
+// TypeScript 7 intentionally exposes no stable Compiler API yet. This
+// architecture guard is root-only tooling, so it uses the explicitly named
+// TypeScript 6 compatibility dependency while library builds stay on TS 7.
+const require = createRequire(new URL('../package.json', import.meta.url));
+const ts = require('typescript-compiler-api');
 
 const DOCX_SOURCE = 'packages/docx/src';
 const COMPATIBILITY_OWNER = `${DOCX_SOURCE}/layout/compatibility.ts`;

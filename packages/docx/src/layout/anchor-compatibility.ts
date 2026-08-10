@@ -79,6 +79,24 @@ export const WORD_TEXTBOX_VISIBLE_ANCHOR_EXTENT = defineCompatibilityRule({
   description: 'For DrawingML middle and bottom text anchoring, derive the positioned extent through the last visible retained block while preserving structural trailing empty paragraphs and terminal paragraph spacing in the complete story.',
 });
 
+export const WORD_OVERLAPPING_LAYOUT_IN_CELL_OVERLAY = defineCompatibilityRule({
+  id: 'word-overlapping-layout-in-cell-overlay',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/table-cell-anchor-reflow.test.ts#does not grow an automatic row for an overlapping layoutInCell wrapNone object',
+  },
+  description: 'Word leaves an overlap-permitted, non-wrapping layoutInCell drawing as an overlay instead of growing its automatic table row. This is an Office compatibility exception to the general resize behavior in ECMA-376 §20.4.2.3 layoutInCell; non-overlap drawings retain normative cell containment.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_OVERLAPPING_LAYOUT_IN_CELL_OVERLAY}. */
+export function wordLayoutInCellOwnsRowContainment(
+  allowOverlap: boolean,
+  wrapKind: 'none' | 'square' | 'tight' | 'through' | 'topAndBottom',
+): boolean {
+  return !allowOverlap || wrapKind !== 'none';
+}
+
 function paragraphContributesTextBoxAnchorExtent(paragraph: ParagraphLayout): boolean {
   if (
     paragraph.shading

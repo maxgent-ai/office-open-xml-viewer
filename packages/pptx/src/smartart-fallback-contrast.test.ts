@@ -293,6 +293,7 @@ function slideWith(background: Fill | null, elements: ShapeElement[]): Slide {
     slideNumber: 1,
     background,
     elements,
+    elementSources: elements.map(() => ({ origin: 'slide' as const })),
   };
 }
 
@@ -328,7 +329,8 @@ describe('renderSlide text-run shape identity', () => {
     );
 
     expect(runs).not.toHaveLength(0);
-    expect(runs.every((run) => run.shapeId === '42')).toBe(true);
+    expect(runs.every((run) =>
+      run.shapeId === '42' && run.elementIndex === 0 && run.origin === 'slide')).toBe(true);
   });
 
   it('leaves identity absent for parser-synthesized SmartArt fallback shapes', async () => {

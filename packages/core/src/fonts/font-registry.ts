@@ -2,13 +2,11 @@
  * Refcounted FontFace registry shared by the embedded-font loader
  * ({@link ./embedded.ts}) and the Google-Fonts preloader ({@link ./preload.ts}).
  *
- * `document.fonts` (the FontFaceSet) is a process-global singleton, so opening
- * the same font in two documents — or the same document twice in an SPA — would
- * otherwise add a second, byte- (or url-) identical `FontFace` every time and
- * leak them all (nothing ever removes them). Both loaders share this dedup +
- * refcount so a face is added to the set once, shared by every holder, and
- * removed from the set only when the LAST holder releases it (e.g. from every
- * open document's `destroy()`).
+ * Each DOM/worker realm owns a FontFaceSet. Opening the same font repeatedly in
+ * one set would otherwise add duplicate faces and leak them; same-origin child
+ * windows additionally require their own registrations. Both loaders share
+ * this per-set dedup + refcount so a face is added once to each target set and
+ * removed only when that set's last holder releases it.
  *
  * The registry is deliberately format-agnostic: callers own how they compute a
  * face's signature (embedded fonts hash the de-obfuscated bytes; Google Fonts
@@ -28,10 +26,10 @@ interface FontRegistration {
   refs: number;
 }
 
-/** signature → the single shared registration. Module-global to mirror the
- *  process-global FontFaceSet: two callers computing the same signature in the
- *  same set share one `FontFace`. */
-const registry = new Map<string, FontRegistration>();
+/** Signature → registrations keyed by FontFaceSet. A same-origin popup owns a
+ * distinct set even though it shares the opener's JavaScript module instance,
+ * so the set identity is part of the registration key. */
+const registry = new Map<string, Map<FontFaceSet, FontRegistration>>();
 
 /** Test hook — clears the shared refcount registry (does NOT touch any
  *  FontFaceSet; tests install a fresh fake set per case). */
@@ -69,13 +67,16 @@ export interface RetainResult {
  * return the face. It runs ONLY on the first-holder path.
  */
 export function retainFace(sig: string, set: FontFaceSet, create: () => FontFace): RetainResult {
-  const existing = registry.get(sig);
-  if (existing && existing.set === set) {
+  const registrations = registry.get(sig);
+  const existing = registrations?.get(set);
+  if (existing) {
     existing.refs++;
     return { face: existing.face, isNew: false };
   }
   const face = create();
-  registry.set(sig, { face, set, refs: 1 });
+  const bySet = registrations ?? new Map<FontFaceSet, FontRegistration>();
+  bySet.set(set, { face, set, refs: 1 });
+  registry.set(sig, bySet);
   return { face, isNew: true };
 }
 
@@ -110,18 +111,24 @@ export function releaseFaces(faces: Iterable<FontFace>): void {
     // small (one entry per distinct face), so a linear scan is fine. A face that
     // was already fully released has no entry → this loop finds nothing and the
     // release is a no-op (cross-call idempotency).
-    for (const [sig, reg] of registry) {
-      if (reg.face !== face) continue;
-      reg.refs--;
-      if (reg.refs <= 0) {
-        try {
-          reg.set.delete(face);
-        } catch {
-          /* a set without delete() (older shim / mock): drop the entry anyway */
+    for (const [sig, registrations] of registry) {
+      let matched = false;
+      for (const [set, reg] of registrations) {
+        if (reg.face !== face) continue;
+        matched = true;
+        reg.refs--;
+        if (reg.refs <= 0) {
+          try {
+            reg.set.delete(face);
+          } catch {
+            /* a set without delete() (older shim / mock): drop the entry anyway */
+          }
+          registrations.delete(set);
+          if (registrations.size === 0) registry.delete(sig);
         }
-        registry.delete(sig);
+        break;
       }
-      break;
+      if (matched) break;
     }
   }
 }

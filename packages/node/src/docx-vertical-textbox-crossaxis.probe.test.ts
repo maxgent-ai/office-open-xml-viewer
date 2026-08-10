@@ -94,9 +94,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !havePrereqs)(
       for (const fam of ['Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho', 'Noto Serif JP']) {
         FontLibrary.use(fam, [MINCHO]);
       }
-      const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
+      const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (b: Uint8Array) => Any };
       const { renderDocumentToCanvas } = rendererMod!;
-      const doc = parseDocx(readFileSync(SAMPLE));
+      const doc = await materializeDocxDocument(readFileSync(SAMPLE));
       const W = Math.round(doc.section.pageWidth);
       const H = Math.round(doc.section.pageHeight);
       const canvas = new Canvas(W, H);

@@ -9,6 +9,7 @@ import {
   metafileRasterSize,
   isOoxmlDecodedImageLimitError,
   EMU_PER_PT,
+  EMU_PER_PX,
   type MathRenderer,
   type SrcRect,
   type Duotone,
@@ -20,7 +21,30 @@ import {
   prepareWorksheetMath,
   worksheetHasUncachedMath,
   imageCacheKey,
+  getGridGeometryForWorksheet,
+  HEADER_W,
+  HEADER_H,
 } from './renderer.js';
+import { GridGeometry, type GridAxisGeometry } from './internal/grid-geometry.js';
+import { usesNativeOneCellExtent } from './internal/cell-anchor-geometry.js';
+
+/** Internal viewer-to-renderer commit latch. It is intentionally not re-exported
+ * from the package API: standalone renderer callers do not own viewer lifecycle. */
+export const XLSX_RENDER_COMMIT_GUARD: unique symbol = Symbol('xlsx-render-commit-guard');
+
+type GuardedRenderViewportOptions = RenderViewportOptions & {
+  readonly [XLSX_RENDER_COMMIT_GUARD]?: () => boolean;
+};
+
+/** Attach the internal lifecycle latch without widening the public renderer
+ * option type. Kept format-local because only the XLSX viewer has this frame
+ * preparation/commit split. */
+export function withXlsxRenderCommitGuard(
+  options: RenderViewportOptions,
+  guard: () => boolean,
+): RenderViewportOptions {
+  return { ...options, [XLSX_RENDER_COMMIT_GUARD]: guard } as RenderViewportOptions;
+}
 
 /** What `prefetchImages` needs to decode one picture: the raster `imagePath`
  *  (also the cache key), its `mimeType`, the optional svgBlip vector path, and
@@ -41,6 +65,87 @@ interface ImageRef {
    *  bitmap is decoded, then recoloured along the `clr1`→`clr2` ramp; the result
    *  is cached under {@link imageCacheKey}(imagePath, duotone). */
   duotone?: Duotone | null;
+}
+
+interface CellAnchorRange {
+  fromCol: number;
+  fromColOff: number;
+  fromRow: number;
+  fromRowOff: number;
+  toCol: number;
+  toColOff: number;
+  toRow: number;
+  toRowOff: number;
+  editAs?: string;
+  nativeExtCx?: number;
+  nativeExtCy?: number;
+}
+
+function anchorMayIntersectViewport(
+  anchor: CellAnchorRange,
+  ws: Worksheet,
+  viewport: ViewportRange | undefined,
+  geometry?: GridGeometry,
+  frame?: {
+    readonly width: number;
+    readonly height: number;
+    readonly scale: number;
+    readonly freezeRows: number;
+    readonly freezeCols: number;
+  },
+): boolean {
+  if (!viewport) return true;
+  const axes = geometry ?? getGridGeometryForWorksheet(ws);
+  const scale = frame?.scale ?? 1;
+  const { col, row } = axes.axesAtScale(scale);
+  const marker = (axis: GridAxisGeometry, index: number, offset: number) =>
+    axis.offsetOf(index + 1) + (offset * scale) / EMU_PER_PX;
+  const fromX = marker(col, anchor.fromCol, anchor.fromColOff);
+  const fromY = marker(row, anchor.fromRow, anchor.fromRowOff);
+  const useNativeExtent = usesNativeOneCellExtent(anchor);
+  const toX = useNativeExtent
+    ? fromX + ((anchor.nativeExtCx as number) * scale) / EMU_PER_PX
+    : marker(col, anchor.toCol, anchor.toColOff);
+  const toY = useNativeExtent
+    ? fromY + ((anchor.nativeExtCy as number) * scale) / EMU_PER_PX
+    : marker(row, anchor.toRow, anchor.toRowOff);
+  if (toX <= fromX || toY <= fromY) return false;
+  const effectiveFreeze = frame
+    ? axes.effectiveFrozenBands({
+        scale,
+        width: frame.width,
+        height: frame.height,
+        headerWidth: HEADER_W,
+        headerHeight: HEADER_H,
+        rows: frame.freezeRows,
+        cols: frame.freezeCols,
+      })
+    : { rows: ws.freezeRows ?? 0, cols: ws.freezeCols ?? 0 };
+  const intersects = (
+    start: number,
+    end: number,
+    frozenEnd: number,
+    scrollStart: number,
+    scrollEnd: number,
+  ) => {
+    const low = Math.min(start, end);
+    const high = Math.max(start, end);
+    return (low < frozenEnd && high > 0)
+      || (low < scrollEnd && high > scrollStart);
+  };
+  return intersects(
+    fromX,
+    toX,
+    col.offsetOf(effectiveFreeze.cols + 1),
+    col.offsetOf(viewport.col),
+    col.offsetOf(viewport.col + viewport.cols),
+  ) && intersects(
+    fromY,
+    toY,
+    row.offsetOf(effectiveFreeze.rows + 1),
+    row.offsetOf(viewport.row),
+    row.offsetOf(viewport.row + viewport.rows),
+  );
 }
 
 /** Fetch one image's bytes by zip path and resolve them to a drawable
@@ -149,7 +254,15 @@ export async function prefetchImages(
   // Optional offscreen-surface factory for the `<a:duotone>` pixel transform,
   // injected in environments without a global `OffscreenCanvas` (or by tests).
   // Defaults to the real `OffscreenCanvas` when the runtime provides one.
-  opts?: { offscreenFactory?: OffscreenFactory },
+  opts?: {
+    offscreenFactory?: OffscreenFactory;
+    viewport?: ViewportRange;
+    width?: number;
+    height?: number;
+    cellScale?: number;
+    freezeRows?: number;
+    freezeCols?: number;
+  },
 ): Promise<void> {
   // This map is only the synchronous lookup for the current frame. Never keep
   // entries from another worksheet/frame: their shared-cache owners may have
@@ -158,8 +271,25 @@ export async function prefetchImages(
   if (!fetchImage) return;
   const fetch = fetchImage;
   const refs = new Map<string, ImageRef>();
+  const geometry = opts?.viewport ? getGridGeometryForWorksheet(ws) : undefined;
+  const frame = opts?.viewport && opts.width !== undefined && opts.height !== undefined
+    ? {
+        width: opts.width,
+        height: opts.height,
+        scale: opts.cellScale ?? 1,
+        freezeRows: opts.freezeRows ?? ws.freezeRows ?? 0,
+        freezeCols: opts.freezeCols ?? ws.freezeCols ?? 0,
+      }
+    : undefined;
   if (ws.images) {
     for (const img of ws.images) {
+      if (!anchorMayIntersectViewport(
+        img,
+        ws,
+        opts?.viewport,
+        geometry,
+        frame,
+      )) continue;
       // Key by (path + duotone colours) so a recoloured picture is looked up
       // separately from the raw blip (§20.1.8.23).
       refs.set(imageCacheKey(img.imagePath, img.duotone), {
@@ -178,6 +308,13 @@ export async function prefetchImages(
   }
   if (ws.shapeGroups) {
     for (const grp of ws.shapeGroups) {
+      if (!anchorMayIntersectViewport(
+        grp,
+        ws,
+        opts?.viewport,
+        geometry,
+        frame,
+      )) continue;
       for (const shape of grp.shapes) {
         if (shape.geom.type === 'image') {
           refs.set(imageCacheKey(shape.geom.imagePath, shape.geom.duotone), {
@@ -272,6 +409,10 @@ async function renderWorksheetViewportLeased(
   opts: RenderViewportOptions = {},
 ): Promise<void> {
   const { ws, styles } = deps;
+  const rawW = isHTMLCanvas(target) ? (target.clientWidth || 800) : target.width;
+  const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
+  const width = opts.width ?? rawW;
+  const height = opts.height ?? rawH;
   // Frame-local synchronous lookup only. Core owns decoded reuse/eviction;
   // retaining this map across frames would accumulate stale closed references.
   const imageCache = new Map<string, CanvasImageSource | null>();
@@ -289,7 +430,14 @@ async function renderWorksheetViewportLeased(
   // every scroll frame. By awaiting first (and only when there's something
   // uncached), the whole resize+draw runs synchronously in a single tick and
   // the old frame stays visible until the new one is ready.
-  await prefetchImages(ws, imageCache, opts.fetchImage);
+  await prefetchImages(ws, imageCache, opts.fetchImage, {
+    viewport,
+    width,
+    height,
+    cellScale: opts.cellScale,
+    freezeRows: opts.freezeRows,
+    freezeCols: opts.freezeCols,
+  });
 
   // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,
   // for the same no-white-flash reason as the image preload. Gated on
@@ -301,13 +449,13 @@ async function renderWorksheetViewportLeased(
     await prepareWorksheetMath(ws, deps.math);
   }
 
+  // Resource preparation above may yield. A viewer can be destroyed or a newer
+  // frame can supersede this one while it waits; never mutate the caller-owned
+  // canvas after that lifecycle generation is stale.
+  if ((opts as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD]?.() === false) return;
+
   // ── Step 2: Resize + draw, all synchronous from here.
   const dpr = opts.dpr ?? defaultDpr();
-  const rawW = isHTMLCanvas(target) ? (target.clientWidth || 800) : target.width;
-  const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
-  const width = opts.width ?? rawW;
-  const height = opts.height ?? rawH;
-
   // Resize only when the backing store dimensions actually change. Assigning
   // canvas.width/height re-allocates (and clears) the GPU backing store, so on a
   // steady-state scroll/zoom stream — where width/height/dpr are unchanged frame

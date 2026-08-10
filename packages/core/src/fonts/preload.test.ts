@@ -118,6 +118,32 @@ describe('preloadGoogleFonts', () => {
     expect(added).toHaveLength(2);
   });
 
+  it('registers faces in an explicitly selected popup FontFaceSet', async () => {
+    const { set: openerSet, added: openerFaces } = installFakes();
+    const popupFaces: FakeFace[] = [];
+    const popupSet = {
+      add: (face: FakeFace) => popupFaces.push(face),
+      delete: (face: FakeFace) => {
+        const index = popupFaces.indexOf(face);
+        if (index >= 0) popupFaces.splice(index, 1);
+        return index >= 0;
+      },
+      ready: Promise.resolve(),
+    } as unknown as FontFaceSet;
+    G.document = { fonts: openerSet };
+
+    const openerHeld = await preloadGoogleFonts(['Calibri'], MAP);
+    const popupHeld = await preloadGoogleFonts(['Calibri'], MAP, popupSet);
+    expect(openerFaces).toHaveLength(2);
+    expect(popupFaces).toHaveLength(2);
+    expect(popupHeld[0]).not.toBe(openerHeld[0]);
+
+    unloadGoogleFonts(popupHeld);
+    expect(popupFaces).toHaveLength(0);
+    expect(openerFaces).toHaveLength(2);
+    unloadGoogleFonts(openerHeld);
+  });
+
   it('no-ops (returns []) without any FontFaceSet', async () => {
     delete G.document;
     delete G.self;

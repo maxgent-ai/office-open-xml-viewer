@@ -733,17 +733,17 @@ set textBaseline=middle
 set font=11px sans-serif
 set fillStyle=#555
 set fillStyle=#4472C4
-fillRect 31.2,292.8367,143.2381,45.6933 fs=#4472C4
+fillRect 31.2,292.8367,120.32,45.6933 fs=#4472C4
 set fillStyle=#ED7D31
-fillRect 174.4381,292.8367,114.5905,45.6933 fs=#ED7D31
+fillRect 151.52,292.8367,96.256,45.6933 fs=#ED7D31
 set fillStyle=#4472C4
-fillRect 31.2,178.6033,343.7714,45.6933 fs=#4472C4
+fillRect 31.2,178.6033,288.768,45.6933 fs=#4472C4
 set fillStyle=#ED7D31
-fillRect 374.9714,178.6033,214.8571,45.6933 fs=#ED7D31
+fillRect 319.968,178.6033,180.48,45.6933 fs=#ED7D31
 set fillStyle=#4472C4
-fillRect 31.2,64.37,243.5048,45.6933 fs=#4472C4
+fillRect 31.2,64.37,204.544,45.6933 fs=#4472C4
 set fillStyle=#ED7D31
-fillRect 274.7048,64.37,315.1238,45.6933 fs=#ED7D31
+fillRect 235.744,64.37,264.704,45.6933 fs=#ED7D31
 restore"
 `;
 

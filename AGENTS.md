@@ -208,18 +208,53 @@ verification is acceptable when the user asks to view it.
 
 VRT is local-only because private samples are not redistributable.
 
+Regression detection must compare the changed renderer with images produced by
+the previous renderer. It must not use Word/Excel/PowerPoint or PDF reference
+images as the regression oracle. Keep Office-reference fidelity evaluation as a
+separate run:
+
 ```bash
 pnpm build:wasm
+pnpm vrt:snapshot # run from main / the merge-base before the renderer change
 pnpm vrt
 pnpm --filter @silurus/ooxml-docx vrt
 pnpm --filter @silurus/ooxml-xlsx vrt
 pnpm --filter @silurus/ooxml-pptx vrt
+pnpm vrt:fidelity # separate Office/PDF reference fidelity evaluation
 ```
+
+If the change is already in progress and no trustworthy self-baseline exists,
+capture `vrt:snapshot` in a temporary worktree at the merge-base, then run `vrt`
+from the changed worktree against those images. A missing baseline is not a
+successful regression check; report or correct stale sample/page manifests
+instead of treating their skips as coverage.
+
+For the complete private corpus, bind both runs to the same full merge-base SHA.
+Use a clean detached worktree for the previous renderer, rebuild its WASM, and
+use distinct ports so a candidate server can never satisfy the baseline run:
+
+```bash
+git worktree add --detach /tmp/ooxml-vrt-baseline <merge-base-sha>
+cd /tmp/ooxml-vrt-baseline
+pnpm build:wasm
+VRT_BASELINE_REVISION=<full-merge-base-sha> VRT_PORT=5190 pnpm vrt:private:snapshot
+
+cd <candidate-worktree>
+pnpm build:wasm
+VRT_BASELINE_REVISION=<full-merge-base-sha> VRT_PORT=5191 pnpm vrt:private
+```
+
+Snapshot mode rejects a dirty tracked checkout. For the one-time bootstrap of
+this harness against a merge-base that predates it, copy only the allowlisted VRT
+harness files listed in `tests/visual/private-corpus.mjs` and set
+`VRT_ALLOW_HARNESS_CHANGES=1`; renderer/parser changes remain forbidden. The
+baseline manifests record the resolved SHA, each private input's SHA-256, and
+the exact page/sheet/slide sets.
 
 Only update references when the user explicitly asks:
 
 ```bash
-UPDATE_REFS=1 pnpm vrt
+UPDATE_REFS=1 pnpm vrt:fidelity
 ```
 
 Do not automatically update files under `packages/*/tests/visual/references/`.

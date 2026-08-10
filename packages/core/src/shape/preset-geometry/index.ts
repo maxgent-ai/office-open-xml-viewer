@@ -110,6 +110,33 @@ export function buildPresetGeometryPath(
   return true;
 }
 
+/** Append only the fill-bearing paths of a preset geometry.
+ *
+ * CT_Path2D paths whose `fill` is `none` are decorative stroke overlays, not
+ * part of the object's painted silhouette. Picture and image-fill clipping must
+ * therefore exclude them; otherwise an open accent/leader path is implicitly
+ * closed by Canvas and cuts a false region into the image. Fill modifiers such
+ * as `lighten` and `darken` remain included because those paths do carry fill.
+ */
+export function buildPresetGeometryFillPath(
+  ctx: CanvasRenderingContext2D,
+  geom: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  adj: (number | null | undefined)[] = [],
+): boolean {
+  const def = PRESETS[geom.toLowerCase()];
+  if (!def) return false;
+  const evaluator = evaluatorForDef(def, w, h, adj);
+  for (const path of def.paths) {
+    if (path.fill === 'none') continue;
+    applyPresetPath(ctx, path, evaluator, x, y, w, h);
+  }
+  return true;
+}
+
 // A wedge callout's tail only protrudes when its tip is OUTSIDE the body. When
 // the author drags the tip into the body (e.g. to hide the tail), PowerPoint
 // renders just the base shape — no inward dent. The literal ECMA-376 preset

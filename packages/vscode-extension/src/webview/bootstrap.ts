@@ -11,6 +11,7 @@
  */
 
 declare const __OOXML_FILE_TYPE__: 'docx' | 'xlsx' | 'pptx';
+declare const __OOXML_SELECTION_SESSION__: number;
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -18,7 +19,7 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
-import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
+import { XlsxViewer } from '@silurus/ooxml-xlsx';
 import { DocxScrollViewer } from '@silurus/ooxml-docx';
 import { PptxScrollViewer } from '@silurus/ooxml-pptx';
 import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
@@ -45,6 +46,25 @@ const math = {
 
 const vscodeApi = acquireVsCodeApi();
 const fileType = __OOXML_FILE_TYPE__;
+const selectionSession = __OOXML_SELECTION_SESSION__;
+
+function publishSelectionContext(context: unknown): void {
+  vscodeApi.postMessage({
+    type: 'selection-context',
+    fileType,
+    selectionSession,
+    context,
+  });
+}
+
+function publishViewerLocation(location: unknown): void {
+  vscodeApi.postMessage({
+    type: 'viewer-location',
+    fileType,
+    selectionSession,
+    location,
+  });
+}
 
 const statusEl = document.getElementById('status')!;
 const viewerContainer = document.getElementById('viewer-container')!;
@@ -123,7 +143,7 @@ window.addEventListener(
 );
 
 // Notify extension host that the webview script is ready to receive messages.
-vscodeApi.postMessage({ type: 'webview-ready' });
+vscodeApi.postMessage({ type: 'webview-ready', selectionSession });
 
 window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
@@ -132,6 +152,7 @@ window.addEventListener('message', async (event: MessageEvent) => {
     return;
   }
   if (msg.type !== 'ooxml-init') return;
+  if (msg.selectionSession !== selectionSession) return;
 
   // Opt-in flag forwarded from the extension host (gated by the
   // `ooxmlViewer.useGoogleFonts` setting AND workspace trust). When false the
@@ -164,83 +185,95 @@ window.addEventListener('message', async (event: MessageEvent) => {
 // ── XLSX ─────────────────────────────────────────────────────────────────────
 
 async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
-  let loadFailed = false;
   const viewer = new XlsxViewer(viewerContainer, {
     math,
     useGoogleFonts,
     showZoomSlider: false,
+    enableElementSelection: true,
     findHighlightColors,
     onScaleChange: updateZoomLabel,
     onError(err) {
-      loadFailed = true;
       showError(`Error: ${err.message}`);
     },
-    onSelectionChange(sel: CellRange | null) {
-      if (!sel) return;
-      vscodeApi.postMessage({ type: 'selection', fileType: 'xlsx', selection: sel });
+    onSelectionContextChange: publishSelectionContext,
+    onSheetChange(index) {
+      publishViewerLocation({
+        format: 'xlsx',
+        sheetIndex: index,
+        sheetName: viewer?.sheetNames[index] ?? '',
+      });
     },
   });
 
   await viewer.load(buffer);
-  if (loadFailed) return;
   bindZoomViewer(viewer);
   hideStatus();
-
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-      const sel = viewer.selection;
-      if (!sel) return;
-      vscodeApi.postMessage({ type: 'copy-request', fileType: 'xlsx', selection: sel });
-    }
+  publishSelectionContext(viewer.getSelectionContext({
+    maxCells: 1_000,
+    maxTextCharacters: 65_536,
+  }));
+  publishViewerLocation({
+    format: 'xlsx',
+    sheetIndex: viewer.sheetIndex,
+    sheetName: viewer.sheetNames[viewer.sheetIndex] ?? '',
   });
+
 }
 
 // ── DOCX (virtualized continuous scroll) ─────────────────────────────────────
 
 async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
-  let loadFailed = false;
   const viewer = new DocxScrollViewer(viewerContainer, {
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    enableElementSelection: true,
     findHighlightColors,
     refitOnResize: false,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,
+    onSelectionContextChange: publishSelectionContext,
+    onVisiblePageChange(pageIndex) {
+      publishViewerLocation({ format: 'docx', pageIndex });
+    },
     onError(err) {
-      loadFailed = true;
       showError(`Error: ${err.message}`);
     },
   });
   await loadAtNaturalScale(viewer, buffer);
-  if (loadFailed) return;
   bindZoomViewer(viewer);
   hideStatus();
+  publishSelectionContext(viewer.getSelectionContext());
+  publishViewerLocation({ format: 'docx', pageIndex: viewer.topVisiblePage });
 }
 
 // ── PPTX (virtualized continuous scroll) ─────────────────────────────────────
 
 async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
-  let loadFailed = false;
   const viewer = new PptxScrollViewer(viewerContainer, {
     math,
     useGoogleFonts,
     enableTextSelection: true,
+    enableElementSelection: true,
     findHighlightColors,
     enableMediaPlayback: true,
     mediaOverscan: 1,
     refitOnResize: true,
     background: 'var(--vscode-editor-background)',
     onScaleChange: updateZoomLabel,
+    onSelectionContextChange: publishSelectionContext,
+    onVisibleSlideChange(slideIndex) {
+      publishViewerLocation({ format: 'pptx', slideIndex });
+    },
     onError(err) {
-      loadFailed = true;
       showError(`Error: ${err.message}`);
     },
   });
   // Presentations default to the available editor width. The viewer subtracts
   // its built-in desk gutters, leaving a small margin without horizontal scroll.
   await loadAtContainerFit(viewer, buffer);
-  if (loadFailed) return;
   bindZoomViewer(viewer);
   hideStatus();
+  publishSelectionContext(viewer.getSelectionContext());
+  publishViewerLocation({ format: 'pptx', slideIndex: viewer.topVisibleSlide });
 }

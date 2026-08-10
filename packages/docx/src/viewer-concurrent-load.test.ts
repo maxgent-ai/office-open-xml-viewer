@@ -105,4 +105,60 @@ describe('DocxViewer.load() — concurrent-load latch', () => {
     v.destroy();
     expect(only.destroyed).toBe(true); // destroyed exactly once
   });
+
+  it('does not report a pending old-document render rejected by a successful reload', async () => {
+    const { canvas } = mount();
+    const onError = vi.fn();
+    const old = new FakeDocxEngine(2, A4);
+    const next = new FakeDocxEngine(2, A4);
+    vi.spyOn(DocxDocument, 'load')
+      .mockResolvedValueOnce(old.asDoc())
+      .mockResolvedValueOnce(next.asDoc());
+
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, { onError });
+    await v.load('old.docx');
+    (old as unknown as { deferred: boolean }).deferred = true;
+    const staleNavigation = v.goToPage(1);
+    const staleCall = old.renderCalls.at(-1);
+    expect(staleCall?.page).toBe(1);
+
+    await v.load('next.docx');
+    expect(old.destroyed).toBe(true);
+    staleCall?.reject(new Error('old worker terminated'));
+    await staleNavigation;
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(next.destroyed).toBe(false);
+    v.destroy();
+  });
+
+  it('reports terminal close when destroy runs after resource install but before load resumes', async () => {
+    const { canvas } = mount();
+    const old = new FakeDocxEngine(2, A4);
+    const next = new FakeDocxEngine(2, A4);
+    vi.spyOn(DocxDocument, 'load')
+      .mockResolvedValueOnce(old.asDoc())
+      .mockResolvedValueOnce(next.asDoc());
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement);
+    await v.load('old.docx');
+    old.destroy = () => {
+      old.destroyed = true;
+      queueMicrotask(() => v.destroy());
+    };
+
+    await expect(v.load('next.docx')).rejects.toThrow('DocxViewer is destroyed');
+    expect(old.destroyed).toBe(true);
+    expect(next.destroyed).toBe(true);
+    expect(next.renderCalls).toHaveLength(0);
+  });
+
+  it('rejects load after destroy without acquiring a document', async () => {
+    const { canvas } = mount();
+    const load = vi.spyOn(DocxDocument, 'load');
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement);
+    v.destroy();
+
+    await expect(v.load('late.docx')).rejects.toThrow('DocxViewer is destroyed');
+    expect(load).not.toHaveBeenCalled();
+  });
 });

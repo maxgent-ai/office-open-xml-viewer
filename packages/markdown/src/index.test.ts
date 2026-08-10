@@ -1,80 +1,35 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import {
-  docxToMarkdown,
-  pptxToMarkdown,
-  xlsxToMarkdown,
-  initDocxFromBytes,
-  initPptxFromBytes,
-  initXlsxFromBytes,
-} from './index.ts';
+import { runInNewContext } from 'node:vm';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * End-to-end unit coverage for the markdown conversion functions: init each
- * format's WASM from disk (the same `./wasm-binary` export the CLI resolves),
- * then convert the committed demo samples and assert the projection carries the
- * expected top-level structure.
- *
- * The parser WASM is git-ignored build output; CI runs `pnpm build:wasm` before
- * `pnpm test`, so it is present there, but a local run before a wasm build would
- * lack it. Rather than hard-fail, we gate the suite so a missing artifact SKIPS
- * (never a silent zero-assertion pass) — mirroring the node package's
- * `archive-extract-transfer.test.ts`.
- */
+const mocks = vi.hoisted(() => ({
+  docxToMarkdown: vi.fn((bytes: Uint8Array) => [...bytes].join(',')),
+}));
 
-const require = createRequire(import.meta.url);
-const root = new URL('../../..', import.meta.url); // repo root from packages/markdown/src
+vi.mock('@silurus/ooxml-pptx/wasm', () => ({ initSync: vi.fn() }));
+vi.mock('@silurus/ooxml-xlsx/wasm', () => ({ initSync: vi.fn() }));
+vi.mock('@silurus/ooxml-docx/wasm', () => ({
+  initSync: vi.fn(),
+  docx_to_markdown: mocks.docxToMarkdown,
+}));
 
-function tryRead(pkgWasm: string): Uint8Array | null {
-  try {
-    return new Uint8Array(readFileSync(require.resolve(pkgWasm)));
-  } catch {
-    return null;
-  }
-}
-function trySample(rel: string): Buffer | null {
-  try {
-    return readFileSync(new URL(rel, root));
-  } catch {
-    return null;
-  }
-}
+import { docxToMarkdown, initDocxFromBytes } from './index.js';
 
-const docxWasm = tryRead('@silurus/ooxml-docx/wasm-binary');
-const pptxWasm = tryRead('@silurus/ooxml-pptx/wasm-binary');
-const xlsxWasm = tryRead('@silurus/ooxml-xlsx/wasm-binary');
-const docxSample = trySample('packages/docx/public/demo/sample-1.docx');
-const pptxSample = trySample('packages/pptx/public/demo/sample-1.pptx');
-const xlsxSample = trySample('packages/xlsx/public/demo/sample-1.xlsx');
-
-const docxReady = !!docxWasm && !!docxSample;
-const pptxReady = !!pptxWasm && !!pptxSample;
-const xlsxReady = !!xlsxWasm && !!xlsxSample;
-
-describe('markdown conversion', () => {
-  it.skipIf(!docxReady)('converts a .docx to markdown', () => {
-    initDocxFromBytes(docxWasm as Uint8Array);
-    const md = docxToMarkdown(docxSample as Buffer);
-    expect(md.length).toBeGreaterThan(0);
-    // The demo sample's masthead survives the projection.
-    expect(md).toContain('CANOPY');
+describe('markdown byte normalization', () => {
+  beforeEach(() => {
+    mocks.docxToMarkdown.mockClear();
+    initDocxFromBytes(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
   });
 
-  it.skipIf(!pptxReady)('converts a .pptx to markdown', () => {
-    initPptxFromBytes(pptxWasm as Uint8Array);
-    const md = pptxToMarkdown(pptxSample as Buffer);
-    expect(md.length).toBeGreaterThan(0);
-    // Slide titles become `#` headings.
-    expect(md).toMatch(/^#\s/m);
+  it('accepts an ArrayBuffer created in another realm', () => {
+    const foreign = runInNewContext(`(() => {
+      const bytes = new Uint8Array([1, 2, 3]);
+      return bytes.buffer;
+    })()`);
+    expect(docxToMarkdown(foreign as ArrayBuffer)).toBe('1,2,3');
   });
 
-  it.skipIf(!xlsxReady)('converts a .xlsx to markdown', () => {
-    initXlsxFromBytes(xlsxWasm as Uint8Array);
-    const md = xlsxToMarkdown(xlsxSample as Buffer);
-    expect(md.length).toBeGreaterThan(0);
-    // Each sheet becomes a `## SheetName` section with a pipe table.
-    expect(md).toMatch(/^##\s/m);
-    expect(md).toContain('|');
+  it('preserves a cross-realm view offset and length', () => {
+    const foreign = runInNewContext('new Uint8Array([9, 1, 2, 8]).subarray(1, 3)');
+    expect(docxToMarkdown(foreign as Uint8Array)).toBe('1,2');
   });
 });

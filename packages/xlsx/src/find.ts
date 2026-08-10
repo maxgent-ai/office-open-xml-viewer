@@ -57,6 +57,7 @@ interface XlsxResolvedMatch {
 export class XlsxFindController {
   private _matches: XlsxResolvedMatch[] = [];
   private _active = -1;
+  private _generation = 0;
 
   constructor(
     private readonly _sheetCount: () => number,
@@ -67,6 +68,7 @@ export class XlsxFindController {
 
   /** Drop matches + cursor (call on reload). */
   invalidate(): void {
+    this._generation++;
     this._matches = [];
     this._active = -1;
   }
@@ -110,13 +112,24 @@ export class XlsxFindController {
    *  document order: sheet ascending, then a sheet's cells in the order
    *  `collectSheetCells` returns them (row-major from the parser). */
   async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<XlsxMatchLocation>[]> {
-    this._matches = [];
-    this._active = -1;
-    if (query.length === 0) return [];
+    const generation = ++this._generation;
+    if (query.length === 0) {
+      this._matches = [];
+      this._active = -1;
+      return [];
+    }
 
     const sheets = this._sheetCount();
+    const matches: XlsxResolvedMatch[] = [];
     for (let sheet = 0; sheet < sheets; sheet++) {
-      const cells = await this._collectSheetCells(sheet);
+      let cells: FindCell[];
+      try {
+        cells = await this._collectSheetCells(sheet);
+      } catch (error) {
+        if (generation !== this._generation) return [];
+        throw error;
+      }
+      if (generation !== this._generation) return [];
       const sheetName = this._sheetName(sheet);
       for (const cell of cells) {
         const index = buildTextIndex([{ text: cell.text }]);
@@ -126,10 +139,13 @@ export class XlsxFindController {
         for (const tm of hits) {
           const slice = tm.slices[0];
           const text = cell.text.slice(slice.start, slice.end);
-          this._matches.push({ sheet, sheetName, row: cell.row, col: cell.col, text });
+          matches.push({ sheet, sheetName, row: cell.row, col: cell.col, text });
         }
       }
     }
+    if (generation !== this._generation) return [];
+    this._matches = matches;
+    this._active = -1;
     return this.matches();
   }
 

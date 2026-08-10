@@ -1,7 +1,9 @@
 import type { SectionLayoutContext } from '../layout-context.js';
-import type { LineBoundary } from '../line-layout.js';
 import type { LayoutOptions } from './options.js';
-import type { ParagraphFragmentCursor } from './paragraph-pagination.js';
+import type {
+  ParagraphFragmentation,
+  ParagraphFragmentCursor,
+} from './paragraph-pagination.js';
 import type { TableFragmentCursor } from './table-pagination.js';
 import type { BodyAdjacentTableGroupInput } from './body-layout-input.js';
 import type {
@@ -83,7 +85,7 @@ export interface BodyTableAcquisitionInput {
 export interface AcquiredParagraphBlock {
   readonly layout: ParagraphLayout;
   readonly blockExtentPt: number;
-  readonly lineEndBoundaries: readonly LineBoundary[];
+  readonly fragmentation: ParagraphFragmentation;
   readonly uniformRubyAdvancePt?: number;
   readonly markBelowBaselinePt?: number;
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;

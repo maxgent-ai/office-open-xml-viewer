@@ -18,10 +18,10 @@ const SLIDE_H_EMU = 9525 * 150;
  * it can never orphan.)
  */
 describe('PptxScrollViewer.load() — no orphaned engine on re-load (SC20)', () => {
-  function build() {
+  function build(opts = {}) {
     installDom();
     const container = makeContainer(200, 400);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10, ...opts });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
@@ -62,12 +62,30 @@ describe('PptxScrollViewer.load() — no orphaned engine on re-load (SC20)', () 
       .mockRejectedValueOnce(new Error('boom'));
 
     await v.load('one.pptx');
-    await v.load('bad.pptx');
-    expect(onError).toHaveBeenCalledTimes(1);
+    await expect(v.load('bad.pptx')).rejects.toThrow('boom');
+    expect(onError).not.toHaveBeenCalled();
     expect(first.destroyed).toBe(false);
     expect(v.slideCount).toBe(3);
 
     v.destroy();
     expect(first.destroyed).toBe(true);
+  });
+
+  it('rejects an initial window render failure without also calling onError', async () => {
+    const onError = vi.fn();
+    const { v } = build({ onError });
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const failure = new Error('initial slide render failed');
+    vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
+
+    const loading = v.load('one.pptx');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.renderCalls).toHaveLength(1);
+    engine.renderCalls[0].reject(failure);
+
+    await expect(loading).rejects.toBe(failure);
+    expect(onError).not.toHaveBeenCalled();
+    v.destroy();
   });
 });

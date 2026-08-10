@@ -1,4 +1,8 @@
-import type { RenderOptions, PptxTextRunInfo } from './renderer';
+import {
+  invalidatePptxRenderTarget,
+  type RenderOptions,
+  type PptxTextRunInfo,
+} from './renderer';
 import { buildPptxTextLayer } from './text-layer';
 import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlight-layer';
 import { PptxFindController, type PptxMatchLocation } from './find';
@@ -12,6 +16,7 @@ import {
   type FindMatch,
   type FindMatchesOptions,
   type OoxmlResourceMetrics,
+  type ViewerContextMenuEvent,
   type ZoomableViewer,
   EMU_PER_PX,
   openExternalHyperlink,
@@ -20,6 +25,32 @@ import {
   clampScale,
   fitScale,
 } from '@silurus/ooxml-core';
+import {
+  CallerCanvasMount,
+  CanvasOverlayHost,
+  CanvasViewerErrorRouter,
+  renderCanvasElementOutline,
+  resolveCanvasViewerMode,
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import {
+  readPptxTextSelectionContext,
+} from './selection-context';
+import type {
+  PptxElementContext,
+  PptxSelectionContext,
+  PptxSelectionContextOptions,
+} from './element-selection';
+import {
+  limitPptxElementContext,
+  MAX_ELEMENT_TEXT_CHARACTERS,
+} from './element-selection';
+
+const borrowedPresentationOption = Symbol('PptxViewer.borrowedPresentation');
+type InternalPptxViewerOptions = PptxViewerOptions & {
+  [borrowedPresentationOption]?: PptxPresentation;
+};
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
 export type HiddenSlideMode = 'show' | 'skip' | 'dim';
@@ -27,15 +58,15 @@ export type HiddenSlideMode = 'show' | 'skip' | 'dim';
 /** Default `'dim'` overlay: 60% white (hidden content shows at 40%). */
 const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 
-export interface PptxViewerOptions extends RenderOptions, LoadOptions {
+export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr'>, LoadOptions {
   /** Called when a slide finishes rendering */
   onSlideChange?: (index: number, total: number) => void;
   /**
-   * Receives load failures plus asynchronous render or embedded-media failures
-   * handled by the Viewer. Supplying this callback changes load-failure
-   * delivery: `load()` invokes it and resolves; without it, the same load/parse
-   * failure rejects `load()`. Viewer-managed failures invoke it, or fall back
-   * to `console.error` when omitted.
+   * Receives asynchronous Viewer-managed failures that cannot be observed by
+   * awaiting the method that started them. Failures from `load()`, including
+   * its initial render, always reject that Promise and are not also delivered
+   * here. Later event-driven render or media failures invoke this callback, or
+   * fall back to `console.error` when omitted.
    *
    * Stable cases can be narrowed with `OoxmlError`,
    * `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
@@ -68,6 +99,18 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * browser's native text selection works on slide content.
    */
   enableTextSelection?: boolean;
+  /** Enable read-only slide-element selection with a non-editable outline. Default false. */
+  enableElementSelection?: boolean;
+  /** Straight-line hit tolerance in CSS pixels. Default 6. */
+  elementHitTolerance?: number;
+  /** Emits bounded, detached text or element context for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
@@ -122,6 +165,7 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
 export class PptxViewer implements ZoomableViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly wrapper: HTMLDivElement;
+  private readonly canvasMount: CallerCanvasMount;
   /**
    * IX9 explicit zoom factor (`1` = 100% = the slide at its natural EMU→px
    * width), or `null` when the caller has never invoked a zoom method. `null`
@@ -131,103 +175,106 @@ export class PptxViewer implements ZoomableViewer {
    * {@link _targetWidth} derives the render width from it.
    */
   private _scale: number | null = null;
-  /** The canvas's DOM position BEFORE the constructor reparented it into
-   *  {@link wrapper}, captured so {@link destroy} can return the caller-owned
-   *  canvas to exactly where it was. `null` parent = canvas was passed
-   *  detached. */
-  private readonly _originalParent: Node | null;
-  private readonly _originalNextSibling: Node | null;
-  /** The canvas's inline `display` before the constructor forced `block`
-   *  (empty string if it was unset), restored on {@link destroy}. */
-  private readonly _originalDisplay: string;
   private textLayer: HTMLDivElement | null = null;
   /** IX2 — the find-highlight overlay layer (always created, above the text
    *  layer, `pointer-events:none`). */
   private highlightLayer: HTMLDivElement | null = null;
+  private elementLayer: HTMLDivElement | null = null;
   /** IX2 — find state (per-slide runs, matches, active cursor). */
   private _find: PptxFindController;
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
-  private engine: PptxPresentation | null = null;
+  private readonly presentationOwner: TerminalResourceOwner<PptxPresentation>;
+  private get engine(): PptxPresentation | null { return this.presentationOwner.current; }
+  private readonly borrowed: boolean;
+  private readonly hostWindow: Window & typeof globalThis;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
   private _hiddenMode: HiddenSlideMode;
   private handle: PresentationHandle | null = null;
   private readonly _mode: 'main' | 'worker';
-  /** The canvas's bitmaprenderer context, used only by the static worker-mode
-   *  render path. The media-playback path keeps a 2d context (via presentSlide),
-   *  so this is obtained only when worker mode renders without media playback. */
-  private _bitmapCtx: ImageBitmapRenderingContext | null = null;
-  /** Set by {@link destroy} (first line). Guards {@link _reportRenderError} so a
-   *  render rejection that lands AFTER teardown is swallowed rather than surfaced
-   *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
-   *  viewers' `_destroyed` flag. */
-  private _destroyed = false;
+  private readonly renderDispatcher: StaticCanvasRenderDispatcher;
+  private readonly errorRouter: CanvasViewerErrorRouter;
+  private destroyed = false;
+  private selectionChangeListener: (() => void) | null = null;
+  private selectionContextKey = 'null';
+  private elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private elementContext: PptxElementContext | null = null;
+  private elementHitGeneration = 0;
+  private readonly elementHitTolerance: number;
   /**
-   * Concurrent-load latch (generation token). Every {@link load} increments this
-   * and captures the value; after its engine finishes loading it re-checks the
-   * live value and BAILS (destroying its own just-loaded engine) if a newer
-   * `load()` has since started. Without it, two overlapping `load(A)`/`load(B)`
-   * calls race the WASM parse / worker init, and whichever RESOLVES last wins the
-   * swap — even the stale `load(A)` resolving after `load(B)`; the loser's freshly
-   * created engine (never installed, or installed then overwritten) then leaks its
-   * worker + pinned WASM allocation. The latch composes with SC20: the check runs
-   * AFTER the new engine loads but BEFORE the field assignment and
-   * `previous?.destroy()`, so a superseded load never touches `this.engine` nor
-   * frees the current (newer) engine. {@link destroy} also bumps it so a load in
-   * flight at teardown is treated as superseded and its engine cleaned up.
+   * Create a Viewer that borrows an already-loaded presentation.
+   *
+   * The presentation's render mode is authoritative. The returned Viewer
+   * cannot load another source, and destroying it leaves the caller-owned
+   * presentation open. Call {@link goToSlide} to render the initial slide.
    */
-  private _loadGen = 0;
+  static fromPresentation(
+    canvas: HTMLCanvasElement,
+    presentation: PptxPresentation,
+    opts: Omit<PptxViewerOptions, keyof LoadOptions> = {},
+  ): Omit<PptxViewer, 'load'> {
+    return new PptxViewer(canvas, {
+      ...opts,
+      [borrowedPresentationOption]: presentation,
+    } as InternalPptxViewerOptions);
+  }
 
   constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
     this.canvas = canvas;
-    this._mode = opts.mode ?? 'main';
+    const borrowedPresentation = (opts as InternalPptxViewerOptions)[borrowedPresentationOption];
+    this.borrowed = borrowedPresentation !== undefined;
+    this._mode = resolveCanvasViewerMode('PptxViewer', opts.mode, borrowedPresentation);
+    this.presentationOwner = new TerminalResourceOwner(
+      'PptxViewer',
+      borrowedPresentation ?? null,
+      false,
+    );
+    const hostWindow = canvas.ownerDocument?.defaultView ??
+      (typeof window !== 'undefined' ? window : null);
+    if (!hostWindow) throw new Error('PptxViewer requires a canvas with an active Window');
+    this.hostWindow = hostWindow;
+    const elementHitTolerance = opts.elementHitTolerance ?? 6;
+    if (!Number.isFinite(elementHitTolerance) || elementHitTolerance < 0) {
+      throw new RangeError('elementHitTolerance must be a finite non-negative number.');
+    }
+    this.elementHitTolerance = elementHitTolerance;
     this._hiddenMode = opts.hiddenSlideMode ?? 'show';
 
-    const parent = canvas.parentElement;
-    // Capture the canvas's DOM position and inline display BEFORE reparenting so
-    // destroy() can put the caller-owned canvas back exactly where it was.
-    this._originalParent = parent;
-    this._originalNextSibling = canvas.nextSibling;
-    this._originalDisplay = canvas.style.display;
-    this.wrapper = document.createElement('div');
-    // vertical-align:top removes the inline-block baseline descender gap that
-    // otherwise lets the host container's background show through below the
-    // canvas (~6 px on default font metrics).
-    this.wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
-    // Force `display:block` on the canvas so it does not inherit the inline
-    // baseline of an enclosing wrapper, which would otherwise leave a 4–6px
-    // descender gap between the canvas bottom and the wrapper bottom — the
-    // host container's background would show through that strip.
-    if (!canvas.style.display) canvas.style.display = 'block';
-    if (parent) parent.insertBefore(this.wrapper, canvas);
-    this.wrapper.appendChild(canvas);
-
-    // Static worker-mode rendering paints worker-produced bitmaps via a
-    // bitmaprenderer context (grabbed once — a canvas holds one context type for
-    // its lifetime). The media-playback path uses presentSlide, which keeps a 2d
-    // context, so skip bitmaprenderer there.
-    if (this._mode === 'worker' && !opts.enableMediaPlayback) {
-      this._bitmapCtx = canvas.getContext('bitmaprenderer');
+    this.canvasMount = new CallerCanvasMount(canvas, {
+      wrapperCssText: 'position:relative;display:inline-block;vertical-align:top;',
+      forceDisplayBlock: true,
+    });
+    this.wrapper = this.canvasMount.wrapper;
+    this.renderDispatcher = new StaticCanvasRenderDispatcher(
+      canvas,
+      this._mode === 'worker' && !opts.enableMediaPlayback,
+    );
+    this.errorRouter = new CanvasViewerErrorRouter('PptxViewer', opts.onError);
+    const overlays = new CanvasOverlayHost(
+      this.wrapper,
+      opts.enableTextSelection === true,
+      opts.enableElementSelection === true,
+    );
+    this.textLayer = overlays.textLayer;
+    this.highlightLayer = overlays.highlightLayer;
+    this.elementLayer = overlays.elementLayer;
+    if (this.textLayer && (opts.onSelectionContextChange || opts.enableElementSelection)) {
+      this.selectionChangeListener = () => this._emitSelectionContextChange();
+      this.wrapper.ownerDocument.addEventListener('selectionchange', this.selectionChangeListener);
     }
-
-    if (opts.enableTextSelection) {
-      this.textLayer = document.createElement('div');
-      this.textLayer.style.cssText =
-        'position:absolute;top:0;left:0;width:100%;height:100%;' +
-        'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
-      this.wrapper.appendChild(this.textLayer);
+    if (opts.enableElementSelection) {
+      this.elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
+      this.wrapper.addEventListener('click', this.elementClickListener);
     }
-
-    // IX2 — find-highlight overlay layer, appended last (stacks above the text
-    // layer). `pointer-events:none` keeps selection + link clicks working
-    // through it. IX6 — populated in BOTH render modes (worker mode ships the
-    // run geometry back beside the bitmap).
-    this.highlightLayer = document.createElement('div');
-    this.highlightLayer.style.cssText =
-      'position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
-    this.wrapper.appendChild(this.highlightLayer);
+    if (opts.onContextMenu) {
+      this.contextMenuListener = (event) => this._onContextMenu(event);
+      this.wrapper.addEventListener('contextmenu', this.contextMenuListener);
+    }
 
     this._find = new PptxFindController(
       () => this.slideCount,
@@ -238,27 +285,28 @@ export class PptxViewer implements ZoomableViewer {
   /**
    * Load a PPTX from URL or ArrayBuffer and render the first slide.
    *
-   * Error contract (shared by all three viewers):
-   * - Parse/load failure (the underlying `PptxPresentation.load()` call itself
-   *   rejects): if an `onError` callback was provided it is invoked and `load`
-   *   resolves normally; if not, the error is rethrown so it is never silently
-   *   swallowed.
-   * - Render failure (the first slide fails to draw AFTER a successful
-   *   parse/load): routed to the shared `_reportRenderError` contract (`onError`
-   *   if provided, else `console.error` — never silent) and `load` still
-   *   RESOLVES, matching every subsequent navigation call.
+   * Parse, load, and initial-render failures always reject this Promise.
+   * `onError` is reserved for later Viewer-managed work that has no directly
+   * awaitable method result, so one failure is never delivered twice.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
+    if (this.destroyed) throw new Error('PptxViewer is destroyed');
+    if (this.borrowed) {
+      throw new Error(
+        'PptxViewer.load() is unsupported on a Viewer created by fromPresentation(); ' +
+          'the borrowed presentation is already loaded.',
+      );
+    }
     // SC20 atomic swap: retain the previous engine locally and only tear it down
     // AFTER the new one loads successfully. A re-load thus never orphans the old
     // engine's worker + pinned WASM allocation (the leak this guards), yet a
     // FAILED re-load keeps the current engine + its rendered slide intact rather
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old engine is freed the moment the new model arrives).
-    const gen = ++this._loadGen;
-    const previous = this.engine;
+    let selectionInvalidated = false;
     try {
-      const engine = await PptxPresentation.load(source, {
+      const engine = await this.presentationOwner.replace(() => PptxPresentation.load(source, {
+        password: this.opts.password,
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
         resourceLimits: this.opts.resourceLimits,
@@ -268,44 +316,48 @@ export class PptxViewer implements ZoomableViewer {
         wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,
         mode: this._mode,
+      }), () => {
+        // Retire old-engine hit promises before install() destroys that engine:
+        // a worker bridge may reject them synchronously during destroy, and its
+        // microtask must already observe the new selection generation.
+        this._invalidateElementSelection(false);
+        selectionInvalidated = true;
+        this.renderDispatcher.begin();
+        this._find.invalidate();
+        this.handle?.destroy();
+        this.handle = null;
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap
-        // untouched: do NOT touch `this.engine`/`this.handle` and do NOT destroy
-        // `previous` (irrelevant to the winner; possibly already stale).
-        engine.destroy();
-        return;
-      }
+      if (!engine) return;
+      if (this.destroyed) throw new Error('PptxViewer is destroyed');
+      // The loaded presentation is a new selection surface. Invalidate both a
+      // retained element focus and every hit-test promise issued against the
+      // previous engine before rendering the replacement deck.
       // Discard the stale slide's media handle before swapping engines so its RAF
       // loop / object URLs don't outlive the replaced presentation.
-      this.handle?.destroy();
-      this.handle = null;
-      this.engine = engine;
-      previous?.destroy();
       this.currentSlide = this._initialSlide();
       // A new presentation invalidates any prior find state.
       this._find.invalidate();
       await this.renderCurrentSlide();
     } catch (err) {
-      // Superseded loads own no error reporting — the winning load (or destroy())
-      // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this.opts.onError) {
-        this.opts.onError(e);
-        return;
-      }
-      throw e;
+      if (this.destroyed) throw new Error('PptxViewer is destroyed');
+      throw err instanceof Error ? err : new Error(String(err));
     }
+    // Consumer selection callbacks are outside the engine/render error path and
+    // cannot prevent the replacement deck from being committed and rendered.
+    if (selectionInvalidated && !this.destroyed) this._emitSelectionContextChange();
   }
 
   /** Navigate to a specific slide (0-indexed). */
   async goToSlide(index: number): Promise<void> {
     if (!this.engine || this.slideCount === 0) return;
-    this.currentSlide = Math.max(0, Math.min(index, this.slideCount - 1));
+    const next = Math.max(0, Math.min(index, this.slideCount - 1));
+    const changed = next !== this.currentSlide;
+    if (changed) this._invalidateElementSelection(false);
+    this.currentSlide = next;
     await this.renderCurrentSlide();
+    // Navigation and rendering complete before application notification; a
+    // consumer callback failure cannot strand the Viewer on the prior slide.
+    if (changed && !this.destroyed) this._emitSelectionContextChange();
   }
 
   async nextSlide(): Promise<void> {
@@ -346,14 +398,19 @@ export class PptxViewer implements ZoomableViewer {
    */
   async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
     this._hiddenMode = mode;
+    let next = this.currentSlide;
     if (mode === 'skip' && this.engine) {
-      this.currentSlide = resolveVisibleIndex(
+      next = resolveVisibleIndex(
         this.currentSlide,
         (i) => this.engine!.isHidden(i),
         this.slideCount,
       );
     }
+    const changed = next !== this.currentSlide;
+    if (changed) this._invalidateElementSelection(false);
+    this.currentSlide = next;
     await this.renderCurrentSlide();
+    if (changed && !this.destroyed) this._emitSelectionContextChange();
   }
 
   /** The current hidden-slide mode. */
@@ -476,6 +533,7 @@ export class PptxViewer implements ZoomableViewer {
 
   private async renderCurrentSlide(): Promise<void> {
     if (!this.engine) return;
+    const generation = this.renderDispatcher.begin();
     const dim =
       this._hiddenMode === 'dim' && this.engine.isHidden(this.currentSlide)
         ? this._dim()
@@ -504,24 +562,31 @@ export class PptxViewer implements ZoomableViewer {
       if (this.opts.enableMediaPlayback) {
         // presentSlide supports both modes (worker: base off-thread, video
         // overlay composited on the main thread).
-        this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
+        const handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
           width: targetWidth,
           dpr,
           dim,
           onTextRun,
-          onError: (error) => this._reportRenderError(error),
+          onError: (error) => {
+            if (this.renderDispatcher.isCurrent(generation)) this._reportRenderError(error);
+          },
         });
+        if (!this.renderDispatcher.isCurrent(generation)) {
+          handle.destroy();
+          return;
+        }
+        this.handle = handle;
       } else if (isWorker) {
         const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim, onTextRun });
-        this.canvas.width = bmp.width;
-        this.canvas.height = bmp.height;
-        this._bitmapCtx?.transferFromImageBitmap(bmp);
+        if (!this.renderDispatcher.commitBitmap(generation, bmp)) return;
       } else {
         await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun, dim });
+        if (!this.renderDispatcher.isCurrent(generation)) return;
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
-      this._reportRenderError(err);
+      if (!this.renderDispatcher.isCurrent(generation)) return;
+      throw err;
     }
 
     // IX6 — identical overlay build for both modes: the run geometry the worker
@@ -643,7 +708,9 @@ export class PptxViewer implements ZoomableViewer {
   }
 
   private _buildTextLayer(layer: HTMLDivElement, runs: PptxTextRunInfo[], cssWidth: number, cssHeight: number): void {
-    buildPptxTextLayer(layer, runs, cssWidth, cssHeight, this._hyperlinkHandler());
+    buildPptxTextLayer(
+      layer, runs, cssWidth, cssHeight, this._hyperlinkHandler(), this.currentSlide,
+    );
   }
 
   /**
@@ -679,10 +746,12 @@ export class PptxViewer implements ZoomableViewer {
       return;
     }
     if (enriched.kind === 'external') {
-      openExternalHyperlink(enriched.url);
+      openExternalHyperlink(enriched.url, undefined, this.hostWindow);
       return;
     }
-    if (enriched.slideIndex !== undefined) void this.goToSlide(enriched.slideIndex);
+    if (enriched.slideIndex !== undefined) {
+      void this.goToSlide(enriched.slideIndex).catch((error) => this._reportRenderError(error));
+    }
   }
 
   /** Populate an internal {@link HyperlinkTarget}'s `slideIndex` from its `ref`
@@ -702,16 +771,138 @@ export class PptxViewer implements ZoomableViewer {
    *  teardown. Mirrors the scroll viewers' `_reportRenderError` so all three
    *  single-canvas viewers agree. */
   private _reportRenderError(err: unknown): void {
-    if (this._destroyed) return;
-    const e = err instanceof Error ? err : new Error(String(err));
-    if (this.opts.onError) this.opts.onError(e);
-    else console.error('[ooxml] PptxViewer render failed:', e);
+    this.errorRouter.report(err);
   }
 
   /** Latest content-free resource metrics for the loaded presentation. */
   async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
     if (!this.engine) throw new Error('Presentation not loaded');
     return await this.engine.getResourceMetrics();
+  }
+
+  /** Return the current browser text selection with PPTX source locators. */
+  getSelectionContext(options: PptxSelectionContextOptions = {}): PptxSelectionContext | null {
+    if (this.destroyed) throw new Error('PptxViewer is destroyed');
+    const text = this.textLayer
+      ? readPptxTextSelectionContext(
+          this.wrapper,
+          this.wrapper.ownerDocument?.getSelection?.() ?? null,
+          options,
+        )
+      : null;
+    return text ?? (this.elementContext
+      ? limitPptxElementContext(
+          this.elementContext,
+          options.maxTextCharacters,
+        )
+      : null);
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    // Native text selection becomes the sole current focus. Do not resurrect a
+    // previously clicked element when that browser selection later collapses.
+    if (context?.kind === 'text') {
+      this.elementHitGeneration++;
+      this.elementContext = null;
+      this._redrawElementOutline();
+    }
+    const key = JSON.stringify(context);
+    if (key === this.selectionContextKey) return;
+    this.selectionContextKey = key;
+    this.opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementContext(context: PptxElementContext | null): void {
+    this.elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutline();
+    this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementSelection(notify = true): void {
+    this.elementHitGeneration++;
+    this.elementContext = null;
+    this._redrawElementOutline();
+    if (notify) this._emitSelectionContextChange();
+  }
+
+  private _redrawElementOutline(): void {
+    const context = this.elementContext;
+    const engine = this.engine;
+    if (!context || !engine || context.slideIndex !== this.currentSlide) {
+      renderCanvasElementOutline(this.elementLayer, null);
+      return;
+    }
+    renderCanvasElementOutline(this.elementLayer, {
+      x: context.bounds.x / engine.slideWidth,
+      y: context.bounds.y / engine.slideHeight,
+      width: context.bounds.width / engine.slideWidth,
+      height: context.bounds.height / engine.slideHeight,
+      rotation: context.bounds.rotation,
+    });
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this.destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<PptxSelectionContext | null> | undefined;
+    this.opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<PptxSelectionContext | null> {
+    const engine = this.engine;
+    if (this.destroyed || !engine) return null;
+    if (this.textLayer && readPptxTextSelectionContext(
+      this.wrapper,
+      this.wrapper.ownerDocument?.getSelection?.() ?? null,
+    )) {
+      // selectionchange is task-delivered and may not have run yet. Establish
+      // text precedence synchronously so an older pending element hit cannot
+      // survive a select/click/collapse sequence in the same task.
+      this._emitSelectionContextChange();
+      return this.destroyed ? null : this.getSelectionContext();
+    }
+    if (!this.opts.enableElementSelection) return this.getSelectionContext();
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementSelection();
+      return null;
+    }
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementSelection();
+      return null;
+    }
+    const generation = ++this.elementHitGeneration;
+    const slideIndex = this.currentSlide;
+    const point = {
+      x: localX / rect.width * engine.slideWidth,
+      y: localY / rect.height * engine.slideHeight,
+    };
+    let context: PptxElementContext | null;
+    try {
+      context = await engine.getElementContextAt(slideIndex, point, {
+        tolerance: this.elementHitTolerance / rect.width * engine.slideWidth,
+        maxTextCharacters: MAX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (this.destroyed || generation !== this.elementHitGeneration ||
+        slideIndex !== this.currentSlide || engine !== this.engine) return null;
+      throw error;
+    }
+    if (this.destroyed || generation !== this.elementHitGeneration ||
+      slideIndex !== this.currentSlide || engine !== this.engine) return null;
+    // Keep consumer callback exceptions outside the engine-error path. They are
+    // application failures, not presentation/render failures.
+    this._setElementContext(context);
+    return this.destroyed ? null : this.getSelectionContext();
   }
 
   /**
@@ -773,36 +964,36 @@ export class PptxViewer implements ZoomableViewer {
    * is simply removed from the internal wrapper. Safe to call more than once.
    */
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     // First line: block any render rejection racing in from surfacing on a dead
     // viewer (checked at the top of _reportRenderError). Bump the load generation
     // too so a load() still in flight is treated as superseded and its engine is
     // cleaned up rather than installed onto a torn-down viewer.
-    this._destroyed = true;
-    this._loadGen++;
+    this.errorRouter.close();
+    this.renderDispatcher.destroy();
+    invalidatePptxRenderTarget(this.canvas);
     this.handle?.destroy();
     this.handle = null;
-    this.engine?.destroy();
+    this.presentationOwner.close();
     // IX2 — drop the find state (matches + cached runs) so a stale
     // findNext()/findPrev() after teardown returns null instead of a match
     // pointing into a dead viewer.
     this._find.invalidate();
-    // Return the caller-owned canvas to its original DOM slot before discarding
-    // the wrapper. insertBefore still works if the original parent was itself
-    // detached; when there was no original parent the canvas is left detached
-    // (just pulled out of the wrapper). The recorded next-sibling may have been
-    // removed or moved by the caller since construction — insertBefore throws
-    // NotFoundError for a reference that is no longer a child of the parent, so
-    // fall back to appending at the end in that case.
-    if (this._originalParent) {
-      const ref =
-        this._originalNextSibling && this._originalNextSibling.parentNode === this._originalParent
-          ? this._originalNextSibling
-          : null;
-      this._originalParent.insertBefore(this.canvas, ref);
-    } else if (this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
+    if (this.selectionChangeListener) {
+      this.wrapper.ownerDocument.removeEventListener('selectionchange', this.selectionChangeListener);
+      this.selectionChangeListener = null;
     }
-    this.canvas.style.display = this._originalDisplay;
-    this.wrapper.remove();
+    this.elementHitGeneration++;
+    if (this.elementClickListener) {
+      this.wrapper.removeEventListener('click', this.elementClickListener);
+      this.elementClickListener = null;
+    }
+    if (this.contextMenuListener) {
+      this.wrapper.removeEventListener('contextmenu', this.contextMenuListener);
+      this.contextMenuListener = null;
+    }
+    this.elementContext = null;
+    this.canvasMount.restore();
   }
 }

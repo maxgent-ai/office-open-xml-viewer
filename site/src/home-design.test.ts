@@ -2,18 +2,19 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const showcase = readFileSync(new URL('./components/LiveShowcase.astro', import.meta.url), 'utf8');
+const formatTabs = readFileSync(new URL('./components/FormatTabs.astro', import.meta.url), 'utf8');
 const live = readFileSync(new URL('./lib/live.ts', import.meta.url), 'utf8');
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const home = readFileSync(new URL('./pages/index.astro', import.meta.url), 'utf8');
 
 describe('official-site home design', () => {
   it('keeps the format switcher inside the preview toolbar', () => {
-    expect(showcase).toMatch(/<div class="panel-head">\s*<div class="tabs"/);
-    expect(showcase).toContain(".tab[aria-selected='true'] {");
-    expect(showcase).toContain('background: var(--border);');
-    expect(showcase).not.toMatch(/\.tab\[aria-selected='true'\][\s\S]*?var\(--signal\)/);
-    expect(showcase).not.toContain('tab-dot');
-    expect(showcase).not.toContain('--fmt');
+    expect(showcase).toMatch(/<div class="panel-head">\s*<FormatTabs selected="docx"/);
+    expect(formatTabs).toContain(".tab[aria-selected='true'] {");
+    expect(formatTabs).toContain('background: var(--border);');
+    expect(formatTabs).not.toMatch(/\.tab\[aria-selected='true'\][\s\S]*?var\(--signal\)/);
+    expect(formatTabs).not.toContain('tab-dot');
+    expect(formatTabs).not.toContain('--fmt');
   });
 
   it('uses circular feature bullets and one-pixel separators', () => {
@@ -22,6 +23,11 @@ describe('official-site home design', () => {
     expect(capabilities).toContain('border-top: 1px solid var(--border-bright);');
     expect(capabilities).toContain('border-bottom: 1px solid var(--border);');
     expect(capabilities).not.toMatch(/border-(?:top|bottom): [2-9]px/);
+  });
+
+  it('forces external-link arrows to use text presentation on mobile', () => {
+    expect(capabilities).toContain('Full support matrix &#x2197;&#xFE0E;');
+    expect(home).toContain('GitHub &#x2197;&#xFE0E;');
   });
 
   it('reserves format colours for format-heading underlines', () => {
@@ -61,7 +67,7 @@ describe('official-site home design', () => {
   });
 
   it('keeps one lazily-created viewer per format instead of reparsing on every tab switch', () => {
-    expect(showcase).toContain('data-format-pane={format.id}');
+    expect(showcase).toContain('data-format-pane={format}');
     expect(showcase).toContain('const cache = new Map<string, CachedViewer>();');
     expect(showcase).toContain('cache.get(id)');
     expect(showcase).toContain('cache.set(id, entry)');
@@ -70,15 +76,30 @@ describe('official-site home design', () => {
     expect(showcase).toContain('for (const entry of cache.values()) entry.controller.destroy();');
   });
 
+  it('preserves the live viewers across back-forward cache restores', () => {
+    expect(showcase).toContain("window.addEventListener('pagehide', (event) => {");
+    expect(showcase).toContain('if (event.persisted) return;');
+    expect(showcase).not.toMatch(/pagehide[\s\S]*?\{ once: true \}/);
+    expect(showcase).toContain("window.addEventListener('pageshow', (event) => {");
+    expect(showcase).toContain('if (!event.persisted || !loaded) return;');
+    expect(showcase).toContain('cache.get(loaded)?.controller.activate?.();');
+  });
+
   it('uses selectable scroll viewers for the DOCX and PPTX samples', () => {
-    expect(live).toContain('new DocxScrollViewer');
-    expect(live).toContain('new PptxScrollViewer');
+    expect(live).toContain('DocxScrollViewer.fromDocument');
+    expect(live).toContain('PptxScrollViewer.fromPresentation');
     expect(live.match(/enableTextSelection:\s*true/g)).toHaveLength(2);
   });
 
+  it('starts paginated samples at the top without removing their desk margin', () => {
+    expect(live).not.toMatch(/paddingTop:\s*0/);
+    expect(live.match(/gap:\s*26/g)).toHaveLength(2);
+  });
+
   it('centres a smaller hero icon and aligns the second-row format links on mobile', () => {
-    expect(home).toContain('.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; }');
+    expect(home).toContain('.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; opacity: 1; }');
     expect(home).toContain('.hero-icon { width: min(62%, 260px); }');
+    expect(home).toMatch(/@media \(max-width: 680px\)[\s\S]*?\.hero-art \{[^}]*opacity: 1;/);
     expect(home).toContain('.format-rail a + a:nth-child(odd) { padding-left: 0; }');
     expect(home).toContain('.format-rail a:nth-child(even) { padding-left: 18px; }');
   });

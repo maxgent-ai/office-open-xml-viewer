@@ -68,7 +68,7 @@ function seg(text: string, fontFamily: string, fontSize: number): LayoutTextSeg 
 function layout(segs: LayoutTextSeg[], width = 400) {
   return layoutLines(
     linearCtx(), segs.map((s) => ({ ...s })) as LayoutSeg[], width, 0, 1,
-    undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, width, false, false, false,
+    undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, undefined, 36, width, false, false, false,
   );
 }
 
@@ -111,7 +111,7 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
     const run = seg('物理', 'ＭＳ 明朝', 20);
     const [line] = layoutLines(
       integerRoundedCtx(), [{ ...run }] as LayoutSeg[], 400, 0, 1,
-      undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+      undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, undefined, 36, 400,
       false, false, false,
     );
 
@@ -125,7 +125,7 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
     const ctx = integerRoundedCtx();
     const [painted] = layoutLines(
       ctx, [{ ...run }] as LayoutSeg[], 400 * paintScale, 0, paintScale,
-      undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+      undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, undefined, 36, 400,
       false, false, false,
     );
 
@@ -144,7 +144,7 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
       const ctx = integerRoundedCtx();
       const [measuredLine] = layoutLines(
         ctx, [seg('物理', 'ＭＳ 明朝', fontSize)] as LayoutSeg[], 400, 0, 1,
-        undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+        undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, undefined, 36, 400,
         false, false, false,
       );
       const [paintedLine] = layoutLines(
@@ -153,7 +153,7 @@ describe('layoutLines — per-line gridCountSingle (§17.6.5 docGrid cell height
         400 * paintScale,
         0,
         paintScale,
-        undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, 0, 36, 400,
+        undefined, undefined, {}, 0, DEFAULT_KINSOKU_RULES, undefined, 36, 400,
         false, false, false,
       );
       const grid = { type: 'lines' as const, linePitchPt };

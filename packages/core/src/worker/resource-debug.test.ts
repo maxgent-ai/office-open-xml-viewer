@@ -17,6 +17,7 @@ import { OoxmlDecodedImageLimitError } from '../image/pixel-budget.js';
 const policy = {
   maxArchiveEntryBytes: 128 * 1024 * 1024,
   maxTotalInflatedBytes: 256 * 1024 * 1024,
+  maxArchiveEntries: 4096,
 } as const;
 
 const usage = {
@@ -59,6 +60,9 @@ describe('OoxmlResourceMetricsSession', () => {
     });
     expect(formatOoxmlResourceDebugReport(report!)).toContain(
       'largest entry  ████░░░░░░░░░░░░  32.0 MiB / 128 MiB',
+    );
+    expect(formatOoxmlResourceDebugReport(report!)).toContain(
+      'entry count 42 / 4,096',
     );
   });
 

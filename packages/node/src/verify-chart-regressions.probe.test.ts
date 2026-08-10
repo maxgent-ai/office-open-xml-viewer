@@ -128,10 +128,10 @@ function renderCapture(
 }
 
 describe.skipIf(!pptxMod || !coreMod || !existsSync(SAMPLE_14))('sample-14 slide-7 pie: white percent-only labels', () => {
-  it('renders bare percentages in white (no black category names)', () => {
-    const { parsePptx } = pptxMod as Any;
+  it('renders bare percentages in white (no black category names)', async () => {
+    const { materializePptxPresentation } = pptxMod as Any;
     const { renderChart } = coreMod as Any;
-    const pres = parsePptx(readFileSync(SAMPLE_14));
+    const pres = await materializePptxPresentation(readFileSync(SAMPLE_14));
     const slide7 = pres.slides[6];
     const charts: ChartModel[] = [];
     collectCharts(slide7, charts);
@@ -158,11 +158,11 @@ describe.skipIf(!pptxMod || !coreMod || !existsSync(SAMPLE_14))('sample-14 slide
 });
 
 describe.skipIf(!xlsxMod || !coreMod)('sample-30 sheet-1 scatter: markers only (no lines)', () => {
-  it('draws no series connecting line for the noFill scatter series', () => {
-    const { parseSheet } = xlsxMod as Any;
+  it('draws no series connecting line for the noFill scatter series', async () => {
+    const { materializeXlsxWorksheet } = xlsxMod as Any;
     const { renderChart } = coreMod as Any;
     // Sheet 1 (index 0). parseSheet returns a Worksheet with `charts`.
-    const ws = parseSheet(readFileSync(SAMPLE_30), 0, 'Sheet1');
+    const ws = await materializeXlsxWorksheet(readFileSync(SAMPLE_30), 0);
     const anchors = (ws.charts ?? []) as Any[];
     const scatters = anchors.map(a => a.chart as ChartModel).filter(c => c.chartType === 'scatter');
     expect(scatters.length, 'sheet 1 has scatter charts').toBeGreaterThan(0);
@@ -173,10 +173,10 @@ describe.skipIf(!xlsxMod || !coreMod)('sample-30 sheet-1 scatter: markers only (
     }
   });
 
-  it('draws a MARKER legend key (not a line swatch) for the markers-only scatter (#803)', () => {
-    const { parseSheet } = xlsxMod as Any;
+  it('draws a MARKER legend key (not a line swatch) for the markers-only scatter (#803)', async () => {
+    const { materializeXlsxWorksheet } = xlsxMod as Any;
     const { renderChart } = coreMod as Any;
-    const ws = parseSheet(readFileSync(SAMPLE_30), 0, 'Sheet1');
+    const ws = await materializeXlsxWorksheet(readFileSync(SAMPLE_30), 0);
     const anchors = (ws.charts ?? []) as Any[];
     const scatters = anchors.map(a => a.chart as ChartModel).filter(c => c.chartType === 'scatter');
     expect(scatters.length, 'sheet 1 has scatter charts').toBeGreaterThan(0);
@@ -242,11 +242,11 @@ function captureBars(
 describe.skipIf(!pptxMod || !coreMod || varySamples.length === 0)(
   '#931 single-series bar varyColors (sample-17/18 slide 4)',
   () => {
-    it('renders four distinct bar colors and a per-point legend', () => {
-      const { parsePptx } = pptxMod as Any;
+    it('renders four distinct bar colors and a per-point legend', async () => {
+      const { materializePptxPresentation } = pptxMod as Any;
       const { renderChart } = coreMod as Any;
       for (const path of varySamples) {
-        const pres = parsePptx(readFileSync(path));
+        const pres = await materializePptxPresentation(readFileSync(path));
         const slide4 = pres.slides[3];
         const charts: ChartModel[] = [];
         collectCharts(slide4, charts);

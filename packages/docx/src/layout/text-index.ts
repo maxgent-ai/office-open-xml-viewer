@@ -6,12 +6,15 @@ import type {
   DocumentLayout,
   DrawingLayout,
   LayoutPage,
+  LayoutRect,
   Matrix2DData,
   PageLayerRoot,
   PagePaintDrawingEntry,
   PaintNode,
   ParagraphLayout,
   PointPt,
+  ResourcePlacement,
+  SourceRef,
   TableLayout,
   TextBoxLayout,
   TextPlacement,
@@ -20,26 +23,74 @@ import type {
 export interface TextRunGeometry {
   readonly placement: TextPlacement;
   readonly pointToPage: Matrix2DData;
+  /** Canonical structural source of the owning paragraph. */
+  readonly source: ParagraphLayout['source'];
   /** Source `w14:paraId` of the owning paragraph, when authored. */
   readonly paragraphId?: string;
 }
 
+/** Retained rectangular Canvas clip in the coordinate space where it is applied. */
+export interface ElementClipGeometry {
+  readonly bounds: LayoutRect;
+  readonly pointToPage: Matrix2DData;
+}
+
+/** Retained DrawingML occurrence projected into physical page points. */
+export interface DrawingGeometry {
+  readonly drawing: DrawingLayout;
+  readonly textBoxes: readonly TextBoxLayout[];
+  readonly pointToPage: Matrix2DData;
+  /** Ancestor paint clips, in their retained local coordinate spaces. */
+  readonly clips: readonly ElementClipGeometry[];
+  /** Index of the page paint entry that owns this occurrence. */
+  readonly paintOrderIndex: number;
+  /** Stable tie-breaker for inline drawings inside the same paint entry. */
+  readonly sourceOrder: number;
+}
+
+/** Inline image/chart occurrence projected into physical page points. */
+export interface InlineResourceGeometry {
+  readonly placement: ResourcePlacement & Readonly<{ resourceKind: 'image' | 'chart' }>;
+  readonly source: SourceRef;
+  readonly pointToPage: Matrix2DData;
+  /** Ancestor paint clips, in their retained local coordinate spaces. */
+  readonly clips: readonly ElementClipGeometry[];
+  /** Index of the page paint entry that owns the paragraph occurrence. */
+  readonly paintOrderIndex: number;
+  /** Stable tie-breaker within the owning paint entry. */
+  readonly sourceOrder: number;
+}
+
+export type ElementGeometry = DrawingGeometry | InlineResourceGeometry;
+
 interface ProjectionContext {
+  readonly collectTextRuns: boolean;
+  readonly collectDrawings: boolean;
   readonly drawingEntries: ReadonlyMap<string, PagePaintDrawingEntry>;
   readonly rootPointToPage: ReadonlyMap<string, Matrix2DData>;
+  readonly rootPaintOrder: ReadonlyMap<string, number>;
+  readonly drawingPaintOrder: ReadonlyMap<string, number>;
   readonly emittedTextBoxes: Set<string>;
+  readonly emittedDrawings: Set<string>;
   readonly runs: TextRunGeometry[];
+  readonly drawings: DrawingGeometry[];
+  readonly inlineResources: InlineResourceGeometry[];
+  drawingSourceOrder: number;
 }
 
 interface NodeProjection {
   readonly pointToPage: Matrix2DData;
   readonly layoutTranslationPt: PointPt;
   readonly rootNodeId: string;
+  readonly paintOrderIndex: number;
+  readonly clips: readonly ElementClipGeometry[];
 }
 
 const IDENTITY_AFFINE = Object.freeze({
   a: 1, b: 0, c: 0, d: 1, e: 0, f: 0,
 }) satisfies Matrix2DData;
+
+const EMPTY_CLIPS = Object.freeze([]) satisfies readonly ElementClipGeometry[];
 
 function pageRegionsByDomain(
   page: LayoutPage,
@@ -76,23 +127,44 @@ function pointToPageForRoot(
   return matrix ?? IDENTITY_AFFINE;
 }
 
-function pointToPageForEntry(
+function projectionForEntry(
   context: ProjectionContext,
   entry: PagePaintDrawingEntry,
-): Matrix2DData {
+): NodeProjection {
   const rootPointToPage = context.rootPointToPage.get(entry.rootNodeId);
   if (!rootPointToPage) {
     throw new Error(`Drawing entry ${entry.node.id} references missing root ${entry.rootNodeId}`);
   }
   let pointToPage = rootPointToPage;
+  const clips: ElementClipGeometry[] = [];
   for (const frame of entry.frames) {
     if (frame.kind === 'transform') {
       pointToPage = composeAffine(pointToPage, frame.transform);
+    } else {
+      clips.push(Object.freeze({ bounds: frame.clip, pointToPage }));
     }
-    // Clip frames affect visible pixels, but the former post-paint callback
-    // reported retained text geometry even when a run was partially clipped.
   }
-  return pointToPage;
+  return {
+    pointToPage,
+    layoutTranslationPt: entry.layoutTranslationPt,
+    rootNodeId: entry.rootNodeId,
+    paintOrderIndex: context.drawingPaintOrder.get(entry.node.id) ?? -1,
+    clips: Object.freeze(clips),
+  };
+}
+
+function withClip(
+  projection: NodeProjection,
+  bounds: LayoutRect | undefined,
+): NodeProjection {
+  if (!bounds) return projection;
+  return {
+    ...projection,
+    clips: Object.freeze([
+      ...projection.clips,
+      Object.freeze({ bounds, pointToPage: projection.pointToPage }),
+    ]),
+  };
 }
 
 function placedChildProjection(
@@ -103,6 +175,7 @@ function placedChildProjection(
   const dxPt = placement.xPt - child.flowBounds.xPt;
   const dyPt = placement.yPt - child.flowBounds.yPt;
   return {
+    ...parent,
     pointToPage: composeAffine(
       parent.pointToPage,
       translationAffine(dxPt, dyPt),
@@ -111,7 +184,6 @@ function placedChildProjection(
       xPt: parent.layoutTranslationPt.xPt + dxPt,
       yPt: parent.layoutTranslationPt.yPt + dyPt,
     },
-    rootNodeId: parent.rootNodeId,
   };
 }
 
@@ -132,24 +204,35 @@ function visitTextBox(
 ): void {
   if (context.emittedTextBoxes.has(textBox.id)) return;
   context.emittedTextBoxes.add(textBox.id);
-  const textBoxProjection: NodeProjection = {
+  const transformedProjection: NodeProjection = {
     ...projection,
     pointToPage: composeAffine(projection.pointToPage, textBox.transform),
   };
+  const textBoxProjection = withClip(transformedProjection, textBox.clipBounds);
   for (const block of textBox.story.blocks) {
     visitNode(block, textBoxProjection, context);
   }
 }
 
-function visitDrawingTextBoxes(
+function visitDrawing(
   textBoxesById: ReadonlyMap<string, TextBoxLayout>,
   drawing: DrawingLayout,
   projection: NodeProjection,
   context: ProjectionContext,
 ): void {
   const textBoxes = drawingTextBoxes(textBoxesById, drawing);
-  if (textBoxes.length === 0) return;
   const ownedProjection = drawingOwnedContentProjection(drawing, projection, context);
+  if (context.collectDrawings && !context.emittedDrawings.has(drawing.id)) {
+    context.emittedDrawings.add(drawing.id);
+    context.drawings.push(Object.freeze({
+      drawing,
+      textBoxes,
+      pointToPage: ownedProjection.pointToPage,
+      clips: ownedProjection.clips,
+      paintOrderIndex: ownedProjection.paintOrderIndex,
+      sourceOrder: context.drawingSourceOrder++,
+    }));
+  }
   for (const textBox of textBoxes) {
     visitTextBox(textBox, ownedProjection, context);
   }
@@ -166,11 +249,7 @@ function drawingOwnedContentProjection(
     retainedEntry
     && retainedEntry.rootNodeId === projection.rootNodeId
   ) {
-    drawingProjection = {
-      pointToPage: pointToPageForEntry(context, retainedEntry),
-      layoutTranslationPt: retainedEntry.layoutTranslationPt,
-      rootNodeId: retainedEntry.rootNodeId,
-    };
+    drawingProjection = projectionForEntry(context, retainedEntry);
   }
   const translation = drawingProjection.layoutTranslationPt;
   const undoX = drawing.anchorLayer?.horizontalOwnership === 'page'
@@ -203,16 +282,20 @@ function visitParagraph(
   projection: NodeProjection,
   context: ProjectionContext,
 ): void {
-  for (const line of paragraph.lines) {
-    for (const placement of line.placements) {
-      if (placement.kind === 'text') {
-        context.runs.push(Object.freeze({
-          placement,
-          pointToPage: projection.pointToPage,
-          ...(paragraph.paragraphId !== undefined
-            ? { paragraphId: paragraph.paragraphId }
-            : {}),
-        }));
+  const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  if (context.collectTextRuns) {
+    for (const line of paragraph.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind === 'text') {
+          context.runs.push(Object.freeze({
+            placement,
+            pointToPage: projection.pointToPage,
+            source: paragraph.source,
+            ...(paragraph.paragraphId !== undefined
+              ? { paragraphId: paragraph.paragraphId }
+              : {}),
+          }));
+        }
       }
     }
   }
@@ -230,16 +313,50 @@ function visitParagraph(
       return { drawing, index, runIndex };
     })
     .sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
+  const inlineResourcesInSourceOrder = context.collectDrawings
+    ? paragraph.lines.flatMap((line) =>
+        line.placements.flatMap((placement, index) => {
+          if (placement.kind !== 'resource' ||
+            (placement.resourceKind !== 'image' && placement.resourceKind !== 'chart') ||
+            placement.sourceRunIndex === undefined) return [];
+          return [{
+            placement: placement as ResourcePlacement & Readonly<{ resourceKind: 'image' | 'chart' }>,
+            index,
+            runIndex: placement.sourceRunIndex,
+          }];
+        }))
+    : [];
   // Both anchored and inline drawings retain their paragraph run index as the
   // terminal SourceRef path component. That is the one comparable source-order
   // domain; anchor stacking ordinals and drawings-array indexes are not mixed.
   for (const { drawing } of drawingsInSourceOrder) {
     for (const id of drawing.textBoxIds ?? []) ownedTextBoxIds.add(id);
-    visitDrawingTextBoxes(textBoxesById, drawing, projection, context);
+  }
+  const elementsInSourceOrder = [
+    ...drawingsInSourceOrder.map((entry) => ({ kind: 'drawing' as const, ...entry })),
+    ...inlineResourcesInSourceOrder.map((entry) => ({ kind: 'resource' as const, ...entry })),
+  ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
+  for (const entry of elementsInSourceOrder) {
+    if (entry.kind === 'drawing') {
+      visitDrawing(textBoxesById, entry.drawing, paragraphProjection, context);
+      continue;
+    }
+    if (!context.collectDrawings) continue;
+    context.inlineResources.push(Object.freeze({
+      placement: entry.placement,
+      source: Object.freeze({
+        ...paragraph.source,
+        path: Object.freeze([...paragraph.source.path, entry.runIndex]),
+      }),
+      pointToPage: paragraphProjection.pointToPage,
+      clips: paragraphProjection.clips,
+      paintOrderIndex: paragraphProjection.paintOrderIndex,
+      sourceOrder: context.drawingSourceOrder++,
+    }));
   }
   for (const textBox of paragraph.textBoxes) {
     if (!ownedTextBoxIds.has(textBox.id)) {
-      visitTextBox(textBox, projection, context);
+      visitTextBox(textBox, paragraphProjection, context);
     }
   }
 }
@@ -249,11 +366,13 @@ function visitTable(
   projection: NodeProjection,
   context: ProjectionContext,
 ): void {
+  const tableProjection = withClip(projection, table.clipBounds);
   for (const row of table.rows) {
     for (const cell of row.cells) {
       const ownsContinuationPaint = 'visualMergeOwnership' in cell
         && cell.visualMergeOwnership === 'continuation';
       if (cell.verticalMerge === 'continue' && !ownsContinuationPaint) continue;
+      const cellProjection = withClip(tableProjection, cell.clipBounds);
       for (const block of cell.blocks) {
         const child = block.layout;
         visitNode(child, placedChildProjection(child, {
@@ -261,7 +380,7 @@ function visitTable(
             + (child.kind === 'table' ? child.flowBounds.xPt : 0),
           yPt: cell.flowBounds.yPt + block.offsetPt
             + (child.kind === 'table' ? child.flowBounds.yPt : 0),
-        }, projection), context);
+        }, cellProjection), context);
       }
     }
   }
@@ -269,7 +388,7 @@ function visitTable(
     visitNode(placement.child, placedChildProjection(placement.child, {
       xPt: placement.xPt - projection.layoutTranslationPt.xPt,
       yPt: placement.yPt - projection.layoutTranslationPt.yPt,
-    }, projection), context);
+    }, tableProjection), context);
   }
 }
 
@@ -286,17 +405,21 @@ function visitNode(
       visitTable(node, projection, context);
       return;
     case 'note':
-      for (const block of node.story.blocks) visitNode(block, projection, context);
+      for (const block of node.story.blocks) {
+        visitNode(block, withClip(projection, node.story.clipBounds), context);
+      }
       return;
     case 'textbox':
       visitTextBox(node, projection, context);
       return;
     case 'drawing': {
       const entry = context.drawingEntries.get(node.id);
-      const ownedProjection = drawingOwnedContentProjection(node, projection, context);
-      for (const textBox of entry?.textBoxes ?? []) {
-        visitTextBox(textBox, ownedProjection, context);
-      }
+      visitDrawing(
+        new Map((entry?.textBoxes ?? []).map((textBox) => [textBox.id, textBox])),
+        node,
+        projection,
+        context,
+      );
       return;
     }
     default: {
@@ -311,10 +434,11 @@ function visitNode(
  * semantic reading order; paint order contributes only already-materialized
  * anchor frame geometry.
  */
-export function textRunGeometryForPage(
+function pageGeometryIndex(
   layout: DocumentLayout,
   pageIndex: number,
-): readonly TextRunGeometry[] {
+  options: Readonly<{ collectTextRuns: boolean; collectDrawings: boolean }>,
+): ProjectionContext {
   const page = layout.pages[pageIndex];
   if (!page) throw new RangeError(`Page index ${pageIndex} is out of range`);
   const roots = new Map(page.layers.roots.map((root) => [root.node.id, root]));
@@ -324,14 +448,25 @@ export function textRunGeometryForPage(
     pointToPageForRoot(regionByDomain, root),
   ]));
   const drawingEntries = new Map<string, PagePaintDrawingEntry>();
-  for (const entry of page.layers.paintOrder) {
+  const drawingPaintOrder = new Map<string, number>();
+  const rootPaintOrder = new Map<string, number>();
+  for (const [index, entry] of page.layers.paintOrder.entries()) {
     if (entry.kind === 'drawing') drawingEntries.set(entry.node.id, entry);
+    if (entry.kind === 'drawing') drawingPaintOrder.set(entry.node.id, index);
+    else rootPaintOrder.set(entry.node.id, index);
   }
   const context: ProjectionContext = {
+    ...options,
     drawingEntries,
     rootPointToPage,
+    rootPaintOrder,
+    drawingPaintOrder,
     emittedTextBoxes: new Set(),
+    emittedDrawings: new Set(),
     runs: [],
+    drawings: [],
+    inlineResources: [],
+    drawingSourceOrder: 0,
   };
   for (const nodeId of page.readingOrder) {
     const root = roots.get(nodeId);
@@ -342,7 +477,51 @@ export function textRunGeometryForPage(
       pointToPage,
       layoutTranslationPt: { xPt: 0, yPt: 0 },
       rootNodeId: root.node.id,
+      paintOrderIndex: rootPaintOrder.get(root.node.id) ?? -1,
+      clips: EMPTY_CLIPS,
     }, context);
   }
-  return Object.freeze(context.runs);
+  return context;
+}
+
+export function textRunGeometryForPage(
+  layout: DocumentLayout,
+  pageIndex: number,
+): readonly TextRunGeometry[] {
+  return Object.freeze(pageGeometryIndex(layout, pageIndex, {
+    collectTextRuns: true,
+    collectDrawings: false,
+  }).runs);
+}
+
+/**
+ * Index retained drawings in page paint order. The projection is shared with
+ * text-box painting, including vertical-page and page-owned anchor transforms.
+ */
+export function drawingGeometryForPage(
+  layout: DocumentLayout,
+  pageIndex: number,
+): readonly DrawingGeometry[] {
+  const drawings = pageGeometryIndex(layout, pageIndex, {
+    collectTextRuns: false,
+    collectDrawings: true,
+  }).drawings;
+  drawings.sort((left, right) => left.paintOrderIndex - right.paintOrderIndex ||
+    left.sourceOrder - right.sourceOrder);
+  return Object.freeze(drawings);
+}
+
+/** Index selectable drawings and inline image/chart placements in page paint order. */
+export function elementGeometryForPage(
+  layout: DocumentLayout,
+  pageIndex: number,
+): readonly ElementGeometry[] {
+  const index = pageGeometryIndex(layout, pageIndex, {
+    collectTextRuns: false,
+    collectDrawings: true,
+  });
+  const elements: ElementGeometry[] = [...index.drawings, ...index.inlineResources];
+  elements.sort((left, right) => left.paintOrderIndex - right.paintOrderIndex ||
+    left.sourceOrder - right.sourceOrder);
+  return Object.freeze(elements);
 }

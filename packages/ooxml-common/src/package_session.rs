@@ -320,10 +320,15 @@ impl PackageSession {
         format: OoxmlFormat,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Result<Self, String> {
         let source = PackageBytes::new(data);
-        let governor =
-            ResourceGovernor::from_wasm(format, max_archive_entry_bytes, max_total_inflated_bytes);
+        let governor = ResourceGovernor::from_wasm(
+            format,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+            max_archive_entries,
+        );
         let _scope = governor.scope("open");
         let mut archive = bounded_zip::open_validated_cursor(Cursor::new(source.as_slice()))?;
 
@@ -728,12 +733,14 @@ impl PackageSessionHandle {
         format: OoxmlFormat,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Result<Self, String> {
         PackageSession::open(
             data,
             format,
             max_archive_entry_bytes,
             max_total_inflated_bytes,
+            max_archive_entries,
         )
         .map(Self::new)
     }
@@ -751,6 +758,40 @@ impl PackageSessionHandle {
             id,
             state: OwnedOperationState::Active,
         })
+    }
+
+    /// Run one self-contained package read in its own accounting operation.
+    ///
+    /// Format cursors may retain a different operation across an acknowledged
+    /// unit boundary. This helper deliberately does not borrow that cursor's
+    /// operation: the package session owns both lifecycles and applies the same
+    /// shared governor to them. Success commits only this operation; failure
+    /// cancels only this operation while preserving a package-wide resource
+    /// failure as the primary error.
+    pub fn run_operation<T>(
+        &self,
+        name: impl Into<String>,
+        run: impl FnOnce(&PackageOperation) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut operation = self.begin_operation(name)?;
+        let result = run(&operation);
+        if let Err(resource_error) = self.assert_healthy() {
+            let _ = operation.cancel();
+            return Err(resource_error);
+        }
+        match result {
+            Ok(value) => match operation.finish() {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    let _ = operation.cancel();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                let _ = operation.cancel();
+                Err(error)
+            }
+        }
     }
 
     /// Verify that the package is still open and has not encountered a
@@ -945,6 +986,113 @@ impl Drop for PackageOperation {
     }
 }
 
+/// Owns the single retained package operation used by a format parser cursor.
+///
+/// DOCX, XLSX, and PPTX expose different parser models, but their package-read
+/// lifecycle is identical: one explicitly started operation remains active
+/// across the format-specific work and is then committed or canceled as one
+/// unit. Keeping that ownership protocol here prevents the three adapters from
+/// drifting in health checks, error precedence, or cleanup behavior.
+pub struct RetainedPackageOperation {
+    format: &'static str,
+    operation: Option<PackageOperation>,
+}
+
+impl RetainedPackageOperation {
+    pub fn new(format: &'static str) -> Self {
+        Self {
+            format,
+            operation: None,
+        }
+    }
+
+    pub fn begin(&mut self, session: &PackageSessionHandle, name: &str) -> Result<(), String> {
+        if self.operation.is_some() {
+            return Err(format!(
+                "{} package operation is already active",
+                self.format
+            ));
+        }
+        self.operation = Some(session.begin_operation(name)?);
+        Ok(())
+    }
+
+    /// Return the retained operation, optionally creating a test-only
+    /// compatibility scope selected by the format adapter.
+    pub fn operation(
+        &mut self,
+        session: &PackageSessionHandle,
+        compatibility_name: Option<&str>,
+    ) -> Result<&PackageOperation, String> {
+        if self.operation.is_none() {
+            let Some(name) = compatibility_name else {
+                return Err(format!(
+                    "{} package read requires an active operation",
+                    self.format
+                ));
+            };
+            self.operation = Some(session.begin_operation(name)?);
+        }
+        Ok(self
+            .operation
+            .as_ref()
+            .expect("operation initialized above"))
+    }
+
+    pub fn active(&self) -> Result<&PackageOperation, String> {
+        self.operation
+            .as_ref()
+            .ok_or_else(|| format!("{} package operation is not active", self.format))
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.operation.is_some()
+    }
+
+    pub fn usage(&self) -> Option<ResourceUsage> {
+        self.operation.as_ref().and_then(PackageOperation::usage)
+    }
+
+    pub fn finish(&mut self) -> Result<(), String> {
+        let Some(mut operation) = self.operation.take() else {
+            return Ok(());
+        };
+        operation.finish()
+    }
+
+    pub fn cancel(&mut self) {
+        if let Some(mut operation) = self.operation.take() {
+            let _ = operation.cancel();
+        }
+    }
+
+    /// Settle a format operation after its format-specific work finishes.
+    /// Package-wide resource failures take precedence over parse/model errors.
+    pub fn settle<T>(
+        &mut self,
+        session: &PackageSessionHandle,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        if let Err(resource_error) = session.assert_healthy() {
+            self.cancel();
+            return Err(resource_error);
+        }
+        match result {
+            Ok(value) => match self.finish() {
+                Ok(()) => Ok(value),
+                Err(error) => {
+                    self.cancel();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                self.cancel();
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Operation-bound reporting capability for parser/model safety ceilings.
 ///
 /// This capability does not own operation lifecycle. Dropping it is inert, and
@@ -1095,12 +1243,67 @@ mod tests {
     }
 
     #[test]
+    fn retained_operation_requires_explicit_scope_unless_adapter_allows_compatibility() {
+        let bytes = package(&[("word/document.xml", b"<w/>", CompressionMethod::Stored)]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
+        let mut retained = RetainedPackageOperation::new("docx");
+
+        assert_eq!(
+            retained.operation(&handle, None).err().unwrap(),
+            "docx package read requires an active operation"
+        );
+        assert_eq!(
+            retained
+                .operation(&handle, Some("docx-parser-compat"))
+                .unwrap()
+                .read_bytes("word/document.xml")
+                .unwrap(),
+            b"<w/>"
+        );
+        assert!(retained.is_active());
+        retained.cancel();
+        assert!(!retained.is_active());
+    }
+
+    #[test]
+    fn retained_operation_settlement_prioritizes_package_resource_failure() {
+        let bytes = package(&[(
+            "xl/worksheets/sheet1.xml",
+            b"<x/>",
+            CompressionMethod::Stored,
+        )]);
+        let handle =
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64), None).unwrap();
+        let mut retained = RetainedPackageOperation::new("xlsx");
+        retained.begin(&handle, "parse-sheet").unwrap();
+        let reporter = retained.active().unwrap().limit_reporter().unwrap();
+        let resource_error = reporter
+            .observe_hard_limit(
+                HardResourceLimitKind::XmlEventBytes,
+                Some("xl/worksheets/sheet1.xml"),
+                8,
+                9,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            retained
+                .settle::<()>(&handle, Err("secondary parse failure".to_string()))
+                .unwrap_err(),
+            resource_error
+        );
+        assert!(!retained.is_active());
+    }
+
+    #[test]
     fn stored_and_deflated_entries_cross_bounded_pulls() {
         let body = b"abcdefghijklmnopqrstuvwxyz";
         for compression in [CompressionMethod::Stored, CompressionMethod::Deflated] {
             let bytes = package(&[("word/document.xml", body, compression)]);
             let mut session =
-                PackageSession::open(bytes, OoxmlFormat::Docx, Some(1024), Some(1024)).unwrap();
+                PackageSession::open(bytes, OoxmlFormat::Docx, Some(1024), Some(1024), None)
+                    .unwrap();
             let operation = session.begin_operation("parse").unwrap();
             let reader = session.open_entry(operation, "word/document.xml").unwrap();
             assert_eq!(drain(&mut session, operation, reader, 5).unwrap(), body);
@@ -1118,7 +1321,8 @@ mod tests {
         let mut prefixed = b"MZ\x90\0self-extracting-prefix".to_vec();
         prefixed.extend_from_slice(&package);
         let handle =
-            PackageSessionHandle::open(prefixed, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(prefixed, OoxmlFormat::Xlsx, Some(64), Some(64), None)
+                .unwrap();
         let operation = handle.begin_operation("parse").unwrap();
         assert_eq!(
             operation.read_bytes("xl/workbook.xml").unwrap(),
@@ -1133,7 +1337,8 @@ mod tests {
             b"12345678",
             CompressionMethod::Deflated,
         )]);
-        let mut session = PackageSession::open(bytes, OoxmlFormat::Xlsx, Some(8), Some(8)).unwrap();
+        let mut session =
+            PackageSession::open(bytes, OoxmlFormat::Xlsx, Some(8), Some(8), None).unwrap();
         let operation = session.begin_operation("sheet").unwrap();
         let reader = session
             .open_entry(operation, "xl/worksheets/sheet1.xml")
@@ -1146,7 +1351,8 @@ mod tests {
     #[test]
     fn pull_credit_is_positive_and_internally_bounded() {
         let bytes = package(&[("word/a.xml", b"1", CompressionMethod::Stored)]);
-        let mut session = PackageSession::open(bytes, OoxmlFormat::Docx, Some(8), Some(8)).unwrap();
+        let mut session =
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(8), Some(8), None).unwrap();
         let operation = session.begin_operation("parse").unwrap();
         let reader = session.open_entry(operation, "word/a.xml").unwrap();
         assert!(session.pull_entry(operation, reader, 0).is_err());
@@ -1170,7 +1376,7 @@ mod tests {
             CompressionMethod::Stored,
         )]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Pptx, Some(64), Some(64)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Pptx, Some(64), Some(64), None).unwrap();
         let operation = session.begin_operation("slide").unwrap();
         let reader = session
             .open_entry(operation, "ppt/slides/slide1.xml")
@@ -1188,7 +1394,8 @@ mod tests {
     #[test]
     fn exact_limit_succeeds_and_limit_plus_one_poisons_every_later_read() {
         let exact = package(&[("word/a.xml", b"1234", CompressionMethod::Stored)]);
-        let mut session = PackageSession::open(exact, OoxmlFormat::Docx, Some(4), Some(4)).unwrap();
+        let mut session =
+            PackageSession::open(exact, OoxmlFormat::Docx, Some(4), Some(4), None).unwrap();
         let operation = session.begin_operation("parse").unwrap();
         let reader = session.open_entry(operation, "word/a.xml").unwrap();
         assert_eq!(drain(&mut session, operation, reader, 2).unwrap(), b"1234");
@@ -1205,7 +1412,8 @@ mod tests {
             .position(|window| window == 0x0201_4b50u32.to_le_bytes())
             .unwrap();
         over[central + 24..central + 28].copy_from_slice(&1u32.to_le_bytes());
-        let mut session = PackageSession::open(over, OoxmlFormat::Docx, Some(4), Some(64)).unwrap();
+        let mut session =
+            PackageSession::open(over, OoxmlFormat::Docx, Some(4), Some(64), None).unwrap();
         let operation = session.begin_operation("parse").unwrap();
         let reader = session.open_entry(operation, "word/a.xml").unwrap();
         let sibling = session.open_entry(operation, "word/b.xml").unwrap();
@@ -1228,7 +1436,7 @@ mod tests {
     fn reread_counts_operation_work_but_not_distinct_session_bytes() {
         let bytes = package(&[("word/a.xml", b"1234", CompressionMethod::Deflated)]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(4)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(4), None).unwrap();
         let operation = session.begin_operation("parse-and-markdown").unwrap();
         for _ in 0..2 {
             let reader = session.open_entry(operation, "word/a.xml").unwrap();
@@ -1245,7 +1453,7 @@ mod tests {
             ("word/b.xml", b"567", CompressionMethod::Stored),
         ]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(16)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(16), None).unwrap();
         let first_operation = session.begin_operation("first").unwrap();
         let second_operation = session.begin_operation("second").unwrap();
         let first_reader = session.open_entry(first_operation, "word/a.xml").unwrap();
@@ -1271,7 +1479,7 @@ mod tests {
             ("word/b.xml", b"two", CompressionMethod::Stored),
         ]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(6)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(6), None).unwrap();
         let operation = session.begin_operation("parse").unwrap();
         let first = session.open_entry_by_index(operation, 0).unwrap();
         let second = session.open_entry_by_index(operation, 1).unwrap();
@@ -1287,7 +1495,7 @@ mod tests {
             ("word/b.xml", b"5678", CompressionMethod::Stored),
         ]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(6)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(6), None).unwrap();
         let operation = session.begin_operation("parse").unwrap();
         // Both readers are opened before either consumes the package-wide
         // budget. The second pull must observe what the first pull charged.
@@ -1312,7 +1520,7 @@ mod tests {
         bytes[bad_start] ^= 0xff;
 
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
         let bad_operation = session.begin_operation("bad").unwrap();
         let bad_reader = session.open_entry(bad_operation, "word/bad.bin").unwrap();
         assert!(drain(&mut session, bad_operation, bad_reader, 2)
@@ -1331,7 +1539,7 @@ mod tests {
     fn cancel_finish_release_and_close_are_idempotent() {
         let bytes = package(&[("word/a.xml", b"1234", CompressionMethod::Stored)]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(16)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(16), None).unwrap();
         let operation = session.begin_operation("parse").unwrap();
         let reader = session.open_entry(operation, "word/a.xml").unwrap();
         session.release_entry(reader);
@@ -1351,7 +1559,7 @@ mod tests {
     fn finalized_operation_history_is_bounded_without_limiting_session_lifetime() {
         let bytes = package(&[("word/a.xml", b"1", CompressionMethod::Stored)]);
         let mut session =
-            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(16)).unwrap();
+            PackageSession::open(bytes, OoxmlFormat::Docx, Some(16), Some(16), None).unwrap();
         let mut first = None;
         let mut latest = None;
         for index in 0..(MAX_FINALIZED_OPERATION_RECORDS + 10) {
@@ -1371,7 +1579,7 @@ mod tests {
     fn handle_clones_share_one_session_and_distinct_accounting() {
         let bytes = package(&[("xl/sharedStrings.xml", b"shared", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64), None).unwrap();
         let clone = handle.clone();
         assert!(Rc::ptr_eq(&handle.inner, &clone.inner));
 
@@ -1396,7 +1604,8 @@ mod tests {
             ("xl/c.xml", b"other", CompressionMethod::Deflated),
             ("xl/b.xml", b"last", CompressionMethod::Stored),
         ]);
-        let session = PackageSession::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+        let session =
+            PackageSession::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64), None).unwrap();
         assert_eq!(session.entry_count(), 3);
         assert!(session.contains_entry("xl/a.xml"));
         assert!(!session.contains_entry("xl/missing.xml"));
@@ -1435,7 +1644,7 @@ mod tests {
                 exact[offset..offset + b"xl/b.xml".len()].copy_from_slice(b"xl/a.xml");
             }
         }
-        let exact_error = PackageSession::open(exact, OoxmlFormat::Xlsx, Some(64), Some(64))
+        let exact_error = PackageSession::open(exact, OoxmlFormat::Xlsx, Some(64), Some(64), None)
             .err()
             .unwrap();
         assert!(exact_error.contains("ZIP item names must be unique"));
@@ -1446,7 +1655,7 @@ mod tests {
             ("XL/A.XML", b"second", CompressionMethod::Stored),
         ]);
         let case_error =
-            PackageSession::open(case_collision, OoxmlFormat::Xlsx, Some(64), Some(64))
+            PackageSession::open(case_collision, OoxmlFormat::Xlsx, Some(64), Some(64), None)
                 .err()
                 .unwrap();
         assert!(case_error.contains("unique ignoring ASCII case"));
@@ -1460,7 +1669,7 @@ mod tests {
             ("xl/b.xml", b"12345", CompressionMethod::Stored),
         ]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64), None).unwrap();
         let operation = handle.begin_operation("sheet").unwrap();
         let mut first = operation.open_entry("xl/a.xml").unwrap();
         let mut second = operation.open_entry("xl/b.xml").unwrap();
@@ -1482,7 +1691,7 @@ mod tests {
     fn operation_finish_cancel_and_drop_are_idempotent() {
         let bytes = package(&[("word/a.xml", b"body", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
 
         let mut finished = handle.begin_operation("finished").unwrap();
         let finished_id = finished.id;
@@ -1520,7 +1729,7 @@ mod tests {
     fn entry_stream_reports_eof_after_returning_exact_credit() {
         let bytes = package(&[("ppt/slide.xml", b"12345678", CompressionMethod::Deflated)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Pptx, Some(8), Some(8)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Pptx, Some(8), Some(8), None).unwrap();
         let operation = handle.begin_operation("slide").unwrap();
         let mut stream = operation.open_entry("ppt/slide.xml").unwrap();
         let mut exact = [0u8; 8];
@@ -1537,7 +1746,7 @@ mod tests {
             ("word/b.xml", b"5678", CompressionMethod::Stored),
         ]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(6)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(6), None).unwrap();
         let operation = handle.begin_operation("parse").unwrap();
         assert_eq!(operation.read_bytes("word/a.xml").unwrap(), b"1234");
         let error = operation.read_bytes("word/b.xml").unwrap_err();
@@ -1558,7 +1767,7 @@ mod tests {
             CompressionMethod::Stored,
         )]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Xlsx, Some(64), Some(64), None).unwrap();
         let primary = handle.begin_operation("parse-sheet").unwrap();
         let sibling = handle.begin_operation("inspect").unwrap();
         let stream = primary.open_entry("xl/worksheets/sheet1.xml").unwrap();
@@ -1598,7 +1807,7 @@ mod tests {
     fn limit_reporter_does_not_outlive_operation_lifecycle() {
         let bytes = package(&[("word/document.xml", b"<w/>", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
         let reporter = {
             let mut operation = handle.begin_operation("parse").unwrap();
             let stream = operation.open_entry("word/document.xml").unwrap();
@@ -1617,7 +1826,7 @@ mod tests {
     fn read_head_releases_its_entry_reader() {
         let bytes = package(&[("word/a.xml", b"abcdefgh", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
         let operation = handle.begin_operation("inspect").unwrap();
         assert!(operation.read_head("word/missing.xml", 0).is_err());
         assert_eq!(operation.read_head("word/a.xml", 0).unwrap(), b"");
@@ -1632,7 +1841,7 @@ mod tests {
     fn active_reader_count_and_id_allocation_have_hard_stops() {
         let bytes = package(&[("word/a.xml", b"a", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
         let operation = handle.begin_operation("many-readers").unwrap();
         let mut streams = Vec::with_capacity(HARD_MAX_ACTIVE_ENTRY_READERS);
         for _ in 0..HARD_MAX_ACTIVE_ENTRY_READERS {
@@ -1655,7 +1864,7 @@ mod tests {
     fn finishing_or_dropping_an_operation_invalidates_live_streams() {
         let bytes = package(&[("word/a.xml", b"body", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
 
         let mut finished = handle.begin_operation("finished").unwrap();
         let mut finished_stream = finished.open_entry("word/a.xml").unwrap();
@@ -1676,7 +1885,7 @@ mod tests {
     fn closing_a_handle_invalidates_all_clones_and_owned_streams() {
         let bytes = package(&[("word/a.xml", b"body", CompressionMethod::Stored)]);
         let handle =
-            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64)).unwrap();
+            PackageSessionHandle::open(bytes, OoxmlFormat::Docx, Some(64), Some(64), None).unwrap();
         let clone = handle.clone();
         let operation = clone.begin_operation("parse").unwrap();
         let mut stream = operation.open_entry("word/a.xml").unwrap();

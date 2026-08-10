@@ -23,8 +23,8 @@ import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-wo
 //
 // The host also OWNS the archive handle (`host.archive`): a
 // `XlsxArchive(bytes, max)` copies the file into WASM ONCE and scans the central
-// directory ONCE; the workbook / sharedStrings / theme parts are then parsed
-// ONCE and reused on every `parseSheet`. `extractImage` also reads by zip path
+// directory ONCE; workbook/sharedStrings/theme state is reused by the bounded
+// worksheet pull sessions. `extractImage` also reads by zip path
 // straight from the retained archive. Freed + replaced on a re-parse, and freed +
 // nulled by the host itself on a trap so a later parse never double-frees a
 // handle from a discarded instance.
@@ -93,7 +93,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       host.run(() => retained.assert_healthy());
     }
     if (req.type === 'parse') {
-      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
+      const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
       // Both the construction and `parse()` run under `host.run` so a trap in
       // EITHER poisons + recycles the instance (and frees the archive). Adopting
@@ -103,7 +103,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       // buffer, so forward it to main as a transferable — no clone, no decode
       // here. The single decode + JSON.parse happens on main.
       const json = host.run(() => {
-        const archive = new XlsxArchive(bytes, maxEntry, maxTotal);
+        const archive = new XlsxArchive(bytes, maxEntry, maxTotal, maxEntries);
         host.setArchive(archive);
         return archive.parse();
       });
@@ -119,27 +119,6 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
     }
 
     const archive = host.archive;
-
-    if (req.type === 'parseSheet') {
-      // Parse straight off the retained archive, reusing its cached workbook /
-      // sharedStrings / theme parts — the whole file no longer crosses the worker
-      // boundary and those shared parts are no longer re-parsed on every sheet
-      // switch. A `parseSheet` before any `parse` has no archive to work with:
-      // that is a protocol violation, so fail loudly.
-      if (!archive) {
-        throw new Error('parseSheet before parse: no archive retained');
-      }
-      // `parse_sheet` also returns UTF-8 JSON bytes; forward its transferable
-      // buffer to main the same way (single decode + parse on main). Guarded so a
-      // trap on ONE sheet recycles the instance instead of wedging the workbook.
-      const json = host.run(() => archive.parse_sheet(req.sheetIndex, req.sheetName));
-      const worksheetJson = json.buffer as ArrayBuffer;
-      const res: WorkerResponse = { type: 'parsedSheet', id, worksheetJson };
-      (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
-        worksheetJson,
-      ]);
-      return;
-    }
 
     if (req.type === 'extractImage') {
       if (!archive) throw new Error('No xlsx loaded');

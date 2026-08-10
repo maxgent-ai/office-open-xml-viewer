@@ -28,6 +28,63 @@ function controllerFor(sheets: { name: string; cells: FindCell[] }[]): XlsxFindC
 const cell = (row: number, col: number, text: string): FindCell => ({ row, col, text });
 
 describe('XlsxFindController.find', () => {
+  it('commits only the latest overlapping search', async () => {
+    const pending: Array<(cells: FindCell[]) => void> = [];
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      () => new Promise<FindCell[]>((resolve) => pending.push(resolve)),
+    );
+
+    const stale = c.find('old');
+    const current = c.find('new');
+    pending[1]([cell(1, 1, 'new')]);
+    await expect(current).resolves.toHaveLength(1);
+    pending[0]([cell(1, 1, 'old')]);
+    await expect(stale).resolves.toEqual([]);
+    expect(c.matches().map((match) => match.text)).toEqual(['new']);
+  });
+
+  it('does not commit a search invalidated while collecting cells', async () => {
+    let resolveCells: (cells: FindCell[]) => void = () => undefined;
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      () => new Promise<FindCell[]>((resolve) => { resolveCells = resolve; }),
+    );
+
+    const stale = c.find('old');
+    c.invalidate();
+    resolveCells([cell(1, 1, 'old')]);
+    await expect(stale).resolves.toEqual([]);
+    expect(c.matches()).toEqual([]);
+  });
+
+  it('suppresses a stale collection rejection after invalidation', async () => {
+    let rejectCells: (reason: Error) => void = () => undefined;
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      () => new Promise<FindCell[]>((_resolve, reject) => { rejectCells = reject; }),
+    );
+
+    const stale = c.find('old');
+    c.invalidate();
+    rejectCells(new Error('old workbook closed'));
+
+    await expect(stale).resolves.toEqual([]);
+  });
+
+  it('propagates a collection rejection for the current query', async () => {
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      () => Promise.reject(new Error('current workbook failed')),
+    );
+
+    await expect(c.find('current')).rejects.toThrow('current workbook failed');
+  });
+
   it('finds a match in a cell and reports its A1 ref + row/col', async () => {
     const c = controllerFor([{ name: 'Sales', cells: [cell(7, 2, 'Revenue')] }]);
     const matches = await c.find('rev');

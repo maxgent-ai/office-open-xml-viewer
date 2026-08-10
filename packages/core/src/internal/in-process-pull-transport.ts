@@ -1,20 +1,15 @@
 import type {
   WorkerBridgeTransport,
   WorkerRequestOptions,
-} from '@silurus/ooxml-core/worker';
+} from '../worker/index.js';
 
 export type InProcessPullDispatch<Response> = (
   command: unknown,
   respond: (response: Response) => void,
 ) => void | Promise<void>;
 
-/**
- * Node-side transport adapter for the same pull protocol used across workers.
- * It owns request correlation and termination only; format adapters continue to
- * own cursor lifecycle, resource accounting, and protocol responses.
- */
-export class InProcessPullTransport<Response>
-implements WorkerBridgeTransport<Response> {
+/** In-realm adapter for the same correlated pull protocol used by workers. */
+export class InProcessPullTransport<Response> implements WorkerBridgeTransport<Response> {
   private nextRequestId = 1;
   private terminated = false;
 
@@ -37,12 +32,8 @@ implements WorkerBridgeTransport<Response> {
     }
     const command = build(this.nextRequestId++);
     let response: Response | undefined;
-    await this.dispatch(command, (value) => {
-      response = value;
-    });
-    if (response === undefined) {
-      throw new Error('in-process pull host did not respond');
-    }
+    await this.dispatch(command, (value) => { response = value; });
+    if (response === undefined) throw new Error('in-process pull host did not respond');
     return response;
   }
 

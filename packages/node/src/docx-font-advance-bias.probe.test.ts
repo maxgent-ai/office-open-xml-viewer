@@ -56,16 +56,16 @@ const have = (n: number) => existsSync(samplePath(n));
 
 interface Run { text: string; x: number; y: number; w: number; h: number; fontSize: number }
 
-function parse(n: number) {
-  return docxMod!.parseDocx(readFileSync(samplePath(n)));
+async function parse(n: number) {
+  return await docxMod!.materializeDocxDocument(readFileSync(samplePath(n)));
 }
 
 /** Page count via retained layout (needs the OffscreenCanvas shim). */
-function pageCount(n: number, width = 595): number {
+async function pageCount(n: number, width = 595): Promise<number> {
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
     const { createLayoutServices, layoutDocument } = rendererMod!;
-    const doc = parse(n);
+    const doc = await parse(n);
     const layoutServices = createLayoutServices(doc);
     return layoutDocument(doc, layoutServices, { currentDateMs: 0 }).pages.length;
   } finally {
@@ -111,7 +111,7 @@ async function pageLines(n: number, page: number, width = 595): Promise<string[]
   const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
   try {
     const { createLayoutServices, renderDocumentToCanvas } = rendererMod!;
-    const doc = parse(n);
+    const doc = await parse(n);
     const layoutServices = createLayoutServices(doc);
     const runs: Run[] = [];
     const canvas = new Canvas(Math.round(width * 1.5), Math.round(width * 2));
@@ -169,12 +169,12 @@ const macos = process.platform === 'darwin';
 const gate = !!skia && !!docxMod && !!rendererMod && macos;
 
 describe.skipIf(!gate)('issue #794 — per-font advance-bias probes', () => {
-  it.skipIf(!have(4))('DIAGNOSTIC (non-acceptance): sample-4 font-absent page count', () => {
+  it.skipIf(!have(4))('DIAGNOSTIC (non-acceptance): sample-4 font-absent page count', async () => {
     // Meiryo UI is absent here, so the full-width substitute reflows and the
     // document may paginate differently from Word on the authoring machine
     // (Word: 1 page; the substitute typically yields 2). Accepted behavior —
     // issue #855 won't-fix. Logged for regen bookkeeping only.
-    const pages = pageCount(4);
+    const pages = await pageCount(4);
     // eslint-disable-next-line no-console
     console.log(`[#794 diagnostic] sample-4 font-absent pageCount = ${pages} (Word with fonts: 1)`);
     expect(pages).toBeGreaterThanOrEqual(1);

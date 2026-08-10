@@ -32,8 +32,10 @@ export function tableCellHorizontalSpacingInsets(
   };
 }
 
-function finiteNonNegative(value: number): number {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
+function finiteNonNegative(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, value)
+    : 0;
 }
 
 function cleanWidths(widths: readonly number[]): number[] {
@@ -474,6 +476,9 @@ function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[
   if (columnCount === 0) return Object.freeze([]);
   const widths = fixedWidths(input, columnCount);
   if (input.layout === 'fixed') {
+    if (input.availableWidthPt === null) {
+      return Object.freeze(widths);
+    }
     const totalPt = widths.reduce((sum, width) => sum + width, 0);
     const maximumPt = finiteNonNegative(input.availableWidthPt);
     if (totalPt <= maximumPt + EPSILON_PT || totalPt <= EPSILON_PT) {

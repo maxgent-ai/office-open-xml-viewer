@@ -1,6 +1,6 @@
 use crate::xml_util::*;
 use ooxml_common::depth::parse_guarded;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// ECMA-376 §17.3.2.14 `<w:fitText>` as one cascaded run property.
 #[derive(Clone, PartialEq, Debug)]
@@ -237,6 +237,11 @@ pub struct ParaFmt {
     /// applied when the resolved paragraph is built so style/direct `false`
     /// remains distinguishable from omission during the cascade.
     pub overflow_punct: Option<bool>,
+    /// ECMA-376 §17.3.1.1 w:adjustRightInd — allow the consumer to adjust the
+    /// effective right indent when a document grid is active. Retained as an
+    /// Option through the style cascade because omission inherits and the final
+    /// specification default is true.
+    pub adjust_right_ind: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
     pub(crate) paragraph_typography: Option<crate::types::ParagraphTypographyWire>,
@@ -415,6 +420,10 @@ pub struct TableStyleDef {
 #[derive(Default)]
 pub struct StyleMap {
     styles: HashMap<String, StyleDef>,
+    /// Style ID of the paragraph style whose primary name is `Normal`.
+    /// `w:styleId` is an arbitrary reference; Word's built-in-style identity is
+    /// defined by the reserved primary style name ([MS-OE376] §2.1.236).
+    normal_para_style_id: Option<String>,
     table_styles: HashMap<String, TableStyleDef>,
     defaults_para: ParaFmt,
     defaults_run: RunFmt,
@@ -494,6 +503,8 @@ impl StyleMap {
         // index them in the same StyleMap so cell resolution can look
         // them up by ID.
         let mut default_para_style_id: Option<String> = None;
+        let mut normal_name_para_style_id: Option<String> = None;
+        let mut normal_id_para_style_id: Option<String> = None;
         let mut default_table_style_id: Option<String> = None;
         let mut table_styles: HashMap<String, TableStyleDef> = HashMap::new();
         for style_node in children_w(root, "style") {
@@ -507,6 +518,18 @@ impl StyleMap {
 
             if style_type == "paragraph" && attr_w(style_node, "default").as_deref() == Some("1") {
                 default_para_style_id = Some(style_id.clone());
+            }
+            if style_type == "paragraph" {
+                let primary_name = child_w(style_node, "name")
+                    .and_then(|node| attr_w(node, "val"))
+                    .map(|name| name.trim().to_string());
+                if primary_name.as_deref() == Some("Normal") && normal_name_para_style_id.is_none()
+                {
+                    normal_name_para_style_id = Some(style_id.clone());
+                }
+                if style_id == "Normal" && normal_id_para_style_id.is_none() {
+                    normal_id_para_style_id = Some(style_id.clone());
+                }
             }
             // §17.7.4: track `<w:style w:type="table" w:default="1">` so
             // tables that omit `<w:tblStyle>` can inherit its tblCellMar etc.
@@ -547,6 +570,7 @@ impl StyleMap {
 
         StyleMap {
             styles,
+            normal_para_style_id: normal_name_para_style_id.or(normal_id_para_style_id),
             table_styles,
             defaults_para,
             defaults_run,
@@ -558,6 +582,7 @@ impl StyleMap {
     fn empty() -> Self {
         StyleMap {
             styles: HashMap::new(),
+            normal_para_style_id: None,
             table_styles: HashMap::new(),
             defaults_para: ParaFmt::default(),
             defaults_run: RunFmt::default(),
@@ -570,18 +595,17 @@ impl StyleMap {
     /// the derived style overrides). Returns defaults if the ID is unknown.
     pub fn resolve_table_style(&self, style_id: &str) -> TableStyleDef {
         let mut chain: Vec<&TableStyleDef> = Vec::new();
-        let mut cur = self.table_styles.get(style_id);
-        let mut guard = 0;
-        while let Some(def) = cur {
-            chain.push(def);
-            guard += 1;
-            if guard > 16 {
+        let mut current = Some(style_id);
+        let mut visited = HashSet::new();
+        while let Some(current_id) = current {
+            if !visited.insert(current_id) {
                 break;
             }
-            cur = def
-                .based_on
-                .as_deref()
-                .and_then(|b| self.table_styles.get(b));
+            let Some(def) = self.table_styles.get(current_id) else {
+                break;
+            };
+            chain.push(def);
+            current = def.based_on.as_deref();
         }
         // Merge from base (end of chain) to derived (front).
         let mut out = TableStyleDef::default();
@@ -677,6 +701,22 @@ impl StyleMap {
         self.resolve_para_cond(style_id, table_style_id, None)
     }
 
+    /// Resolve the paragraph style whose primary name is `Normal`.
+    ///
+    /// ECMA-376 §17.6.5 defines document-grid character pitch relative to the
+    /// font size of the Normal style, which is not necessarily the paragraph
+    /// style marked `w:default="1"`. For non-conforming documents that omit a
+    /// Normal paragraph style, preserve the ordinary default-style fallback.
+    /// A paragraph style whose ID is literally `Normal` is accepted only as a
+    /// compatibility fallback for producers that omit its required name.
+    pub fn resolve_normal_paragraph_style(&self) -> (ParaFmt, RunFmt) {
+        if let Some(style_id) = self.normal_para_style_id.as_deref() {
+            self.resolve_para(Some(style_id), None)
+        } else {
+            self.resolve_para(None, None)
+        }
+    }
+
     /// Resolve only the named/default paragraph-style chain, without document
     /// defaults or table-style layers. Callers that combine numbering paragraph
     /// properties need this provenance because §17.7.2 places style-origin
@@ -755,10 +795,26 @@ impl StyleMap {
     }
 
     fn apply_style_chain(&self, id: &str, merged_para: &mut ParaFmt, merged_run: &mut RunFmt) {
-        if let Some(def) = self.styles.get(id) {
-            if let Some(base) = def.based_on.clone() {
-                self.apply_style_chain(&base, merged_para, merged_run);
+        let mut chain = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = Some(id);
+        while let Some(style_id) = current {
+            if !visited.insert(style_id) {
+                break;
             }
+            let Some(def) = self.styles.get(style_id) else {
+                break;
+            };
+            chain.push(def);
+            current = def.based_on.as_deref();
+        }
+
+        // ECMA-376 Part 1 §17.7.4.3 defines the parent chain. MS-OI29500
+        // §2.1.233 requires Word-authored chains not to contain circular
+        // references. A malformed cycle is therefore terminated at the edge
+        // that revisits a style; every unique style already found still
+        // participates once, from the base-most entry to the requested style.
+        for def in chain.into_iter().rev() {
             apply_para(merged_para, &def.para);
             apply_run(merged_run, &def.run);
             // pPr/rPr (paragraph mark run properties) also apply to runs
@@ -813,7 +869,8 @@ impl StyleMap {
     /// malformed `basedOn` cycle terminates.
     fn effective_num_id(&self, id: &str) -> Option<u32> {
         let mut cur = id;
-        for _ in 0..=self.styles.len() {
+        let mut visited = HashSet::new();
+        while visited.insert(cur) {
             let def = self.styles.get(cur)?;
             if def.para.num_id.is_some() {
                 return def.para.num_id;
@@ -942,6 +999,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     }
     if src.overflow_punct.is_some() {
         dst.overflow_punct = src.overflow_punct;
+    }
+    if src.adjust_right_ind.is_some() {
+        dst.adjust_right_ind = src.adjust_right_ind;
     }
     if let Some(src_b) = &src.para_borders {
         // Each pBdr EDGE inherits INDEPENDENTLY across the style hierarchy — bottom
@@ -1372,6 +1432,12 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // ECMA-376 §17.3.1.21 defines omission as true; retain Option here so an
     // explicit style/direct false participates correctly in the cascade.
     fmt.overflow_punct = bool_prop(ppr, "overflowPunct");
+
+    // adjustRightInd — ECMA-376 §17.3.1.1. The setting participates in the
+    // paragraph-style hierarchy and omission ultimately defaults to true.
+    // Geometry is intentionally resolved later because the adjustment depends
+    // on the active section document grid and paragraph placement width.
+    fmt.adjust_right_ind = bool_prop(ppr, "adjustRightInd");
 
     // bidi — right-to-left paragraph (ECMA-376 §17.3.1.6). On-off toggle:
     // present (or w:val="1"/"true") = RTL, w:val="0"/"false" = LTR. Carried to
@@ -1862,13 +1928,18 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // (skipping "single"/"none", which need no hint). `w:u@color` (§17.18.99 note)
     // is an underline-only colour override (hex 6 or the literal "auto").
     if let Some(u) = child_w(rpr, "u") {
-        let val = attr_w(u, "val").unwrap_or_else(|| "single".to_string());
-        fmt.underline = Some(val != "none");
-        fmt.underline_style = if val == "none" || val == "single" {
-            None
-        } else {
-            Some(val)
-        };
+        // §17.3.2.40: an omitted @val inherits the setting from the previous
+        // style-hierarchy level; the element's color/theme attributes can still
+        // override an inherited underline. Do not invent `single` merely from
+        // element presence.
+        if let Some(val) = attr_w(u, "val") {
+            fmt.underline = Some(val != "none");
+            fmt.underline_style = if val == "none" || val == "single" {
+                None
+            } else {
+                Some(val)
+            };
+        }
         if let Some(color) = attr_w(u, "color") {
             // Lowercase like the sibling `color` field below: the renderer's
             // `underlineColor !== 'auto'` check (§17.3.2.40's `color="auto"`
@@ -2455,6 +2526,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adjust_right_ind_participates_in_paragraph_style_cascade() {
+        let parse = |inner: &str| {
+            let xml = format!(
+                r#"<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{inner}</w:pPr>"#
+            );
+            let document = XmlDoc::parse(&xml).unwrap();
+            parse_para_fmt(document.root_element())
+        };
+
+        let mut inherited = parse(r#"<w:adjustRightInd w:val="0"/>"#);
+        apply_para(&mut inherited, &parse("<w:keepNext/>"));
+        assert_eq!(
+            inherited.adjust_right_ind,
+            Some(false),
+            "an omitted child property inherits the parent style value"
+        );
+
+        apply_para(&mut inherited, &parse("<w:adjustRightInd/>"));
+        assert_eq!(
+            inherited.adjust_right_ind,
+            Some(true),
+            "a later style/direct on-value overrides inherited false"
+        );
+    }
+
     fn run_fmt_from(rpr_xml: &str) -> RunFmt {
         let xml = format!(
             r#"<w:rPr xmlns:w="{ns}">{body}</w:rPr>"#,
@@ -2632,6 +2729,43 @@ mod tests {
     }
 
     #[test]
+    fn circular_based_on_chain_terminates_and_applies_each_style_once() {
+        // ECMA-376 Part 1 §17.7.4.3 defines style inheritance, while
+        // MS-OI29500 §2.1.233 says Word requires the based-on chain not to be
+        // circular. Invalid input must still degrade without overflowing the
+        // WASM stack. The edge that returns Base to Derived is ignored.
+        let xml = format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:styleId="Base">
+                    <w:basedOn w:val="Derived"/>
+                    <w:pPr><w:spacing w:after="120"/></w:pPr>
+                </w:style>
+                <w:style w:type="paragraph" w:styleId="Derived">
+                    <w:basedOn w:val="Base"/>
+                    <w:rPr><w:b/></w:rPr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+
+        let (paragraph, run) = StyleMap::parse(&xml).resolve_para(Some("Derived"), None);
+        assert_eq!(paragraph.space_after, Some(6.0));
+        assert_eq!(run.bold, Some(true));
+
+        let self_referencing = format!(
+            r#"<w:styles xmlns:w="{ns}">
+                <w:style w:type="paragraph" w:styleId="Normal">
+                    <w:basedOn w:val="Normal"/>
+                    <w:rPr><w:sz w:val="20"/></w:rPr>
+                </w:style>
+            </w:styles>"#,
+            ns = W_NS,
+        );
+        let (_, run) = StyleMap::parse(&self_referencing).resolve_para(Some("Normal"), None);
+        assert_eq!(run.font_size, Some(10.0));
+    }
+
+    #[test]
     fn pbdr_merges_per_edge_over_inherited_box() {
         // Each pBdr EDGE inherits independently across the style hierarchy (bottom
         // §17.3.1.7, left §17.3.1.17, right §17.3.1.28, top §17.3.1.42, between
@@ -2803,6 +2937,20 @@ mod tests {
         // sibling w:color@val field above.
         let fmt = run_fmt_from(r#"<w:u w:val="single" w:color="FF0000"/>"#);
         assert_eq!(fmt.underline_color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn underline_without_val_inherits_instead_of_enabling_single() {
+        let direct = run_fmt_from(r#"<w:u w:color="FF0000"/>"#);
+        assert_eq!(direct.underline, None);
+        assert_eq!(direct.underline_style, None);
+        assert_eq!(direct.underline_color.as_deref(), Some("ff0000"));
+
+        let mut inherited = run_fmt_from(r#"<w:u w:val="double"/>"#);
+        apply_run(&mut inherited, &direct);
+        assert_eq!(inherited.underline, Some(true));
+        assert_eq!(inherited.underline_style.as_deref(), Some("double"));
+        assert_eq!(inherited.underline_color.as_deref(), Some("ff0000"));
     }
 
     #[test]

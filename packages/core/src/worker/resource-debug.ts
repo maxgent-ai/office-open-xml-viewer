@@ -66,6 +66,7 @@ export class OoxmlResourceMetricsSession {
     this.policy = Object.freeze({
       maxArchiveEntryBytes: options.policy.maxArchiveEntryBytes,
       maxTotalInflatedBytes: options.policy.maxTotalInflatedBytes,
+      maxArchiveEntries: options.policy.maxArchiveEntries,
     });
     this.mode = options.mode;
   }

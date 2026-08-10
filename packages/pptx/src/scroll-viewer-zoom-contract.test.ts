@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { PptxScrollViewer } from './scroll-viewer.js';
-import { installDom, makeContainer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeBorrowedPptxScrollViewer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -22,7 +22,7 @@ function setup(opts: Record<string, unknown> = {}, host = { w: 200, h: 400 }) {
   installDom();
   const container = makeContainer(host.w, host.h);
   const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU);
-  const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+  const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
     presentation: engine.asPres(),
     gap: 10,
     paddingTop: 0,
@@ -52,7 +52,7 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
   it('getScale() is 1 before a scale is established (no width yet)', () => {
     installDom();
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
       presentation: engine.asPres(),
     });
     expect(v.getScale()).toBe(1);
@@ -120,7 +120,7 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
     const container = makeContainer(0, 0); // zero-width ⇒ fit deferred, nothing established
     const engine = new FakePptxEngine(20, SLIDE_W_EMU, SLIDE_H_EMU);
     const onScaleChange = vi.fn();
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
       presentation: engine.asPres(),
       gap: 10,
       paddingTop: 0,
@@ -151,7 +151,7 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
   it('a pre-establishment setScale latch is clamped to [zoomMin, zoomMax] (IX9 F1)', () => {
     installDom();
     const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
-    const v = new PptxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
+    const v = makeBorrowedPptxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
       presentation: engine.asPres(),
       zoomMin: 0.5,
       zoomMax: 3,

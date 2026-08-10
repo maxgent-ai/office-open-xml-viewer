@@ -3,7 +3,9 @@
 
 interface Cfg {
   Viewer: string;
-  Doc: string;
+  Engine: string;
+  engineVariable: 'document' | 'presentation';
+  fromEngine: 'fromDocument' | 'fromPresentation';
   sub: 'pptx' | 'docx';
   count: string;
   render: string;
@@ -13,11 +15,11 @@ interface Cfg {
 }
 
 const pptx: Cfg = {
-  Viewer: 'PptxViewer', Doc: 'PptxPresentation', sub: 'pptx',
+  Viewer: 'PptxViewer', Engine: 'PptxPresentation', engineVariable: 'presentation', fromEngine: 'fromPresentation', sub: 'pptx',
   count: 'slideCount', render: 'renderSlide', next: 'nextSlide', prev: 'prevSlide', go: 'goToSlide',
 };
 const docx: Cfg = {
-  Viewer: 'DocxViewer', Doc: 'DocxDocument', sub: 'docx',
+  Viewer: 'DocxViewer', Engine: 'DocxDocument', engineVariable: 'document', fromEngine: 'fromDocument', sub: 'docx',
   count: 'pageCount', render: 'renderPage', next: 'nextPage', prev: 'prevPage', go: 'goToPage',
 };
 
@@ -39,51 +41,92 @@ await viewer.load('/sample.${c.sub}');
 nextBtn.addEventListener('click', () => viewer.${c.next}());
 prevBtn.addEventListener('click', () => viewer.${c.prev}());`,
 
-    scroll: `import { ${c.Doc} } from '@silurus/ooxml/${c.sub}';
+    scroll: `import { ${c.Engine} } from '@silurus/ooxml/${c.sub}';
 
 // Headless engine — render every ${c.sub === 'pptx' ? 'slide' : 'page'} into a canvas you control.
-const doc = await ${c.Doc}.load('/sample.${c.sub}');
+const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
 
-for (let i = 0; i < doc.${c.count}; i++) {
+for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   const canvas = document.createElement('canvas');
   scroller.appendChild(canvas);
-  await doc.${c.render}(canvas, i, { width: 1100 });
+  await ${c.engineVariable}.${c.render}(canvas, i, { width: 1100 });
 }`,
 
-    thumbnails: `import { ${c.Doc} } from '@silurus/ooxml/${c.sub}';
+    thumbnails: `import { ${c.Engine} } from '@silurus/ooxml/${c.sub}';
 
 // Render each ${c.sub === 'pptx' ? 'slide' : 'page'} small, wire up navigation.
-const doc = await ${c.Doc}.load('/sample.${c.sub}');
+const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
 
-for (let i = 0; i < doc.${c.count}; i++) {
+for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   const thumb = document.createElement('canvas');
   thumb.addEventListener('click', () => open(i));
   grid.appendChild(thumb);
-  await doc.${c.render}(thumb, i, { width: 320 });
+  await ${c.engineVariable}.${c.render}(thumb, i, { width: 320 });
 }`,
 
-    masterdetail: `import { ${c.Doc}, ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
+    masterdetail: `import { ${c.Engine}, ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
 
-// A large preview viewer on the right…
-const viewer = new ${c.Viewer}(detailCanvas, { width: 960, enableTextSelection: true });
+// Parse once, then lend the loaded engine to every view that needs it.
+const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
 
-// …and a thumbnail rail on the left, sharing the same file.
-const [doc] = await Promise.all([
-  ${c.Doc}.load('/sample.${c.sub}'),
-  viewer.load('/sample.${c.sub}'),
-]);
+// A large preview on the right borrows the engine and cannot acquire another source.
+const viewer = ${c.Viewer}.${c.fromEngine}(detailCanvas, ${c.engineVariable}, {
+  width: 960,
+  enableTextSelection: true,
+});
+await viewer.${c.go}(0);
 
-for (let i = 0; i < doc.${c.count}; i++) {
+// The thumbnail rail on the left renders from that same engine.
+for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   const thumb = document.createElement('canvas');
   thumb.addEventListener('click', () => viewer.${c.go}(i));  // jump the preview
   rail.appendChild(thumb);
-  await doc.${c.render}(thumb, i, { width: 200 });
-}`,
+  await ${c.engineVariable}.${c.render}(thumb, i, { width: 200 });
+}
+
+window.addEventListener('pagehide', () => {
+  viewer.destroy();
+  ${c.engineVariable}.destroy(); // borrowed engines remain caller-owned
+}, { once: true });`,
   };
 }
 
 export const pptxSnippets = build(pptx);
 export const docxSnippets = build(docx);
+
+export const xlsxSheetWindowsSnippet = `import { XlsxSheetViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';
+
+const workbook = await XlsxWorkbook.load('/sample.xlsx');
+const viewers = new Map<Window, XlsxSheetViewer>();
+
+async function openSheetInWindow(sheetIndex: number): Promise<void> {
+  // Call this function directly from a click handler so popup blockers allow it.
+  const popup = window.open('', '_blank', 'popup,width=1100,height=720,resizable=yes');
+  if (!popup) throw new Error('The browser blocked the popup');
+
+  const canvas = popup.document.createElement('canvas');
+  canvas.style.cssText = 'display:block;width:100%;height:100%';
+  popup.document.body.style.margin = '0';
+  popup.document.body.appendChild(canvas);
+
+  const viewer = XlsxSheetViewer.fromWorkbook(canvas, workbook);
+  viewers.set(popup, viewer);
+  popup.addEventListener('pagehide', () => {
+    viewer.destroy();
+    viewers.delete(popup);
+  }, { once: true });
+
+  await viewer.goToSheet(sheetIndex);
+}
+
+// Example: openSheetInWindow(1) from a sheet button's click handler.
+window.addEventListener('pagehide', () => {
+  viewers.forEach((viewer, popup) => {
+    viewer.destroy();
+    popup.close();
+  });
+  workbook.destroy();
+}, { once: true });`;
 
 export const xlsxSheetSnippet = `import { XlsxViewer } from '@silurus/ooxml/xlsx';
 
@@ -94,103 +137,3 @@ const container = document.getElementById('sheet') as HTMLElement;
 const viewer = new XlsxViewer(container, { showZoomSlider: true });
 
 await viewer.load('/sample.xlsx');`;
-
-// ── Framework integration (per format) ─────────────────────────────
-// docx/pptx take a <canvas>; xlsx takes a container <div>. pptx & xlsx expose
-// destroy(); docx renders into the canvas you own and needs no teardown.
-interface FwCfg {
-  Viewer: string;
-  sub: 'docx' | 'xlsx' | 'pptx';
-  el: 'canvas' | 'container';
-  tag: 'canvas' | 'div';
-  RefType: 'HTMLCanvasElement' | 'HTMLDivElement';
-  opts: string;
-  destroy: boolean;
-}
-
-const fwPptx: FwCfg = { Viewer: 'PptxViewer', sub: 'pptx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 960 }', destroy: true };
-const fwDocx: FwCfg = { Viewer: 'DocxViewer', sub: 'docx', el: 'canvas', tag: 'canvas', RefType: 'HTMLCanvasElement', opts: '{ width: 820 }', destroy: false };
-const fwXlsx: FwCfg = { Viewer: 'XlsxViewer', sub: 'xlsx', el: 'container', tag: 'div', RefType: 'HTMLDivElement', opts: '{ showZoomSlider: true }', destroy: true };
-
-export interface FrameworkSnippets {
-  react: string;
-  vue: string;
-  svelte: string;
-  vanilla: string;
-}
-
-function buildFw(c: FwCfg): FrameworkSnippets {
-  const reactCleanup = c.destroy
-    ? '    return () => viewer.destroy();'
-    : `    // ${c.Viewer} renders into the ${c.el} you own — nothing to tear down.`;
-  const svelteCleanup = c.destroy ? '\n    return () => viewer.destroy();' : '';
-  const vueUnmount = c.destroy
-    ? `onBeforeUnmount(() => viewer?.destroy());`
-    : `// ${c.Viewer} needs no explicit teardown.`;
-
-  return {
-    react: `import { useEffect, useRef } from 'react';
-import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
-
-export function Viewer({ src }: { src: string }) {
-  const ref = useRef<${c.RefType}>(null);
-
-  useEffect(() => {
-    const ${c.el} = ref.current;
-    if (!${c.el}) return;
-    const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
-    void viewer.load(src);
-${reactCleanup}
-  }, [src]);
-
-  return <${c.tag} ref={ref} />;
-}`,
-
-    vue: `<script setup lang="ts">
-import { onMounted${c.destroy ? ', onBeforeUnmount' : ''}, ref } from 'vue';
-import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
-
-const props = defineProps<{ src: string }>();
-const ${c.el} = ref<${c.RefType}>();
-let viewer: ${c.Viewer} | undefined;
-
-onMounted(() => {
-  viewer = new ${c.Viewer}(${c.el}.value as ${c.RefType}, ${c.opts});
-  void viewer.load(props.src);
-});
-${vueUnmount}
-<\/script>
-
-<template>
-  <${c.tag} ref="${c.el}" />
-</template>`,
-
-    svelte: `<script lang="ts">
-  import { onMount } from 'svelte';
-  import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
-
-  export let src: string;
-  let ${c.el}: ${c.RefType};
-
-  onMount(() => {
-    const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
-    void viewer.load(src);${svelteCleanup}
-  });
-<\/script>
-
-<${c.tag} bind:this={${c.el}}></${c.tag}>`,
-
-    vanilla: `import { ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
-
-const ${c.el} = document.getElementById('viewer') as ${c.RefType};
-const viewer = new ${c.Viewer}(${c.el}, ${c.opts});
-
-await viewer.load('/sample.${c.sub}');`,
-  };
-}
-
-export const frameworkSnippets = {
-  docx: buildFw(fwDocx),
-  xlsx: buildFw(fwXlsx),
-  pptx: buildFw(fwPptx),
-};

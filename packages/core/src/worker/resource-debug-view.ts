@@ -30,9 +30,13 @@ export function formatOoxmlResourceDebugReport(report: OoxmlResourceMetrics): st
     report.policy.maxTotalInflatedBytes,
     width,
   ));
+  lines.push(row(
+    `entry count ${report.usage ? formatInteger(report.usage.archiveEntryCount) : '—'} / ${report.policy.maxArchiveEntries === null ? 'public off' : formatInteger(report.policy.maxArchiveEntries)}`,
+    width,
+  ));
   if (report.usage) {
     lines.push(row(
-      `entries ${formatInteger(report.usage.archiveEntryCount)}  declared ${formatBytes(report.usage.declaredInflatedBytes)}`,
+      `declared inflated ${formatBytes(report.usage.declaredInflatedBytes)}`,
       width,
     ));
   } else {

@@ -37,13 +37,13 @@ pub struct PptxTextParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct PptxShapeParam {
+pub struct PptxElementParam {
     /// Absolute path to the PPTX file
     pub path: String,
     /// 0-based slide index
     pub slide_index: usize,
     /// 0-based index into the slide's elements array (matches `pptx_get_slide_structure`)
-    pub shape_index: usize,
+    pub element_index: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -699,9 +699,9 @@ impl PptxTools {
     }
 
     #[tool(
-        description = "Return one shape's full detail by slide and shape index. `shapeIndex` matches the element index in `pptx_get_slide_structure`. Includes geometry name, position/size, rotation/flip, fill, stroke (with arrow ends), adjustment values, effects (shadow/glow/etc.), and the text body when present"
+        description = "Return one slide element's full detail by slide and element index. `elementIndex` matches the element index in `pptx_get_slide_structure`. Includes shapes, pictures, charts, tables, geometry, position/size, rotation/flip, fill, stroke, effects, and the text body when present"
     )]
-    pub fn pptx_get_shape(Parameters(p): Parameters<PptxShapeParam>) -> String {
+    pub fn pptx_get_element(Parameters(p): Parameters<PptxElementParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
             Err(e) => return format!("Error: {}", e),
@@ -732,12 +732,12 @@ impl PptxTools {
             .as_array()
             .map(|s| s.as_slice())
             .unwrap_or(&[]);
-        let element = match elements.get(p.shape_index) {
+        let element = match elements.get(p.element_index) {
             Some(e) => e,
             None => {
                 return format!(
-                    "Error: shape index {} out of range (slide elements: {})",
-                    p.shape_index,
+                    "Error: element index {} out of range (slide elements: {})",
+                    p.element_index,
                     elements.len()
                 )
             }
@@ -745,66 +745,13 @@ impl PptxTools {
         let mut out = element.clone();
         if let Some(obj) = out.as_object_mut() {
             obj.insert("slideIndex".into(), Value::from(p.slide_index));
-            obj.insert("shapeIndex".into(), Value::from(p.shape_index));
+            obj.insert("elementIndex".into(), Value::from(p.element_index));
         }
         out.to_string()
     }
 
     #[tool(
-        description = "Return one shape's text body in detail: paragraphs with alignment, list level, bullets, and per-run formatting (text/bold/italic/size/color/font/hyperlink)"
-    )]
-    pub fn pptx_get_shape_text(Parameters(p): Parameters<PptxShapeParam>) -> String {
-        let data = match read_file(&p.path) {
-            Ok(d) => d,
-            Err(e) => return format!("Error: {}", e),
-        };
-        let pres_json = match pptx_parser::parse_pptx_native(&data) {
-            Ok(j) => j,
-            Err(e) => return format!("Error: {}", e),
-        };
-        let pres: Value = match serde_json::from_str(&pres_json) {
-            Ok(v) => v,
-            Err(e) => return format!("Error: {}", e),
-        };
-        let slides = pres["slides"]
-            .as_array()
-            .map(|s| s.as_slice())
-            .unwrap_or(&[]);
-        let slide = match slides.get(p.slide_index) {
-            Some(s) => s,
-            None => {
-                return format!(
-                    "Error: slide index {} out of range (total: {})",
-                    p.slide_index,
-                    slides.len()
-                )
-            }
-        };
-        let elements = slide["elements"]
-            .as_array()
-            .map(|s| s.as_slice())
-            .unwrap_or(&[]);
-        let element = match elements.get(p.shape_index) {
-            Some(e) => e,
-            None => {
-                return format!(
-                    "Error: shape index {} out of range (slide elements: {})",
-                    p.shape_index,
-                    elements.len()
-                )
-            }
-        };
-        let body = element.get("textBody").cloned().unwrap_or(Value::Null);
-        serde_json::json!({
-            "slideIndex": p.slide_index,
-            "shapeIndex": p.shape_index,
-            "textBody": body,
-        })
-        .to_string()
-    }
-
-    #[tool(
-        description = "List all charts on a slide (or every slide when `slideIndex` is omitted). Each entry exposes type, position, title, categories, and series (with values)"
+        description = "List all charts on a slide (or every slide when `slide_index` is omitted). Each entry exposes type, position, title, categories, and series (with values)"
     )]
     pub fn pptx_get_charts(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
@@ -858,7 +805,7 @@ impl PptxTools {
     }
 
     #[tool(
-        description = "List all tables on a slide (or every slide when `slideIndex` is omitted). Each entry includes column widths, row heights, and per-cell content (textBody) plus colSpan/rowSpan/merge information"
+        description = "List all tables on a slide (or every slide when `slide_index` is omitted). Each entry includes column widths, row heights, and per-cell content (textBody) plus colSpan/rowSpan/merge information"
     )]
     pub fn pptx_get_tables(Parameters(p): Parameters<PptxOptSlideParam>) -> String {
         let data = match read_file(&p.path) {
@@ -907,7 +854,7 @@ impl PptxTools {
     }
 
     #[tool(
-        description = "List all picture elements on a slide (or every slide when `slideIndex` is omitted). Returns metadata only by default; pass `includeDataUrl=true` to include the inline base64 bytes"
+        description = "List all picture elements on a slide (or every slide when `slide_index` is omitted). Returns metadata only by default; pass `include_data_url=true` to include the inline base64 bytes"
     )]
     pub fn pptx_get_pictures(Parameters(p): Parameters<PptxPicturesParam>) -> String {
         let data = match read_file(&p.path) {
@@ -993,7 +940,7 @@ impl PptxTools {
     }
 
     #[tool(
-        description = "Convert a PPTX file to GitHub-flavoured markdown. Preserves textual structure (titles, bullets at correct nesting, tables, chart summaries, speaker notes, comments) and discards presentation details (geometry, fills, strokes, theme inheritance, positions). Designed for agents that need to *read* a deck efficiently — typical 10-30× token reduction vs. `pptx_get_slides` / `pptx_extract_text`. Lossy by design: when you need precise layout or styling, fall back to the structured tools (`pptx_get_shape`, `pptx_get_slide_structure`, etc.)"
+        description = "Convert a PPTX file to GitHub-flavoured markdown. Preserves textual structure (titles, bullets at correct nesting, tables, chart summaries, speaker notes, comments) and discards presentation details (geometry, fills, strokes, theme inheritance, positions). Designed for agents that need to *read* a deck efficiently — typical 10-30× token reduction vs. `pptx_get_slides` / `pptx_extract_text`. Lossy by design: when you need precise layout or styling, fall back to the structured tools (`pptx_get_element`, `pptx_get_slide_structure`, etc.)"
     )]
     pub fn pptx_to_markdown(Parameters(p): Parameters<PptxPathParam>) -> String {
         let data = match read_file(&p.path) {
@@ -1580,15 +1527,15 @@ mod sample_tests {
     }
 
     #[test]
-    fn pptx_shape_index_out_of_range_errors() {
+    fn pptx_element_index_out_of_range_errors() {
         let path = sample_path();
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let out = PptxTools::pptx_get_shape(Parameters(PptxShapeParam {
+        let out = PptxTools::pptx_get_element(Parameters(PptxElementParam {
             path,
             slide_index: 0,
-            shape_index: 999_999,
+            element_index: 999_999,
         }));
         assert!(
             out.starts_with("Error:"),

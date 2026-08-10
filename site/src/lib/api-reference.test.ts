@@ -33,7 +33,8 @@ describe('official-site API reference', () => {
       for (const apiClass of classes.filter(({ name }) => name.endsWith('Viewer'))) {
         const onError = apiClass.options?.find(({ name }) => name === 'onError');
         expect(onError, apiClass.name).toBeDefined();
-        expect(onError?.desc, apiClass.name).toContain('load() resolves; without it load() rejects');
+        expect(onError?.desc, apiClass.name).toContain('load(), navigation, and other awaitable operations reject');
+        expect(onError?.desc, apiClass.name).toContain('the same failure is never delivered twice');
         expect(onError?.desc, apiClass.name).toContain('OoxmlResourceLimitError');
         expect(onError?.desc, apiClass.name).toContain('OoxmlDecodedImageLimitError');
         expect(onError?.desc, apiClass.name).toContain('message text is not a stable discriminator');
@@ -51,13 +52,25 @@ describe('official-site API reference', () => {
     }
   });
 
-  it('documents showTrackChanges as optional-by-container with its effective default', () => {
-    const docxClasses = apiReference.docx.filter(({ name }) => name.endsWith('Viewer'));
-    for (const apiClass of docxClasses) {
-      const option = apiClass.options?.find(({ name }) => name === 'showTrackChanges');
-      expect(option?.type, apiClass.name).toBe('boolean');
-      expect(option?.def, apiClass.name).toBe('true');
-      expect(option?.desc, apiClass.name).toContain('true and false render identically');
+  it('documents password on every self-loading Viewer and engine', () => {
+    for (const classes of Object.values(apiReference)) {
+      for (const apiClass of classes) {
+        const password = apiClass.options?.find(({ name }) => name === 'password');
+        expect(password?.type, apiClass.name).toBe('string');
+        expect(password?.desc, apiClass.name).toContain('borrowed');
+      }
+    }
+  });
+
+  it('documents the common native context-menu handoff on every Viewer', () => {
+    for (const classes of Object.values(apiReference)) {
+      for (const apiClass of classes.filter(({ name }) => name.endsWith('Viewer'))) {
+        const option = apiClass.options?.find(({ name }) => name === 'onContextMenu');
+        expect(option?.type, apiClass.name).toContain('ViewerContextMenuEvent<');
+        expect(option?.desc, apiClass.name).toContain('originalEvent.preventDefault()');
+        expect(option?.desc, apiClass.name).toContain('getContext()');
+        expect(option?.desc, apiClass.name).toContain('native browser behavior unchanged');
+      }
     }
   });
 });

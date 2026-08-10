@@ -4,6 +4,7 @@ import {
   buildSegments,
   layoutLines,
   punctuationCompressionTotalPt,
+  type DocGridCtx,
   type LayoutLine,
   type LayoutTextSeg,
 } from './line-layout.js';
@@ -79,6 +80,7 @@ function lines(
   segments: ReturnType<typeof buildSegments>,
   width: number,
   overflowPunct: boolean,
+  characterGrid?: DocGridCtx,
 ): LayoutLine[] {
   return layoutLines(
     context(),
@@ -89,9 +91,9 @@ function lines(
     [],
     undefined,
     {},
-    0,
+    undefined,
     DEFAULT_KINSOKU_RULES,
-    0,
+    characterGrid,
     36,
     width,
     false,
@@ -131,7 +133,7 @@ function punctuationMetricsServices(options: Readonly<{
         const graphemeBoundaries = [0, ...graphemeClusterOffsets(request.text), request.text.length];
         const graphemes = graphemeBoundaries.slice(0, -1)
           .map((start, index) => request.text.slice(start, graphemeBoundaries[index + 1]));
-        const advancePt = request.text === '\u3000'
+        const advancePt = request.text === '\u4e00'
           ? (options.ideographicCellAdvancePt ?? 10)
           : graphemes.reduce((sum, grapheme) =>
               sum + (tightCharacters.has(grapheme)
@@ -173,6 +175,27 @@ function punctuationMetricsServices(options: Readonly<{
 }
 
 describe('ECMA-376 East-Asian punctuation fit', () => {
+  it('does not apply document-level punctuation compression over authored run spacing', () => {
+    const authoredText = '独自文面の配置を確認します）。';
+    const run = {
+      ...textRun(authoredText),
+      charSpacing: 0.4,
+    } as DocParagraph['runs'][number];
+    const segments = buildSegments([run], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0].punctuationCompressions).toBeUndefined();
+    expect(segments[0].charSpacing).toBe(0.4);
+    const authoredWidthPt = [...authoredText].length * 10.4;
+    expect(lines(segments, authoredWidthPt, false)[0].segments[0].measuredWidth)
+      .toBeCloseTo(authoredWidthPt, 5);
+  });
+
   it('retains at least a half-width cell around compressed full-width punctuation', () => {
     const segments = buildSegments([textRun('甲乙．丙')], {
       pageIndex: 0,
@@ -235,7 +258,7 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     ]);
   });
 
-  it('derives the retained half-cell from the selected font route, not punctuation advance', () => {
+  it('does not compress punctuation that the selected face already renders proportionally', () => {
     const segments = buildSegments([textRun('甲、乙')], {
       pageIndex: 0,
       totalPages: 1,
@@ -246,13 +269,38 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
       }),
     }) as LayoutTextSeg[];
 
-    // The proportional punctuation advance is 8pt, while the same route's
-    // ideographic cell is 10pt. Retain 5pt (half the cell), so only 3pt may be
-    // removed despite the comma's 1pt tight ink extent.
-    expect(compressionPt(segments[0])).toBe(-3);
-    expect(lines(segments, 25, false)[0].segments.map((segment) =>
+    // §17.15.1.18 permits compression of full-width punctuation. The selected
+    // face has already placed the comma on an 8pt proportional advance while
+    // its ideographic cell is 10pt, so applying another trim would double-count
+    // the font's own spacing choice.
+    expect(compressionPt(segments[0])).toBeUndefined();
+    expect(lines(segments, 28, false)[0].segments.map((segment) =>
       'text' in segment ? segment.measuredWidth : undefined,
-    )).toEqual([25]);
+    )).toEqual([28]);
+  });
+
+  it('adds the character-grid pitch once without re-compressing proportional punctuation', () => {
+    const segments = buildSegments([textRun('甲、'), textRun('E')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices({
+        punctuationAdvancePt: 8,
+        ideographicCellAdvancePt: 10,
+      }),
+    }) as LayoutTextSeg[];
+
+    const [line] = lines(segments, 100, false, {
+      type: 'linesAndChars',
+      linePitchPt: 15,
+      charSpacePt: -0.4,
+    });
+    expect(line.segments.map((segment) =>
+      'text' in segment ? [segment.text, segment.measuredWidth] : undefined,
+    )).toEqual([
+      ['甲、', 17.2],
+      ['E', 9.6],
+    ]);
   });
 
   it('does not invent a fixed trim when tight horizontal ink bounds are unavailable', () => {
@@ -379,7 +427,7 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(segments.every((segment) => segment.text !== '\u3099')).toBe(true);
   });
 
-  it('keeps middle-punctuation spacing pair-aware while compressing full-width dividing punctuation', () => {
+  it('keeps full-width exclamation and question marks on their authored cell', () => {
     const segments = buildSegments([textRun('！甲？乙：丙；丁')], {
       pageIndex: 0,
       totalPages: 1,
@@ -390,9 +438,46 @@ describe('ECMA-376 East-Asian punctuation fit', () => {
     expect(segments.map((segment) => segment.text)).toEqual([
       '！甲？乙：丙；丁',
     ]);
+    expect(segments[0].punctuationCompressions).toBeUndefined();
+  });
+
+  it('applies characterSpacingControl from selected glyph metrics to MS Mincho', () => {
+    const minchoRun = {
+      ...textRun('甲、乙）丙'),
+      fontFamily: 'MS Mincho',
+      fontFamilyEastAsia: 'MS Mincho',
+    } as DocParagraph['runs'][number];
+    const segments = buildSegments([minchoRun], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments.map((segment) => segment.text)).toEqual(['甲、乙）丙']);
+    expect(segments[0].punctuationCompressions).toEqual([
+      { end: 2, adjustmentPt: -5 },
+      { end: 4, adjustmentPt: -5 },
+    ]);
+    expect(lines(segments, 50, false)[0].segments.reduce(
+      (sum, segment) => sum + segment.measuredWidth,
+      0,
+    )).toBe(40);
+  });
+
+  it('keeps U+3017 and full-width !/? uncompressed while compressing the observed punctuation subset', () => {
+    const segments = buildSegments([textRun('、。〗！？」')], {
+      pageIndex: 0,
+      totalPages: 1,
+      characterSpacingControl: 'compressPunctuation',
+      layoutServices: punctuationMetricsServices(),
+    }) as LayoutTextSeg[];
+
+    expect(segments).toHaveLength(1);
     expect(segments[0].punctuationCompressions).toEqual([
       { end: 1, adjustmentPt: -5 },
-      { end: 3, adjustmentPt: -5 },
+      { end: 2, adjustmentPt: -5 },
+      { end: 6, adjustmentPt: -5 },
     ]);
   });
 

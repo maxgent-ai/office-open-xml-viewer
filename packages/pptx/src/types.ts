@@ -167,11 +167,7 @@ export interface Slide {
   partName?: string;
   background: Fill | null;
   elements: SlideElement[];
-  /**
-   * Provenance for each entry in {@link Slide.elements}, at the same index.
-   * Rendered master/layout decorations share the element array with direct
-   * slide content, while only direct slide shapes carry `slideTreeIndex`.
-   */
+  /** Index-aligned rendered provenance; intentionally carries no editor tree position. */
   elementSources?: SlideElementSource[];
   /**
    * Speaker-notes pane text from `ppt/notesSlides/notesSlideN.xml`
@@ -208,8 +204,6 @@ export type SlideElementOrigin = 'master' | 'layout' | 'slide';
 
 export interface SlideElementSource {
   origin: SlideElementOrigin;
-  /** Zero-based index in the direct slide shape tree. */
-  slideTreeIndex?: number;
 }
 
 /**

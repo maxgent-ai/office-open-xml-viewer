@@ -102,6 +102,14 @@
         {
           "id": "2.1.391",
           "title": "Part 1 Section 17.15.1.13, bookFoldRevPrinting (Reverse Book Fold Printing)"
+        },
+        {
+          "id": "2.1.534",
+          "title": "Part 1 Section 17.18.14, ST_DocGrid (Document Grid Types)"
+        },
+        {
+          "id": "2.1.556",
+          "title": "Part 1 Section 17.18.91, ST_TabJc (Custom Tab Stop Type)"
         }
       ]
     },

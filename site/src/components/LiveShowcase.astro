@@ -1,26 +1,13 @@
 ---
 // Live Showcase — three viewers behind format tabs.
-const formats = [
-  { id: 'docx', label: 'DOCX' },
-  { id: 'xlsx', label: 'XLSX' },
-  { id: 'pptx', label: 'PPTX' },
-];
+import FormatTabs from './FormatTabs.astro';
+
+const formats = ['docx', 'xlsx', 'pptx'] as const;
 ---
 <div class="showcase" data-showcase>
   <div class="panel">
     <div class="panel-head">
-      <div class="tabs" role="tablist" aria-label="Document format">
-        {formats.map((f, i) => (
-          <button
-            class="tab"
-            role="tab"
-            data-tab={f.id}
-            aria-selected={i === 0 ? 'true' : 'false'}
-          >
-            <span class="tab-label">{f.label}</span>
-          </button>
-        ))}
-      </div>
+      <FormatTabs selected="docx" />
       <span class="panel-file" data-file>sample-1.docx</span>
       <span class="panel-badge">live · WASM</span>
     </div>
@@ -28,7 +15,7 @@ const formats = [
       {formats.map((format, index) => (
         <div
           class="panel-pane"
-          data-format-pane={format.id}
+          data-format-pane={format}
           data-active={index === 0 ? 'true' : 'false'}
           aria-hidden={index === 0 ? 'false' : 'true'}
         ></div>
@@ -46,7 +33,7 @@ const formats = [
   document.querySelectorAll<HTMLElement>('[data-showcase]').forEach((root) => {
     const mount = root.querySelector<HTMLElement>('[data-mount]')!;
     const fileLabel = root.querySelector<HTMLElement>('[data-file]')!;
-    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-tab]'));
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-format-tab]'));
     type CachedViewer = { pane: HTMLDivElement; controller: LiveController };
     const cache = new Map<string, CachedViewer>();
     let loaded: string | null = null;
@@ -88,7 +75,7 @@ const formats = [
       // even the first tab switch reuses a parsed, rendered viewer.
       setTimeout(() => {
         for (const tab of tabs) {
-          const id = tab.dataset.tab;
+          const id = tab.dataset.formatTab;
           if (id && id !== activeId) ensureViewer(id);
         }
       }, 0);
@@ -97,13 +84,13 @@ const formats = [
     tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
         tabs.forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
-        show(tab.dataset.tab!);
+        show(tab.dataset.formatTab!);
       });
     });
 
     // Lazy-mount the first tab when the showcase is near the viewport. Mount
     // immediately if it's already close; otherwise wait for it to scroll in.
-    const first = tabs[0]?.dataset.tab ?? 'docx';
+    const first = tabs[0]?.dataset.formatTab ?? 'docx';
     const nearViewport = () => root.getBoundingClientRect().top < window.innerHeight + 600;
     if (nearViewport()) {
       show(first);
@@ -117,43 +104,26 @@ const formats = [
       io.observe(root);
     }
 
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', (event) => {
+      // A persisted pagehide means the browser is freezing this page in the
+      // back-forward cache. Keep the viewers and their DOM alive so the cached
+      // page can resume without rerunning this initialization script.
+      if (event.persisted) return;
       for (const entry of cache.values()) entry.controller.destroy();
       cache.clear();
-    }, { once: true });
+    });
+
+    window.addEventListener('pageshow', (event) => {
+      // Layout may have changed while the page was frozen. The active viewer is
+      // retained across BFCache restores; re-fit it without reparsing the file.
+      if (!event.persisted || !loaded) return;
+      cache.get(loaded)?.controller.activate?.();
+    });
   });
 </script>
 
 <style>
   .showcase { margin-top: 32px; }
-  .tabs {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    flex: 0 0 auto;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-elev-2);
-  }
-  .tab {
-    display: inline-flex;
-    align-items: center;
-    min-height: 0;
-    padding: 6px 10px;
-    border: 0;
-    border-radius: 5px;
-    background: transparent;
-    color: var(--text-dim);
-    font: 600 12px var(--mono);
-    cursor: pointer;
-    transition: color .18s, background .18s;
-  }
-  .tab:hover { color: var(--text); background: var(--bg-elev); }
-  .tab[aria-selected='true'] {
-    color: var(--text);
-    background: var(--border);
-  }
   .panel {
     min-width: 0;
     max-width: 100%;

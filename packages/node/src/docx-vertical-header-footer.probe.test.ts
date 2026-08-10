@@ -162,9 +162,9 @@ function verticalHeaderFooterDocx(opts: DocxOpts): Uint8Array {
 interface Run { t: string; x: number; y: number; w: number; h: number; tr?: string }
 
 async function renderRuns(): Promise<{ runs: Run[] }> {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
+  const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (b: Uint8Array) => Any };
   const { renderDocumentToCanvas } = rendererMod!;
-  const doc = parseDocx(verticalHeaderFooterDocx({ hf: true }));
+  const doc = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: true }));
   // Physical letter portrait: width 612 (=pageWidth), height 792 (=pageHeight).
   const canvas = new Canvas(Math.round(doc.section.pageWidth), Math.round(doc.section.pageHeight));
   const runs: Run[] = [];
@@ -220,19 +220,19 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       expect(isRotated(body.tr), 'body must be vertical (rotate present)').toBe(true);
     });
 
-    it('paginates a vertical section independently of its header/footer (asymmetric margins)', () => {
+    it('paginates a vertical section independently of its header/footer (asymmetric margins)', async () => {
       // The header/footer occupy the PHYSICAL top/bottom band and reserve no body
       // space (issue #988). The paginator runs on the swapped logical geometry, so a
       // logical-axis reserve — comparing header height against the logical marginTop
       // (physical RIGHT) — would spuriously fire with asymmetric margins and add
       // pages the paint (reserve 0) does not expect. Assert the page count is the
       // same with and without the header/footer, on an asymmetric-margin page.
-      const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
+      const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (b: Uint8Array) => Any };
       const { layoutDocument } = rendererMod!;
       const margins =
         'w:top="2880" w:right="720" w:bottom="2880" w:left="720" w:header="360" w:footer="360" w:gutter="0"';
-      const withHF = parseDocx(verticalHeaderFooterDocx({ hf: true, paras: 40, pgMar: margins }));
-      const noHF = parseDocx(verticalHeaderFooterDocx({ hf: false, paras: 40, pgMar: margins }));
+      const withHF = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: true, paras: 40, pgMar: margins }));
+      const noHF = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: false, paras: 40, pgMar: margins }));
       const rImg = installImageBitmapShim(factory);
       const rOff = installOffscreenCanvasShim(factory);
       let withPages = 0;

@@ -61,6 +61,13 @@ describe('ECMA-376 §17.18.87 table column solver', () => {
     }))).toEqual([52.5, 22.5]);
   });
 
+  it('keeps fixed tracks unconstrained when the caller owns no width ceiling', () => {
+    expect(resolveTableColumnWidths(input({
+      availableWidthPt: null,
+      gridWidthsPt: [70, 30],
+    }))).toEqual([70, 30]);
+  });
+
   it('gives solver-changed tracks exact keys for their final numeric definitions', () => {
     expect(resolveTableColumnLayout(input({
       availableWidthPt: 75,

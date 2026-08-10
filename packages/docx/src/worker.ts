@@ -85,14 +85,14 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
     }
     if (req.type === 'parse') {
       await documentPull.reset();
-      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
+      const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
       // Construction and every later cursor call run under `host.run`, so a
       // trap poisons and recycles the instance. The parse response opens a
       // correlated pull session; complete body units, never a monolithic model
       // JSON value, cross to Window and require consumer ACK.
       host.run(() => {
-        const archive = new DocxArchive(bytes, maxEntry, maxTotal);
+        const archive = new DocxArchive(bytes, maxEntry, maxTotal, maxEntries);
         host.setArchive(archive);
       });
       documentGeneration += 1;

@@ -27,6 +27,7 @@ pub struct ResourceGovernor(Rc<RefCell<GovernorState>>);
 struct ResourcePolicy {
     public_entry: Option<u64>,
     public_total: Option<u64>,
+    public_entries: Option<u64>,
 }
 
 struct GovernorState {
@@ -253,6 +254,7 @@ impl ResourceGovernor {
         format: OoxmlFormat,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Self {
         fn decode(value: Option<u64>, standard: u64) -> Option<u64> {
             match value {
@@ -266,6 +268,7 @@ impl ResourceGovernor {
             policy: ResourcePolicy {
                 public_entry: decode(max_archive_entry_bytes, STANDARD_MAX_ARCHIVE_ENTRY_BYTES),
                 public_total: decode(max_total_inflated_bytes, STANDARD_MAX_TOTAL_INFLATED_BYTES),
+                public_entries: decode(max_archive_entries, STANDARD_MAX_ARCHIVE_ENTRIES),
             },
             operation: "open".to_string(),
             usage: ResourceUsage::default(),
@@ -457,6 +460,19 @@ pub(crate) fn observe_archive_metadata(
     state.assert_healthy()?;
     state.usage.archive_entry_count = state.usage.archive_entry_count.max(entry_count);
     state.usage.declared_inflated_bytes = declared_inflated_bytes;
+    if let Some(limit) = state.policy.public_entries {
+        if entry_count > limit {
+            return Err(state.fail(LimitCrossing {
+                stage: "container",
+                resource: "archive",
+                metric: "entry-count",
+                part: None,
+                limit,
+                observed: entry_count,
+                configurable: true,
+            }));
+        }
+    }
     if entry_count > HARD_MAX_ARCHIVE_ENTRIES {
         return Err(state.fail(LimitCrossing {
             stage: "container",
@@ -616,16 +632,56 @@ mod tests {
 
     #[test]
     fn zero_wire_value_disables_only_the_public_limit() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(0), Some(0));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(0), Some(0), None);
         let state = governor.0.borrow();
         assert_eq!(state.policy.public_entry, None);
         assert_eq!(state.policy.public_total, None);
+        assert_eq!(
+            state.policy.public_entries,
+            Some(STANDARD_MAX_ARCHIVE_ENTRIES)
+        );
         assert_eq!(effective_limit(state.policy.public_entry, 10), (10, false));
     }
 
     #[test]
+    fn entry_count_public_limit_is_typed_configurable_and_inclusive() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(0), Some(0), Some(2));
+        let _scope = governor.scope("open");
+        observe_archive_metadata(2, 0).unwrap();
+        let error = observe_archive_metadata(3, 0).unwrap_err();
+        let envelope: serde_json::Value =
+            serde_json::from_str(error.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        let violation = &envelope["details"]["violation"];
+        assert_eq!(violation["metric"], "entry-count");
+        assert_eq!(violation["limit"], 2);
+        assert_eq!(violation["observed"], 3);
+        assert_eq!(violation["configurable"], true);
+        assert!(violation.get("part").is_none());
+    }
+
+    #[test]
+    fn entry_count_reports_the_public_policy_before_the_hard_ceiling() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(0), Some(0), Some(2));
+        let _scope = governor.scope("open");
+        let error = observe_archive_metadata(HARD_MAX_ARCHIVE_ENTRIES + 1, 0).unwrap_err();
+        let envelope: serde_json::Value =
+            serde_json::from_str(error.strip_prefix("OOXML_RESOURCE_LIMIT:").unwrap()).unwrap();
+        let violation = &envelope["details"]["violation"];
+        assert_eq!(violation["limit"], 2);
+        assert_eq!(violation["configurable"], true);
+    }
+
+    #[test]
+    fn zero_wire_entry_count_disables_only_public_limit() {
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(0), Some(0), Some(0));
+        let _scope = governor.scope("open");
+        observe_archive_metadata(STANDARD_MAX_ARCHIVE_ENTRIES + 1, 0).unwrap();
+        assert_eq!(governor.0.borrow().policy.public_entries, None);
+    }
+
+    #[test]
     fn scope_restores_outer_operation_but_retains_session_usage() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(100), Some(100));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(100), Some(100), None);
         {
             let _outer = governor.scope("parse");
             observe_inflated(0, "xl/a.xml", 4, 4).unwrap();
@@ -642,7 +698,7 @@ mod tests {
 
     #[test]
     fn completed_top_level_scope_retains_its_operation_usage() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(100), Some(100));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(100), Some(100), None);
         {
             let _scope = governor.scope("parse");
             observe_inflated(0, "word/document.xml", 7, 7).unwrap();
@@ -660,7 +716,7 @@ mod tests {
 
     #[test]
     fn first_violation_poison_is_stable() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(4), Some(20));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(4), Some(20), None);
         let _scope = governor.scope("extract-image");
         let first = observe_inflated(0, "ppt/media/a.png", 5, 5).unwrap_err();
         let later = read_allowance(1, "ppt/media/b.png", 1).unwrap_err();
@@ -690,7 +746,7 @@ mod tests {
         assert_eq!(safe_part(&oversized), "untrusted-archive-entry");
         assert_eq!(safe_part("word/document.xml"), "word/document.xml");
 
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(20));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(20), None);
         let _scope = governor.scope("parse");
         let first = observe_inflated(0, "../../private/document.xml", 5, 5).unwrap_err();
         let replay = read_allowance(1, "word/document.xml", 1).unwrap_err();
@@ -705,7 +761,7 @@ mod tests {
 
     #[test]
     fn hard_parser_limit_uses_closed_wire_discriminants_and_poisons() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, None, None);
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, None, None, None);
         let _scope = governor.scope("parse-sheet");
         observe_hard_limit(
             HardResourceLimitKind::WorksheetRowProjectionBytes,
@@ -741,7 +797,7 @@ mod tests {
 
     #[test]
     fn worksheet_json_limit_is_inclusive_and_crosses_at_plus_one() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(0), Some(0));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(0), Some(0), None);
         let _scope = governor.scope("parse-sheet");
         observe_hard_limit(
             HardResourceLimitKind::WorksheetJsonBytes,

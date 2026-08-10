@@ -138,10 +138,10 @@ function plain(text: string): BodyElement {
   };
 }
 
-function buildDoc(body: BodyElement[]): DocxDocumentModel {
+async function buildDoc(body: BodyElement[]): Promise<DocxDocumentModel> {
   if (!docxMod) throw new Error('docx WASM unavailable (run pnpm build:wasm)');
-  const { parseDocx } = docxMod;
-  const doc = parseDocx(readFileSync(SAMPLE));
+  const { materializeDocxDocument } = docxMod;
+  const doc = await materializeDocxDocument(readFileSync(SAMPLE));
   // Single-column full-width body so the injected block is isolated and wide.
   doc.section.columns = { count: 1, spacePt: 0, equalWidth: true, sep: false, cols: [] } as unknown as DocxDocumentModel['section']['columns'];
   doc.body = body;
@@ -213,7 +213,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
   () => {
     it('consecutive same-border code lines draw one box, not a rule per line', async () => {
       // Caption (top+bottom) then 6 code lines (bottom-only) — sample-13's "Code 1".
-      const doc = buildDoc([
+      const doc = await buildDoc([
         plain('intro'),
         caption('Code 1.  Source code caption.'),
         codeLine('void main(void)'),
@@ -252,7 +252,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
         runs: [textRun('boxed', 'Times New Roman')],
         borders: { top: SINGLE(), bottom: SINGLE(), left: SINGLE(), right: SINGLE(), between: null },
       };
-      const doc = buildDoc([plain('above'), boxed, plain('below')]);
+      const doc = await buildDoc([plain('above'), boxed, plain('below')]);
       const { data, w, h } = await render(doc, 600);
       const rules = findHorizontalRules(data, w, h);
       // The standalone box draws BOTH a top and a bottom horizontal rule.

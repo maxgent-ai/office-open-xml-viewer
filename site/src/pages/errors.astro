@@ -48,24 +48,26 @@ export function previewErrorMessage(error: unknown): string {
   return 'This file could not be previewed.';
 }
 
-// Add onError when the Viewer must also report failures that happen after load.
+// Add onError only for background failures that have no Promise to await.
 const canvas = document.querySelector<HTMLCanvasElement>('#preview') as HTMLCanvasElement;
-let initialLoadFailed = false;
 const viewer = new DocxViewer(canvas, {
   onError(error) {
-    initialLoadFailed = true;
     showPreviewError(previewErrorMessage(error));
     reportError(error); // Keep this callback non-throwing.
   },
 });
 
-// A load failure is delivered above, so this Promise resolves when onError exists.
-initialLoadFailed = false;
-await viewer.load(await file.arrayBuffer());
-if (!initialLoadFailed) showPreview();`;
+try {
+  // Awaitable methods reject regardless of whether onError is present.
+  await viewer.load(await file.arrayBuffer());
+  showPreview();
+} catch (error) {
+  showPreviewError(previewErrorMessage(error));
+  reportError(error);
+}`;
 ---
 
-<Base title="Error handling — @silurus/ooxml">
+<Base title="Error handling — @silurus/ooxml" canonicalPath="/errors/">
   <Nav />
 
   <header class="error-hero">
@@ -73,7 +75,7 @@ if (!initialLoadFailed) showPreview();`;
       <a class="back" href="/">← Documentation</a>
       <p class="eyebrow">API reference</p>
       <h1>Handle failures without guessing.</h1>
-      <p class="lead">Choose one delivery model, branch only on documented fields, and always keep a safe fallback for errors that are not typed.</p>
+      <p class="lead">Await each operation, use the callback only for background work, and always keep a safe fallback for errors that are not typed.</p>
     </div>
   </header>
 
@@ -81,7 +83,7 @@ if (!initialLoadFailed) showPreview();`;
     <section id="start" class="error-section start-section">
       <div class="section-heading">
         <p class="section-index">01</p>
-        <div><h2>Start with Promise rejection</h2><p>For a basic file preview, omit <code>onError</code> and catch the rejected <code>load()</code>. Success and failure then follow normal Promise semantics.</p></div>
+        <div><h2>Start with Promise rejection</h2><p>Catch the rejected <code>load()</code> whether or not the Viewer also has an <code>onError</code> callback. Success and failure follow normal Promise semantics.</p></div>
       </div>
       <div class="code-card"><Code code={simpleExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
       <div class="principles">
@@ -94,26 +96,26 @@ if (!initialLoadFailed) showPreview();`;
     <section id="delivery" class="error-section">
       <div class="section-heading">
         <p class="section-index">02</p>
-        <div><h2>Choose the delivery model</h2><p>The Viewer changes its initial-load behavior when <code>onError</code> is supplied. Choose deliberately rather than combining both models.</p></div>
+        <div><h2>Match the channel to the work</h2><p>Awaitable methods reject their Promise. The callback covers only Viewer-managed work that has no Promise for the application to await; the same failure is never delivered twice.</p></div>
       </div>
       <div class="delivery-grid">
         <article class="recommended">
-          <p class="card-label">Simplest · recommended to start</p>
-          <h3>Viewer without <code>onError</code></h3>
-          <p>Initial load and parse failures reject <code>load()</code>, so one <code>try</code>/<code>catch</code> determines whether the preview opened.</p>
-          <p class="caveat">Later Viewer-managed render or media failures cannot reject an already-settled load Promise and are written to <code>console.error</code>.</p>
+          <p class="card-label">Awaitable operation</p>
+          <h3><code>load()</code> and navigation</h3>
+          <p>Parsing, initial rendering, and directly requested navigation reject the Promise returned by that operation.</p>
+          <p class="caveat">Catch the operation even when the Viewer also has <code>onError</code>; the callback does not replace Promise rejection.</p>
         </article>
         <article>
-          <p class="card-label">Long-lived Viewer</p>
-          <h3>Viewer with <code>onError</code></h3>
-          <p>Use this when your application must receive failures from later page, slide, sheet, image or media work as well as the initial load.</p>
-          <p class="caveat"><strong>A failed initial load calls the callback and <code>load()</code> resolves.</strong> Update application state in the callback; resolution alone is not proof that rendering succeeded.</p>
+          <p class="card-label">Background work</p>
+          <h3><code>onError</code></h3>
+          <p>Use this for failures from later virtualized page/slide rendering, event-driven work, or embedded-media playback where no application-held Promise exists.</p>
+          <p class="caveat"><strong>The same failure is never delivered twice.</strong> An error already returned by an awaited method is not repeated here.</p>
         </article>
         <article>
           <p class="card-label">Document · workbook · presentation</p>
           <h3>Headless APIs</h3>
-          <p>Headless methods have no error callback. Loading and later lazy operations reject the Promise returned by that operation.</p>
-          <p class="caveat">Catch each operation that can read a new package part or decode a new resource.</p>
+          <p>Loading, rendering and later lazy operations reject the Promise returned by that operation.</p>
+          <p class="caveat"><code>PptxPresentation.presentSlide()</code> is the narrow exception: its Promise rejects initial failures, while <code>PresentSlideOptions.onError</code> observes media decode or playback failures after the handle has already been returned.</p>
         </article>
       </div>
       <p class="callback-note"><strong>Keep <code>onError</code> non-throwing.</strong> Record the original error and update UI state inside the callback; throwing from the callback replaces or creates another application error.</p>
@@ -214,7 +216,8 @@ if (!initialLoadFailed) showPreview();`;
       <p class="error-kicker">Production checklist</p>
       <h2>Before shipping</h2>
       <ul class="checklist">
-        <li>Choose Promise rejection or <code>onError</code> intentionally for each Viewer.</li>
+        <li>Catch every Viewer method that returns a Promise, including <code>load()</code>.</li>
+        <li>Use <code>onError</code> only when the application must observe background Viewer work.</li>
         <li>Catch every headless operation that can load a package part or decode media.</li>
         <li>Branch only on exported classes and documented <code>code</code> values.</li>
         <li>Translate technical failures into short product-level messages.</li>
@@ -230,7 +233,7 @@ if (!initialLoadFailed) showPreview();`;
         <BrandIcon />
         <div><strong>@silurus/ooxml</strong><span>Browser-based OOXML viewer · Rust/WASM + Canvas</span></div>
       </div>
-      <div class="footer-links"><a href="/">Home</a><a href="/deprecations">Deprecated APIs</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a></div>
+      <div class="footer-links"><a href="/">Home</a><a href="/announcements">Migration guides</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a></div>
     </div>
   </footer>
 </Base>

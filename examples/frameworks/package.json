@@ -1,0 +1,14 @@
+{
+  "name": "@ooxml-framework-examples/workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "check": "pnpm -r --if-present check",
+    "dev:react": "pnpm --filter @ooxml-framework-examples/react dev --host 0.0.0.0",
+    "dev:vue": "pnpm --filter @ooxml-framework-examples/vue dev --host 0.0.0.0",
+    "dev:svelte": "pnpm --filter @ooxml-framework-examples/svelte dev --host 0.0.0.0",
+    "dev:solid": "pnpm --filter @ooxml-framework-examples/solid dev --host 0.0.0.0"
+  },
+  "packageManager": "pnpm@11.13.0"
+}

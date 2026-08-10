@@ -16,7 +16,6 @@ import {
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
-  BoundedPullSession,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
@@ -29,20 +28,19 @@ import {
   HARD_MAX_RAW_PART_CACHE_ENTRIES,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
-import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
-  measureWorksheet,
   type WorksheetCacheUsage,
   type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
@@ -56,7 +54,34 @@ import type {
   RenderWorkerResponse,
   WireRenderViewportOptions,
 } from './worker-protocol.js';
-import { XLSX_WORKSHEET_PULL_BYTES } from './worksheet-pull-worker.js';
+import {
+  createSizeOverriddenWorksheet,
+  extractViewerRenderContext,
+} from './worker-protocol.js';
+import {
+  isXlsxWorksheetPullResponse,
+  XlsxWorksheetPullClient,
+} from './worksheet-pull-client.js';
+import { GridGeometry } from './internal/grid-geometry.js';
+import { inheritSheetRenderCache } from './renderer.js';
+
+/** Public options for {@link XlsxWorkbook.renderViewportToBitmap}. Viewer-only
+ * worksheet projection state is intentionally not part of this contract. */
+export type RenderViewportToBitmapOptions = Omit<
+  XlsxRenderViewportOptions,
+  'onTextRun'
+> & { width: number; height: number };
+
+/** @internal Viewer-only hook for retaining web fonts in the canvas document. */
+export const retainXlsxViewerFonts = Symbol('retain-xlsx-viewer-fonts');
+/** @internal Release worker-side viewer projection cache entries. */
+export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
+
+interface RetainedFontSet {
+  refs: number;
+  faces: FontFace[] | null;
+  readonly loading: Promise<FontFace[]>;
+}
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
@@ -70,12 +95,6 @@ export interface LoadOptions extends CoreLoadOptions {
    * The math engine is unavailable in this mode (equations are skipped).
    */
   mode?: 'main' | 'worker';
-}
-
-function isWorksheetPullResponse(
-  response: WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
-): response is PullSessionResponse<ArrayBuffer, number> {
-  return 'protocol' in response && response.protocol === PULL_SESSION_PROTOCOL;
 }
 
 export class XlsxWorkbook {
@@ -111,19 +130,19 @@ export class XlsxWorkbook {
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private math: MathRenderer | undefined;
-  /** Google-Fonts `FontFace` objects this workbook preloaded into `document.fonts`
-   *  (main mode only — in worker mode the worker owns them and terminates with its
-   *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
-   *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
-   *  so a web font shared with another open workbook survives until both go). */
-  private googleFontFaces: FontFace[] = [];
+  /** Web-font registrations are per FontFaceSet. Same-origin child windows have
+   * their own set even when they share this workbook instance. */
+  private googleFontNames: string[] = [];
+  private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
+  private fontsDestroyed = false;
   private _mode: 'main' | 'worker' = 'main';
   private generation = 0;
-  private nextSheetSessionId = 1;
   private archiveOperationTail: Promise<void> = Promise.resolve();
-  private sheetSessions = new Set<BoundedPullSession<ArrayBuffer, number>>();
+  private worksheetPullClient: XlsxWorksheetPullClient | null = null;
   private workerTimeoutMs: number | undefined;
-  private retainedSheetUsage: WorksheetCacheUsage = { rows: 0, cells: 0 };
+  private retainedSheetUsage: WorksheetCacheUsage = {
+    rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+  };
   /** First fatal model/package violation. Compatibility materialization happens
    * on main, so this latch is the document-level poison boundary for every
    * later public operation on the same workbook instance. */
@@ -152,6 +171,12 @@ export class XlsxWorkbook {
     // relative override is still resolved against `location.href`.
     const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
     this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
+  }
+
+  /** The render mode this loaded workbook owns. Injected viewers use this fact
+   *  to select direct-canvas or worker-bitmap rendering without probing. */
+  get mode(): 'main' | 'worker' {
+    return this._mode;
   }
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
@@ -233,12 +258,10 @@ export class XlsxWorkbook {
     preserveCallerBuffer = false,
   ): Promise<void> {
     this.resourceFailure = null;
-    this.retainedSheetUsage = { rows: 0, cells: 0 };
+    this.retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
     this.sheetCache.clear();
-    for (const session of this.sheetSessions ?? []) {
-      await session.cancel('closed').catch(() => undefined);
-    }
-    this.sheetSessions?.clear();
+    await this.worksheetPullClient?.cancelAll('closed');
+    this.worksheetPullClient = null;
     this.generation = (this.generation ?? 0) + 1;
     this.resourcePolicy = resourcePolicy;
     this.workerTimeoutMs = opts.workerTimeoutMs;
@@ -288,6 +311,7 @@ export class XlsxWorkbook {
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
     }
+    this.ensureWorksheetPullClient();
     // #773: a workbook-level degradation (a present-but-corrupt shared part such
     // as `xl/sharedStrings.xml`, which blanks every string cell across all sheets)
     // still opens the workbook, but must not be SILENT. Surface it once at load —
@@ -298,12 +322,50 @@ export class XlsxWorkbook {
     if (workbookError) {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
     }
-    if (this._mode === 'main' && opts.useGoogleFonts) {
-      this.googleFontFaces = await preloadGoogleFonts(
-        xlsxFontPreloadNames(this.parsedWorkbook),
-        XLSX_GOOGLE_FONTS,
-      );
+    if (opts.useGoogleFonts) {
+      // The composite viewer computes hit/scroll/overlay geometry on the main
+      // realm even when paint runs in a worker. Register the same fallback
+      // faces in both realms before any worksheet geometry snapshot is made so
+      // ECMA-376 MDW is identical across paint and interaction.
+      this.googleFontNames = [...xlsxFontPreloadNames(this.parsedWorkbook)];
+      if (typeof document !== 'undefined' && document.fonts) {
+        await this.retainFontsInSet(document.fonts);
+      }
     }
+  }
+
+  private async retainFontsInSet(fontSet: FontFaceSet): Promise<() => void> {
+    if (this.googleFontNames.length === 0 || this.fontsDestroyed) return () => undefined;
+    let retained = this.retainedFontSets.get(fontSet);
+    if (retained) {
+      retained.refs++;
+    } else {
+      const loading = preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet);
+      retained = { refs: 1, faces: null, loading };
+      this.retainedFontSets.set(fontSet, retained);
+      loading.then((faces) => {
+        retained!.faces = faces;
+        if (this.fontsDestroyed) unloadGoogleFonts(faces);
+      });
+    }
+    await retained.loading;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.retainedFontSets.get(fontSet);
+      if (current !== retained) return;
+      current.refs--;
+      if (current.refs > 0) return;
+      this.retainedFontSets.delete(fontSet);
+      if (current.faces) unloadGoogleFonts(current.faces);
+      else current.loading.then(unloadGoogleFonts);
+    };
+  }
+
+  /** @internal Retain required faces in the document that owns a viewer canvas. */
+  async [retainXlsxViewerFonts](targetDocument: Document): Promise<() => void> {
+    return await this.retainFontsInSet(targetDocument.fonts);
   }
 
   get sheetNames(): string[] {
@@ -384,85 +446,95 @@ export class XlsxWorkbook {
   }
 
   private async loadWorksheetStream(sheetIndex: number, sheetName: string): Promise<Worksheet> {
-    const sessionId = this.nextSheetSessionId ?? 1;
-    this.nextSheetSessionId = sessionId + 1;
-    const identity = { sessionId, operationId: sessionId, generation: this.generation ?? 1 };
-    const session = new BoundedPullSession(
-      this.bridge.transport(isWorksheetPullResponse),
-      { ...identity, maxByteCredit: XLSX_WORKSHEET_PULL_BYTES, timeoutMs: this.workerTimeoutMs },
-    );
-    this.sheetSessions ??= new Set();
-    this.sheetSessions.add(session);
+    const client = this.ensureWorksheetPullClient();
     const rows: Worksheet['rows'] = [];
     let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
+    let terminal: Worksheet | undefined;
+    let nextCacheUsage: WorksheetCacheUsage | undefined;
     // The compatibility adapter knows the workbook sheet index/name but not
     // the resolved OPC relationship target. Omit `part` rather than fabricate
     // a package address; Rust-originated violations carry the real xl/... path.
     const part = undefined;
     try {
-      await this.bridge.request(
-        (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
-        undefined,
-        { timeoutMs: this.workerTimeoutMs },
-      );
-      for (;;) {
-        const chunk = await session.pull(XLSX_WORKSHEET_PULL_BYTES);
-        const decoded = JSON.parse(
-          new TextDecoder().decode(new Uint8Array(chunk.payload)),
-        ) as { kind: 'rows'; rows: Worksheet['rows'] } | { kind: 'finished'; worksheet: Worksheet };
-        if (decoded.kind === 'rows') {
-          resolveSharedStringRows(decoded.rows, this.parsedWorkbook?.sharedStrings ?? []);
-          const nextUsage = addWorksheetUsage(modelUsage, measureRows(decoded.rows));
+      for await (const unit of client.stream(sheetIndex, sheetName)) {
+        if (unit.kind === 'rows') {
+          const nextUsage = addWorksheetUsage(modelUsage, measureRows(unit.rows));
           assertWorksheetModelUsage(
             nextUsage,
             'get-worksheet',
             part,
-            chunk.usage ?? session.usageCheckpoint,
+            unit.usage,
           );
-          rows.push(...decoded.rows);
+          rows.push(...unit.rows);
           modelUsage = nextUsage;
-          await chunk.ack();
           continue;
         }
-        const worksheet = decoded.worksheet;
-        worksheet.rows = rows;
+        const worksheet = unit.worksheet;
+        worksheet.rows = worksheet.parseError ? [] : rows;
         // Terminal metadata contains no rows, but measure the final public model
         // to cover exact monolithic JSON before its cache admission.
-        const measured = measureWorksheet(worksheet);
+        const measured = completeWorksheetUsage(
+          worksheet,
+          worksheet.parseError
+            ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+            : modelUsage,
+        );
         assertWorksheetModelUsage(
           measured,
           'get-worksheet',
           part,
-          chunk.usage ?? session.usageCheckpoint,
+          unit.usage,
         );
         assertWorksheetJsonBytes(
           measured.jsonBytes,
           'get-worksheet',
           part,
-          chunk.usage ?? session.usageCheckpoint,
+          unit.usage,
         );
-        const retainedUsage = this.retainedSheetUsage ?? { rows: 0, cells: 0 };
+        const retainedUsage = this.retainedSheetUsage ?? {
+          rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+        };
         const nextCache = addWorksheetCacheUsage(retainedUsage, measured);
         assertWorksheetCacheUsage(
           nextCache,
           'get-worksheet',
           part,
-          chunk.usage ?? session.usageCheckpoint,
+          unit.usage,
         );
-        // Decoding and assembly above is the consumer's acceptance point. The
-        // terminal ACK may now commit the prepared Rust operation.
-        await chunk.ack();
-        this.retainedSheetUsage = nextCache;
-        this.sheetCache.set(sheetIndex, worksheet);
-        return worksheet;
+        terminal = worksheet;
+        nextCacheUsage = nextCache;
       }
+      if (!terminal || !nextCacheUsage) {
+        throw new Error(`XLSX worksheet ${sheetIndex} did not produce a terminal model`);
+      }
+      // The coordinator has ACKed the accepted terminal before it completes.
+      // Only now commit Browser-retained cache ownership/accounting.
+      this.retainedSheetUsage = nextCacheUsage;
+      this.sheetCache.set(sheetIndex, terminal);
+      return terminal;
     } catch (error) {
-      await session.cancel('request-error').catch(() => undefined);
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
       throw error;
-    } finally {
-      this.sheetSessions.delete(session);
     }
+  }
+
+  private ensureWorksheetPullClient(): XlsxWorksheetPullClient {
+    if (this.worksheetPullClient) return this.worksheetPullClient;
+    if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
+    this.worksheetPullClient = new XlsxWorksheetPullClient({
+      generation: this.generation || 1,
+      transport: this.bridge.transport(isXlsxWorksheetPullResponse),
+      sharedStrings: this.parsedWorkbook.sharedStrings,
+      timeoutMs: this.workerTimeoutMs,
+      open: async (sheetIndex, sheetName, identity, timeoutMs) => {
+        await this.bridge.request(
+          (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
+          undefined,
+          { timeoutMs },
+        );
+      },
+    });
+    return this.worksheetPullClient;
   }
 
   private runArchiveOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -616,14 +688,14 @@ export class XlsxWorkbook {
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
   }
 
-  /**
-   * Render a sheet viewport into `target`. Note: `opts.fetchImage` is ignored
-   * here — image bytes always come from this workbook's own archive through its
-   * stable per-instance loader, whose closure identity keys the shared decoded
-   * caches, the render-pass lease, and {@link destroy}'s cache drops. Callers
-   * needing a custom byte source should use the standalone
-   * `renderWorksheetViewport` orchestrator directly.
-   */
+  /** Render a sheet viewport into `target`. Image bytes and decoded-image cache
+   * ownership stay with this workbook instance. */
+  async renderViewport(
+    target: HTMLCanvasElement | OffscreenCanvas,
+    sheetIndex: number,
+    viewport: ViewportRange,
+    opts?: XlsxRenderViewportOptions,
+  ): Promise<void>;
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,
     sheetIndex: number,
@@ -638,15 +710,23 @@ export class XlsxWorkbook {
     }
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     const styles = this.parsedWorkbook.styles;
-    return this.withWorksheetArchiveOperation(sheetIndex, (ws) =>
-      renderWorksheetViewport(
+    const extracted = extractViewerRenderContext(opts as WireRenderViewportOptions);
+    const { sizeOverrides, ...renderOpts } = extracted.opts;
+    return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
+      const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
+      if (ws !== source) inheritSheetRenderCache(source, ws);
+      if (extracted.layoutMetrics) {
+        GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
+      }
+      return renderWorksheetViewport(
         { ws, styles, math: this.math },
         target,
         viewport,
         // The stable closure uses the archive operation already reserved by
         // withWorksheetArchiveOperation, avoiding a nested FIFO acquisition.
-        { ...opts, fetchImage: this._fetchImage },
-      ));
+        { ...renderOpts, fetchImage: this._fetchImage },
+      );
+    });
   }
 
   /**
@@ -663,23 +743,43 @@ export class XlsxWorkbook {
   async renderViewportToBitmap(
     sheetIndex: number,
     viewport: ViewportRange,
+    opts: RenderViewportToBitmapOptions,
+  ): Promise<ImageBitmap>;
+  async renderViewportToBitmap(
+    sheetIndex: number,
+    viewport: ViewportRange,
     opts: WireRenderViewportOptions & { width: number; height: number },
   ): Promise<ImageBitmap> {
     this.assertResourceHealthy();
-    const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    const extracted = extractViewerRenderContext(opts);
+    const wireOpts = { ...extracted.opts, dpr: opts.dpr ?? defaultDpr() };
     if (this._mode === 'worker') {
       if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
       const res = await this.withWorksheetArchiveOperation(sheetIndex, () =>
         this.bridge.request(
-          (id) => ({ type: 'renderViewport', id, sheetIndex, viewport, opts: wireOpts }) satisfies RenderWorkerRequest,
+          (id) => ({
+            type: 'renderViewport',
+            id,
+            sheetIndex,
+            viewport,
+            opts: wireOpts,
+            layoutMetrics: extracted.layoutMetrics,
+            viewProjection: extracted.projection,
+          }) satisfies RenderWorkerRequest,
         ));
       return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
     }
     const off = new OffscreenCanvas(1, 1);
     await this.renderViewport(off, sheetIndex, viewport, wireOpts);
     return off.transferToImageBitmap();
+  }
+
+  /** @internal Drop projections owned by a destroyed viewer. */
+  [releaseXlsxViewerProjection](projectionId: number): void {
+    if (this._mode !== 'worker') return;
+    this.bridge.post({ type: 'releaseViewProjection', projectionId } satisfies RenderWorkerRequest);
   }
 
   private withWorksheetArchiveOperation<T>(
@@ -726,21 +826,20 @@ export class XlsxWorkbook {
 
   destroy(): void {
     this.generation = (this.generation ?? 1) + 1;
-    for (const session of this.sheetSessions ?? []) void session.cancel('closed').catch(() => undefined);
-    this.sheetSessions?.clear();
+    void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
+    this.worksheetPullClient = null;
     this.bridge.terminate();
     this.parsedWorkbook = null;
     this.sheetCache.clear();
     this.sheetLoads.clear();
-    // Release the Google-Fonts substitutes this workbook preloaded into the
-    // shared FontFaceSet (main mode). Refcounted in core: a web font also used by
-    // another open workbook stays until that one is destroyed too. Without this,
-    // every opened workbook left its Google FontFace objects in `document.fonts`
-    // forever (SPA memory leak).
-    if (this.googleFontFaces.length > 0) {
-      unloadGoogleFonts(this.googleFontFaces);
-      this.googleFontFaces = [];
+    this.fontsDestroyed = true;
+    for (const retained of this.retainedFontSets.values()) {
+      if (retained.faces) unloadGoogleFonts(retained.faces);
+      // An in-flight registration observes fontsDestroyed in its own completion
+      // callback and releases exactly once when the faces become available.
     }
+    this.retainedFontSets.clear();
+    this.googleFontNames = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core
     // caches to release decoded surfaces and SVG references.
     dropDecodedBitmapCache(this._fetchImage);

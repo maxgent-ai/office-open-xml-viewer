@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { PptxScrollViewer } from './scroll-viewer.js';
-import { installDom, makeContainer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeBorrowedPptxScrollViewer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import type { PptxTextRunInfo } from './renderer';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 
@@ -59,7 +59,7 @@ async function setup(
   const container = makeContainer(200, 400);
   const engine = new FakePptxEngine(slideCount, SLIDE_W_EMU, SLIDE_H_EMU);
   engine.feedTextRuns = [linkRun(hyperlink)];
-  const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+  const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
     presentation: engine.asPres(),
     gap: 10,
     overscan: 1,

@@ -14,6 +14,7 @@ describe('pptx public API export completeness', () => {
   // ample headroom so the API-freeze guard is deterministic.
   it('exports every in-package type reachable from index.ts', { timeout: 30000 }, () => {
     const missing = findMissingExportsFromUrl(import.meta.url, './index.ts', {
+      srcDirRelativeToMeta: '../../',
       // `SlideRenderOptions` is `RenderOptions & { math }`, the *internal*
       // parameter type of `renderSlide`. The `math` engine is implementation
       // plumbing that `PptxPresentation` injects; the public-facing option type

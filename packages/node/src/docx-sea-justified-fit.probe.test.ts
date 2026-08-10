@@ -40,7 +40,7 @@ import {
 
 const skia = await loadSkiaForTests();
 type Skia = typeof import('skia-canvas');
-const { Canvas, loadImage } = (skia ?? {}) as Skia;
+const { Canvas, loadImage, FontLibrary } = (skia ?? {}) as Skia;
 
 const factory: NodeCanvasFactory = {
   createCanvas: (w, h) =>
@@ -62,8 +62,8 @@ interface VisLine { y: number; x0: number; x1: number; text: string }
 
 type DocxLayout = ReturnType<DocxRendererModule['layoutDocument']>;
 
-function parse(path: string): DocxDocumentModel {
-  return docxMod!.parseDocx(readFileSync(path));
+async function parse(path: string): Promise<DocxDocumentModel> {
+  return await docxMod!.materializeDocxDocument(readFileSync(path));
 }
 
 /** Recording ctx proxy: forwards everything to the real skia ctx but records
@@ -191,7 +191,7 @@ const gate = baseGate && !!SAMPLE && !!PDF && existsSync(SAMPLE!) && existsSync(
 
 describe.skipIf(!gate)('issue #991 — SEA justified line-fit adjudication', () => {
   it('per-page line-break divergence report', async () => {
-    const doc = parse(SAMPLE!);
+    const doc = await parse(SAMPLE!);
     const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
     let layout: DocxLayout;
     let layoutServices: DocxLayoutServices;
@@ -293,48 +293,58 @@ const privatePair = (name: string): { docx: string; pdf: string } | null => {
   return existsSync(docx) && existsSync(pdf) ? { docx, pdf } : null;
 };
 
+/** The acceptance pin compares face-dependent line counts. sample-29 authors
+ * SCG, while its current Word PDF substitutes Browallia New on a machine where
+ * SCG is absent. Running the pin on another host that also lacks SCG compares
+ * two unrelated substitutions and produces a false renderer regression. */
+const privatePairHasRequiredFont = (name: string): boolean =>
+  name !== 'sample-29' || FontLibrary?.has('SCG') === true;
+
 // Requires `pdfinfo` (poppler, alongside pdftotext) for the trailing-page
 // emptiness check below.
 describe.skipIf(!baseGate || !havePdfinfo)('issue #991 — private fixture line-count pins', () => {
   for (const name of ['sample-29', 'sample-55']) {
     const pair = privatePair(name);
-    it.skipIf(!pair)(`${name}: per-page visible-line counts match the Word PDF`, async () => {
-      const doc = parse(pair!.docx);
-      const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
-      let layout: DocxLayout;
-      let layoutServices: DocxLayoutServices;
-      try {
-        const renderer = rendererMod!;
-        layoutServices = renderer.createLayoutServices(doc);
-        layout = renderer.layoutDocument(doc, layoutServices, { currentDateMs: 0 });
-      }
-      finally { restore.forEach((r) => r()); }
-      let ourTotal = 0;
-      let wordTotal = 0;
-      for (let p = 0; p < layout.pages.length; p++) {
-        const our = await ourPageLines(doc, layoutServices, p, 595);
-        const word = wordPageLines(pair!.pdf, p);
-        ourTotal += our.length;
-        wordTotal += word.length;
-        expect(our.length, `${name} page ${p + 1} visible-line count`).toBe(word.length);
-      }
-      // Word may paginate onto MORE pages than we do (e.g. the Thai corpus
-      // document renders 11 pages under the #989-adjudicated grazing fit while
-      // Word emits a 12th, empty, page). Any PDF page beyond our page count
-      // must then carry NO text — otherwise the per-page loop above silently
-      // skipped real Word content and the equal totals would be a lie.
-      const pdfInfo = execFileSync('pdfinfo', [pair!.pdf], { encoding: 'utf8' });
-      const pdfPages = Number(/^Pages:\s+(\d+)$/m.exec(pdfInfo)?.[1] ?? '0');
-      expect(pdfPages, `${name} pdfinfo page count`).toBeGreaterThan(0);
-      for (let p = layout.pages.length; p < pdfPages; p++) {
-        expect(
-          wordPageLines(pair!.pdf, p).length,
-          `${name} Word PDF page ${p + 1} exceeds our pagination and must be empty`,
-        ).toBe(0);
-      }
-      // eslint-disable-next-line no-console
-      console.log(`[#991 pin] ${name}: ${ourTotal} lines == Word ${wordTotal} (our ${layout.pages.length} pages, PDF ${pdfPages})`);
-      expect(ourTotal).toBe(wordTotal);
-    });
+    it.skipIf(!pair || !privatePairHasRequiredFont(name))(
+      `${name}: per-page visible-line counts match the Word PDF`,
+      async () => {
+        const doc = await parse(pair!.docx);
+        const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
+        let layout: DocxLayout;
+        let layoutServices: DocxLayoutServices;
+        try {
+          const renderer = rendererMod!;
+          layoutServices = renderer.createLayoutServices(doc);
+          layout = renderer.layoutDocument(doc, layoutServices, { currentDateMs: 0 });
+        }
+        finally { restore.forEach((r) => r()); }
+        let ourTotal = 0;
+        let wordTotal = 0;
+        for (let p = 0; p < layout.pages.length; p++) {
+          const our = await ourPageLines(doc, layoutServices, p, 595);
+          const word = wordPageLines(pair!.pdf, p);
+          ourTotal += our.length;
+          wordTotal += word.length;
+          expect(our.length, `${name} page ${p + 1} visible-line count`).toBe(word.length);
+        }
+        // Word may paginate onto MORE pages than we do (e.g. the Thai corpus
+        // document renders 11 pages under the #989-adjudicated grazing fit while
+        // Word emits a 12th, empty, page). Any PDF page beyond our page count
+        // must then carry NO text — otherwise the per-page loop above silently
+        // skipped real Word content and the equal totals would be a lie.
+        const pdfInfo = execFileSync('pdfinfo', [pair!.pdf], { encoding: 'utf8' });
+        const pdfPages = Number(/^Pages:\s+(\d+)$/m.exec(pdfInfo)?.[1] ?? '0');
+        expect(pdfPages, `${name} pdfinfo page count`).toBeGreaterThan(0);
+        for (let p = layout.pages.length; p < pdfPages; p++) {
+          expect(
+            wordPageLines(pair!.pdf, p).length,
+            `${name} Word PDF page ${p + 1} exceeds our pagination and must be empty`,
+          ).toBe(0);
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[#991 pin] ${name}: ${ourTotal} lines == Word ${wordTotal} (our ${layout.pages.length} pages, PDF ${pdfPages})`);
+        expect(ourTotal).toBe(wordTotal);
+      },
+    );
   }
 });

@@ -215,7 +215,7 @@ describe('computeChartFrame — cartesian', () => {
     });
   });
 
-  it('keeps an inner manual-layout data region within the measured outer gutters', () => {
+  it('uses an inner manual-layout data region verbatim instead of applying auto-layout gutters', () => {
     const chart = model({
       plotAreaManualLayout: {
         layoutTarget: 'inner',
@@ -234,10 +234,15 @@ describe('computeChartFrame — cartesian', () => {
       pad: { t: 20, r: 10, b: 30, l: 40 },
       honorPlotAreaManualLayout: true,
     });
-    expect(frame.plotRect.px0).toBe(X + 40);
-    expect(frame.plotRect.py0).toBe(Y + 20);
-    expect(frame.plotRect.pw).toBeCloseTo(X + 0.81 * W - (X + 40));
-    expect(frame.plotRect.ph).toBeCloseTo(Y + 0.82 * H - (Y + 20));
+    // ECMA-376 §21.2.2.89: layoutTarget="inner" means that the authored
+    // rectangle IS the plot area excluding axes and labels. Auto-layout pads
+    // describe a different layout mode and must not move any of its edges.
+    expect(frame.plotRect).toEqual({
+      px0: X + 0.01 * W,
+      py0: Y + 0.02 * H,
+      pw: 0.8 * W,
+      ph: 0.8 * H,
+    });
   });
 
   it('ignores plotArea manual layout when the flag is off', () => {

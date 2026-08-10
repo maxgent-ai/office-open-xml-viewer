@@ -109,7 +109,9 @@ export function normalizeTextBoxInput(
       bold: block.bold,
       italic: block.italic,
     }];
-    const paragraphMarkColor = block.color ?? runs[0]?.color;
+    const paragraphMarkColor = block.paragraphMarkColor === undefined
+      ? block.color ?? runs[0]?.color
+      : block.paragraphMarkColor ?? undefined;
     const numbering = block.numbering
       ? {
           ...block.numbering,

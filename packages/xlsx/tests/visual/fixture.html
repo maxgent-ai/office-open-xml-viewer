@@ -33,8 +33,17 @@
 
   try {
     const wb = await XlsxWorkbook.load('/' + file);
+    document.body.dataset.sheetCount = String(wb.sheetCount);
     const idx = Math.max(0, Math.min(sheet, wb.sheetNames.length - 1));
     await wb.renderViewport(canvas, idx, { row, col, rows, cols }, { width, height, dpr: 1 });
+    window.renderXlsxVrtSheet = async (sheetIndex) => {
+      await wb.renderViewport(
+        canvas,
+        sheetIndex,
+        { row, col, rows, cols },
+        { width, height, dpr: 1 },
+      );
+    };
     document.body.dataset.status = 'ready';
   } catch (e) {
     document.body.dataset.status = 'error';

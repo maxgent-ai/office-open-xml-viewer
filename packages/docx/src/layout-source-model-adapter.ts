@@ -8,6 +8,7 @@ import { docxLocalMetricRequests } from './local-font-metrics.js';
 import {
   normalizeInternalDocumentModel,
   normalizeOwnedInternalDocumentModel,
+  documentTypographySettingsInput,
   tableSourceAcquisitionInput,
   type InternalShapeRun,
   type NormalizedDocumentInput,
@@ -398,6 +399,23 @@ export function layoutSourceModelAdapterFromOwnedModel(
   return buildLayoutSourceModelAdapter(normalizedPublic, normalizedPrivate, true, publicInput);
 }
 
+/** Consume one exclusively-owned parser graph directly into the immutable
+ * layout store. This is the Node render-session sink: unlike the compatibility
+ * adapter it never constructs or retains a second public document graph. */
+export function layoutSourceStoreFromOwnedModel(
+  ownedLayoutInput: DocxDocumentModel,
+): LayoutSourceStore {
+  const normalized = normalizeOwnedInternalDocumentModel(
+    compatibleDocumentModel(ownedLayoutInput),
+  );
+  return buildLayoutSourceModelAdapter(
+    normalized,
+    normalized,
+    true,
+    ownedLayoutInput,
+  ).source;
+}
+
 function buildLayoutSourceModelAdapter(
   publicInput: NormalizedDocumentInput,
   privateInput: NormalizedDocumentInput,
@@ -411,7 +429,10 @@ function buildLayoutSourceModelAdapter(
   // Resolve document-wide facts before destructively consuming the private
   // graph. These projections retain only compact manifests; paragraph source
   // records themselves are acquired and installed in one traversal below.
-  const documentLayoutSettings = resolveDocumentLayoutSettings(privateDocument);
+  const documentLayoutSettings = resolveDocumentLayoutSettings(
+    privateDocument,
+    documentTypographySettingsInput(privateDocument),
+  );
   const resources = projectDocumentSnapshotResources(
     privateDocument,
     privateProjections,

@@ -26,7 +26,8 @@ const source = { story: 'body', storyInstance: 'body', path: [3] } as const;
 
 const acquisitionContext: ParagraphLayoutContext = {
   lineGrid: { active: false, pitchPt: null },
-  characterGrid: { active: false, deltaPt: 0 },
+  characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+  rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
   physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
   lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
   baseRtl: false, isJustified: false, stretchLastLine: false,
@@ -749,6 +750,77 @@ describe('layoutParagraph', () => {
 });
 
 describe('paragraphLayoutFromMeasurement retained authorities', () => {
+  it('flows consecutive wp:inline WPS shapes at their paragraph pen positions', () => {
+    const inlineShape = () => ({
+      type: 'shape' as const,
+      inline: true,
+      widthPt: 20,
+      heightPt: 10,
+      anchorXPt: 0,
+      anchorYPt: 0,
+      anchorXFromMargin: false,
+      anchorYFromPara: false,
+      zOrder: 0,
+      subpaths: [],
+      presetGeometry: 'rect',
+      fill: { fillType: 'solid' as const, color: '009989' },
+      stroke: null,
+      textBlocks: [],
+    });
+    const tabRun = {
+      ...(paragraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>),
+      text: '\t',
+    };
+    const inlineParagraph = {
+      ...paragraph,
+      runs: [
+        inlineShape(), tabRun,
+        inlineShape(), tabRun,
+        inlineShape(),
+      ],
+    } as unknown as DocParagraph;
+    const context: ParagraphLayoutContext = {
+      ...acquisitionContext,
+      tabStops: [
+        { pos: 30, alignment: 'left', leader: 'none' },
+        { pos: 60, alignment: 'left', leader: 'none' },
+      ],
+    };
+    const placement = {
+      startYPt: 10,
+      paragraphXPt: 10,
+      availableWidthPt: 100,
+      maximumYPt: 500,
+      suppressSpaceBefore: false,
+    };
+    const measurer = { context: measureContext, fontFamilyClasses: {} };
+    const environment = {
+      documentHasEastAsianText: false,
+      pageWritingMode: 'horizontal-tb' as const,
+      pageIndex: 0,
+      totalPages: 1,
+    };
+    const measured = measureParagraph(
+      inlineParagraph as never,
+      context,
+      placement,
+      measurer,
+      environment,
+    );
+    const node = paragraphLayoutFromMeasurement(inlineParagraph as never, {
+      id: 'inline-wps', source, flowDomainId: 'body', ordinaryFlow: true,
+      context, placement, measurer, environment,
+      exclusions: [],
+    } as never, measured);
+
+    const placements = node.lines.flatMap((line) => line.placements)
+      .filter((item) => item.kind === 'drawing');
+    expect(placements.map((item) => item.bounds.xPt)).toEqual([10, 40, 70]);
+    expect(placements.map((item) => item.advancePt)).toEqual([20, 20, 20]);
+    expect(node.drawings.map((drawing) => drawing.flowBounds.xPt)).toEqual([10, 40, 70]);
+    expect(node.drawings.every((drawing) => drawing.anchorLayer === undefined)).toBe(true);
+  });
+
   it('retains selected-face anchor-host metrics instead of font-size ratios', () => {
     const paragraph = {
       alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
@@ -880,6 +952,100 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         issues: [expect.objectContaining({ path })],
       }),
     ]);
+  });
+
+  it('retains balanced authored-space width in LTR cluster geometry', () => {
+    const segment = {
+      text: 'AB  ', sourceRunIndex: 0, measuredWidth: 18,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [
+        { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 5 },
+        { range: { start: 1, end: 2 }, offsetPt: 5, advancePt: 5 },
+        { range: { start: 2, end: 3 }, offsetPt: 10, advancePt: 3 },
+        { range: { start: 3, end: 4 }, offsetPt: 13, advancePt: 3 },
+      ],
+      snapToCharacterGrid: true,
+      widthBalanceGridDeltaFactor: 0.5,
+      widthBalanceSpaceSequence: true,
+      widthBalanceSpaceAdjustmentPt: 2,
+    } as unknown as LayoutTextSeg;
+    const node = projectMeasuredSegment(paragraph, segment, {
+      ...acquisitionContext,
+      characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 12, deltaPt: -1 },
+    });
+    const placement = node.lines[0]?.placements[0];
+    if (placement?.kind !== 'text') throw new Error('expected retained text placement');
+
+    expect(placement.clusters).toEqual([
+      expect.objectContaining({ offset: { xPt: 0, yPt: 0 }, advancePt: 4.5 }),
+      expect.objectContaining({ offset: { xPt: 4.5, yPt: 0 }, advancePt: 4.5 }),
+      expect.objectContaining({ offset: { xPt: 9, yPt: 0 }, advancePt: 4.5 }),
+      expect.objectContaining({ offset: { xPt: 13.5, yPt: 0 }, advancePt: 4.5 }),
+    ]);
+    const retainedEnd = placement.clusters.at(-1)!;
+    expect(retainedEnd.offset.xPt + retainedEnd.advancePt).toBe(placement.advancePt);
+  });
+
+  it('uses balanced trailing-space clusters for the RTL physical-leading offset', () => {
+    const segment = {
+      text: 'نص  ', sourceRunIndex: 0, measuredWidth: 20,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [
+        { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 5 },
+        { range: { start: 1, end: 2 }, offsetPt: 5, advancePt: 5 },
+        { range: { start: 2, end: 3 }, offsetPt: 10, advancePt: 3 },
+        { range: { start: 3, end: 4 }, offsetPt: 13, advancePt: 3 },
+      ],
+      rtl: true,
+      direction: 'rtl',
+      widthBalanceSpaceSequence: true,
+      widthBalanceSpaceAdjustmentPt: 2,
+    } as unknown as LayoutTextSeg;
+    const node = projectMeasuredSegment(paragraph, segment, {
+      ...acquisitionContext,
+      baseRtl: true,
+    });
+    const placement = node.lines[0]?.placements[0];
+    if (placement?.kind !== 'text') throw new Error('expected retained text placement');
+
+    expect(placement.clusters.slice(-2)).toEqual([
+      expect.objectContaining({ offset: { xPt: 10, yPt: 0 }, advancePt: 5 }),
+      expect.objectContaining({ offset: { xPt: 15, yPt: 0 }, advancePt: 5 }),
+    ]);
+    expect(placement.origin.xPt - placement.bounds.xPt).toBe(10);
+    expect(placement.paintOps.map((operation) => operation.range)).toEqual([
+      { start: 0, end: 2 },
+      { start: 2, end: 4 },
+    ]);
+  });
+
+  it.each([
+    ['fitText', { fitTextPerGapPx: 1 }, 13],
+    ['tate-chu-yoko', { tateChuYoko: true }, 10],
+  ] as const)('keeps %s override geometry outside balanced-space adjustment', (
+    _name,
+    override,
+    measuredWidth,
+  ) => {
+    const segment = {
+      text: 'A  ', sourceRunIndex: 0, measuredWidth,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      shapedClusters: [
+        { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 4 },
+        { range: { start: 1, end: 2 }, offsetPt: 4, advancePt: 3 },
+        { range: { start: 2, end: 3 }, offsetPt: 7, advancePt: 3 },
+      ],
+      widthBalanceSpaceSequence: true,
+      widthBalanceSpaceAdjustmentPt: 2,
+      ...override,
+    } as unknown as LayoutTextSeg;
+    const node = projectMeasuredSegment(paragraph, segment);
+    const placement = node.lines[0]?.placements[0];
+    if (placement?.kind !== 'text') throw new Error('expected retained text placement');
+
+    const retainedEnd = placement.clusters.at(-1)!;
+    expect(retainedEnd.offset.xPt + retainedEnd.advancePt).toBe(placement.advancePt);
+    expect(placement.advancePt).toBe(measuredWidth);
   });
 
   it('materializes one outer anchor while retaining each grouped child frame', () => {
@@ -1330,7 +1496,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     } as unknown as LayoutTextSeg;
     const node = projectMeasuredSegment(paragraph, segment, {
       ...acquisitionContext,
-      characterGrid: { active: true, deltaPt: 2 },
+      characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 12, deltaPt: 2 },
     });
     const placement = node.lines[0]?.placements[0];
 
@@ -1824,6 +1990,34 @@ describe('planLine visual geometry', () => {
     expect(() => stableFingerprint('planned-line', line)).not.toThrow();
   });
 
+  it('retains an underline across the full advance of an underlined tab run', () => {
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 1 }, topPt: 0, baselinePt: 10, advancePt: 12,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false,
+        segments: [{
+          kind: 'tab', range: { start: 0, end: 1 }, measuredWidthPt: 72,
+          leader: 'none', fontSizePt: 10,
+          underline: {
+            base: { ascentPt: 8, descentPt: 2, inkBounds: { xMinPt: 0, xMaxPt: 5, ascentPt: 7, descentPt: 1 } },
+            probe: { ascentPt: 8, descentPt: 2, inkBounds: { xMinPt: 0, xMaxPt: 5, ascentPt: -2, descentPt: 3 } },
+            color: '#123456', authoredStyle: 'single',
+          },
+        }],
+      },
+    });
+
+    expect(line.placements[0]).toMatchObject({
+      kind: 'tab', advancePt: 72,
+      decorations: [{
+        kind: 'underline', color: '#123456',
+        from: { xPt: 0 }, to: { xPt: 72 },
+      }],
+    });
+  });
+
   it('retains contextual text plus uniform spacing for internal CJK justification gaps', () => {
     const line = planLine({
       paragraphXPt: 5,
@@ -2281,6 +2475,10 @@ describe('planLine visual geometry', () => {
         { range: { start: 0, end: 1 }, offsetPt: 0, advancePt: 5 },
         { range: { start: 1, end: 2 }, offsetPt: 5, advancePt: 5 },
       ],
+      selectedFaceFontBox: { ascentPt: 8, descentPt: 2 },
+      selectedFaceInkBounds: {
+        xMinPt: 0, xMaxPt: 10, ascentPt: 7, descentPt: 2,
+      },
       smallCaps: true, underline: true, underlineStyle: 'double', underlineColor: 'auto',
       strikethrough: true, doubleStrikethrough: false,
       emphasisMark: 'dot', position: 2, vertAlign: null, fontSize: 10,

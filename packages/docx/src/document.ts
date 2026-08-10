@@ -53,6 +53,11 @@ import type {
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import {
+  hitTestSelectedDocxElementContext,
+  type DocxElementContextOptions,
+} from './element-context.js';
+import type { DocxElementContext, DocxPagePoint } from './selection-context.js';
+import {
   isDocumentPullResponse,
   materializeDocumentPullAdapterSession,
 } from './document-pull-client.js';
@@ -79,12 +84,15 @@ export interface LoadOptions extends CoreLoadOptions {
   mode?: 'main' | 'worker';
 }
 
+/** Options for {@link DocxDocument.collectPageRuns}. */
+export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate'>;
+
 /** IX6 — options for {@link DocxDocument.renderPageToBitmap}: the serializable
  *  render knobs plus an OPTIONAL `onTextRun`. The callback stays main-thread (it
  *  never crosses the wire); in worker mode the proxy invokes it with the runs
  *  the worker shipped back beside the bitmap, so a caller gets the selection /
  *  find geometry on the same path in both modes. */
-export type RenderPageToBitmapOptions = WireRenderPageOptions & {
+export type RenderPageToBitmapOptions = Omit<RenderPageOptions, 'onTextRun'> & {
   onTextRun?: (run: DocxTextRunInfo) => void;
 };
 
@@ -656,9 +664,9 @@ export class DocxDocument {
    */
   async collectPageRuns(
     pageIndex: number,
-    opts: WireRenderPageOptions = {},
+    opts: CollectPageRunsOptions = {},
   ): Promise<DocxTextRunInfo[]> {
-    const wireOpts: WireRenderPageOptions = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    const wireOpts: WireRenderPageOptions = { ...opts };
     if (this._mode === 'worker') {
       // Keep collection validation on the same selected worker layout as paint.
       const res = await this._bridge.request(
@@ -673,6 +681,32 @@ export class DocxDocument {
       currentDate: wireOpts.currentDate,
       defaultCurrentDateMs: runtime.defaultCurrentDateMs,
       width: wireOpts.width,
+    });
+  }
+
+  /**
+   * Hit-test a rendered picture, chart, or shape on demand, including inline
+   * resources. No element index is maintained during render, scroll, or pointer
+   * movement; worker mode runs the same projection against the worker-owned
+   * layout and returns only detached context.
+   */
+  async getElementContextAt(
+    pageIndex: number,
+    point: DocxPagePoint,
+    opts: DocxElementContextOptions = {},
+  ): Promise<DocxElementContext | null> {
+    if (this._mode === 'worker') {
+      const res = await this._bridge.request(
+        (id) => ({ type: 'hitTestElement', id, pageIndex, point, opts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'elementHit' }>).context;
+    }
+    const runtime = documentLayoutRuntimeOf(this);
+    const services = runtime.services;
+    if (!services) throw new Error('Document layout services are not initialized');
+    return hitTestSelectedDocxElementContext(services, pageIndex, point, {
+      ...opts,
+      defaultCurrentDateMs: runtime.defaultCurrentDateMs,
     });
   }
 }

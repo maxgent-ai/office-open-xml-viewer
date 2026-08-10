@@ -32,6 +32,7 @@ import {
   accumulatePageSectionRegion,
   bodyFlowDomainId,
   createParityBlankLayoutPage,
+  finalizePageBookmarkStarts,
   finalizeLayoutPage,
   type PageSectionRegionInput,
 } from './page-factory.js';
@@ -1253,6 +1254,8 @@ function paginateBodyPass(
         const pageBottomIsUnreserved = (reserves[state.flow.pageIndex]?.bottom ?? 0) === 0
           && state.footnoteReservePt === 0;
         const physicalRegionBottomIsActive = activeBlockEndPt(state) === activeRegion(state).blockEndPt;
+        const followsNextPageSectionBoundary = followingEntry?.kind === 'begin-section'
+          && followingEntry.section.startType === 'nextPage';
         // Compatibility-owned physical-edge empty-mark admission.
         const trailingMarkAdmissionAllowancePt =
           wordTrailingEmptyMarkAdmissionAllowancePt({
@@ -1264,12 +1267,14 @@ function paginateBodyPass(
             pageBottomIsUnreserved,
             physicalRegionBottomIsActive,
             hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
+            followsNextPageSectionBoundary,
+            markExtentPt: acquired.blockExtentPt,
             markBelowBaselinePt: acquired.markBelowBaselinePt ?? 0,
           });
         const selected = selectParagraphFragment(
           acquired.layout,
           cursor,
-          acquired.lineEndBoundaries,
+          acquired.fragmentation,
           location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
           freshPageExtent(state),
           state.flow.pageHasContent,
@@ -2195,5 +2200,9 @@ export function paginateBody(
           ...withEndnotes.diagnostics,
         ]),
       });
-  return assertAndDeepFreezeDocumentLayout(withParserDiagnostics) as DocumentLayout;
+  const finalized = Object.freeze({
+    ...withParserDiagnostics,
+    pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
+  });
+  return assertAndDeepFreezeDocumentLayout(finalized) as DocumentLayout;
 }

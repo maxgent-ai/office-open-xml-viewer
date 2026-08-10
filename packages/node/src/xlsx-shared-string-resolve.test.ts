@@ -5,8 +5,8 @@
  *
  * SC1 made the WASM emit `t="s"` cells as `{type:'shared',si}` (deduped) and
  * pushed resolution to the TS consumer. The browser `XlsxWorkbook` path resolves
- * it, but `parseXlsxSheet` / `parseXlsxAllSheets` (public headless exports) do a
- * raw `JSON.parse` — without a resolve step they would leak the unresolved
+ * it, while Node materializers retain a canonical row coordinator. Without its
+ * resolve step they would leak the unresolved
  * variant and a caller reading `cell.value.text` on a shared-string cell would
  * see blank text. This test parses demo/sample-1.xlsx (many shared-string cells)
  * and asserts none survive as `shared`, and that real text came through.
@@ -39,23 +39,22 @@ function countByType(ws: Worksheet): { shared: number; text: number } {
   return { shared, text };
 }
 
-describe.skipIf(!xlsxMod)('node parseXlsxSheet resolves shared strings', () => {
-  it('parseSheet returns no unresolved shared-string cells, with real text', () => {
+describe.skipIf(!xlsxMod)('node worksheet materializer resolves shared strings', () => {
+  it('returns no unresolved shared-string cells, with real text', async () => {
     if (!xlsxMod) return;
     const buf = readFileSync(SAMPLE);
-    const parsed = xlsxMod.parseXlsx(buf);
-    const ws = xlsxMod.parseSheet(buf, 0, parsed.workbook.sheets[0].name);
+    const ws = await xlsxMod.materializeXlsxWorksheet(buf, 0);
     const { shared, text } = countByType(ws);
     expect(shared).toBe(0);
     expect(text).toBeGreaterThan(0);
   });
 
-  it('parseXlsxAllSheets resolves shared strings on every sheet', () => {
+  it('resolves shared strings on every materialized sheet', async () => {
     if (!xlsxMod) return;
     const buf = readFileSync(SAMPLE);
-    const { worksheets } = xlsxMod.parseXlsxAllSheets(buf);
-    for (const ws of Object.values(worksheets)) {
-      expect(countByType(ws as Worksheet).shared).toBe(0);
+    const { worksheets } = await xlsxMod.materializeXlsxWorkbook(buf);
+    for (const ws of worksheets) {
+      expect(countByType(ws).shared).toBe(0);
     }
   });
 });

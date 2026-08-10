@@ -39,6 +39,7 @@ function recordingContext(): { context: CanvasPaintContext; operations: string[]
     moveTo: () => operations.push('moveTo'),
     lineTo: () => operations.push('lineTo'),
     closePath: () => operations.push('closePath'),
+    clip: () => operations.push('clip'),
     rect: () => operations.push('rect'),
     fill: () => operations.push('fill'),
     stroke: () => operations.push('stroke'),
@@ -65,6 +66,44 @@ function recordingContext(): { context: CanvasPaintContext; operations: string[]
 }
 
 describe('retained DrawingML shape painting', () => {
+  it('clips a retained image resource to the DrawingML geometry and applies fillRect overscan', () => {
+    const { context, operations } = recordingContext();
+    const painted: unknown[] = [];
+    const resourceContext: CanvasPaintContext = {
+      ...context,
+      resources: {
+        paint: (resourceKey, kind, bounds) => painted.push(resourceKey, kind, bounds),
+      },
+    };
+    const bounds = { xPt: 10, yPt: 20, widthPt: 100, heightPt: 50 };
+    const drawing: DrawingLayout = {
+      kind: 'drawing', id: 'image-fill',
+      source: { story: 'header', storyInstance: 'default', path: [0] },
+      flowDomainId: 'header', flowBounds: bounds, inkBounds: bounds,
+      advancePt: 0, ordinaryFlow: false,
+      commands: [{
+        kind: 'drawingml-image-fill', resourceKey: 'image:overlay',
+        fillRect: { l: 0.1, t: 0, r: -0.05, b: 0.2 },
+        plan: {
+          rect: { x: 10, y: 20, w: 100, h: 50 },
+          geometry: { kind: 'preset', name: 'rect', adjustments: [] },
+          fill: null, stroke: { color: '000000', width: 1 },
+          transform: { rotationDeg: 0, flipH: false, flipV: false },
+        },
+      }],
+    };
+
+    paintDrawingLayout(drawing, resourceContext);
+
+    expect(painted).toEqual([
+      'image:overlay', 'image',
+      { xPt: 20, yPt: 20, widthPt: 95, heightPt: 40 },
+    ]);
+    expect(operations).toContain('clip');
+    expect(operations).toContain('stroke');
+    expect(operations).not.toContain('fill');
+  });
+
   it('counter-rotates one upright physical frame around a shape and its owned text box', () => {
     const { context, operations } = recordingContext();
     const localBounds = { xPt: -40, yPt: -15, widthPt: 80, heightPt: 30 };

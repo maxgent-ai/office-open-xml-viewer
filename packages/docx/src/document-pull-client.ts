@@ -11,8 +11,10 @@ import {
 import type { BodyElement, DocxDocumentModel } from './types.js';
 import {
   layoutSourceModelAdapterFromOwnedModel,
+  layoutSourceStoreFromOwnedModel,
   type LayoutSourceModelAdapter,
 } from './layout-source-model-adapter.js';
+import type { LayoutSourceStore } from './layout/layout-source-store.js';
 
 export const DOCX_INITIAL_BODY_PULL_BYTES = 1024 * 1024;
 const MAX_DOCUMENT_UNIT_BYTES = Math.max(
@@ -49,6 +51,25 @@ export async function materializeDocumentPullSession(
     complete: (document) => {
       document.body = body;
       return document;
+    },
+  });
+}
+
+/** Drain directly into the immutable layout source used by Node rendering.
+ * Transferred units already have exclusive ownership, so the layout sink can
+ * consume them without constructing the public compatibility graph or cloning
+ * every body unit. */
+export async function materializeDocumentPullLayoutSession(
+  transport: WorkerBridgeTransport<PullSessionResponse<ArrayBuffer, number>>,
+  identity: PullSessionIdentity<number>,
+  options: MaterializeDocumentPullOptions = {},
+): Promise<LayoutSourceStore> {
+  const ownedBody: BodyElement[] = [];
+  return drainDocumentPullSession(transport, identity, options, {
+    acceptBody: (body) => { ownedBody.push(...body); },
+    complete: (document) => {
+      document.body = ownedBody;
+      return layoutSourceStoreFromOwnedModel(document);
     },
   });
 }

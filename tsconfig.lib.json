@@ -8,8 +8,9 @@
     "packages/docx/src/**/*"
   ],
   "compilerOptions": {
-    "outDir": "./dist",
-    "declarationDir": "./dist/types",
+    "composite": false,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
     "emitDeclarationOnly": true,
     "paths": {
       "@silurus/ooxml-core": ["./packages/core/src/index.ts"],

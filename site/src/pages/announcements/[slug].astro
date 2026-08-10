@@ -1,6 +1,7 @@
 ---
 import Base from '../../layouts/Base.astro';
 import Nav from '../../components/Nav.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
 import { Code } from 'astro:components';
 import { codeThemes } from '../../lib/code-theme';
 import { announcements, formatAnnouncementDate, type Announcement } from '../../lib/announcements';
@@ -13,8 +14,16 @@ export function getStaticPaths() {
 }
 
 const { announcement } = Astro.props as { announcement: Announcement };
+const sectionId = (title: string): string => title
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-')
+  .replace(/^-|-$/g, '');
 ---
-<Base title={`${announcement.title} — @silurus/ooxml`} description={announcement.summary}>
+<Base
+  title={`${announcement.title} — @silurus/ooxml`}
+  description={announcement.summary}
+  canonicalPath={`/announcements/${announcement.slug}/`}
+>
   <Nav active="announcements" />
   <main>
     <header class="article-hero">
@@ -31,14 +40,26 @@ const { announcement } = Astro.props as { announcement: Announcement };
     </header>
 
     <article class="wrap article-grid">
-      <aside>
-        <span>Relevant to</span>
-        <p>{announcement.audience}</p>
+      <aside class="article-toc">
+        <span>Table of contents</span>
+        <nav aria-label="Table of contents">
+          <ol>
+            {announcement.sections.map((section) => (
+              <li><a href={`#${sectionId(section.title)}`}>{section.title}</a></li>
+            ))}
+          </ol>
+        </nav>
       </aside>
       <div class="article-body">
         {announcement.sections.map((section) => (
-          <section class:list={{ 'article-summary-block': section.kind === 'summary' }}>
+          <section id={sectionId(section.title)} class:list={{ 'article-summary-block': section.kind === 'summary' }}>
             <h2>{section.title}</h2>
+            {(section.modules?.length || section.rationale) && (
+              <dl class="article-section-meta">
+                {section.modules?.length && <><dt>Affected modules</dt><dd class="article-module-list">{section.modules.map((module, index) => <span class="article-module"><code>{module}</code>{index < (section.modules?.length ?? 0) - 1 && ','}</span>)}</dd></>}
+                {section.rationale && <><dt>Why</dt><dd>{section.rationale}</dd></>}
+              </dl>
+            )}
             {section.paragraphs.map((paragraph) => <p>{paragraph}</p>)}
             {section.bullets && <ul>{section.bullets.map((bullet) => <li>{bullet}</li>)}</ul>}
             {section.examples?.map((example) => (
@@ -51,11 +72,12 @@ const { announcement } = Astro.props as { announcement: Announcement };
         ))}
         <div class="article-next">
           <span>Questions about the change?</span>
-          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/discussions">Start a GitHub discussion ↗</a>
+          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/discussions">Start a GitHub discussion &#x2197;&#xFE0E;</a>
         </div>
       </div>
     </article>
   </main>
+  <SiteFooter />
 </Base>
 
 <style>
@@ -68,12 +90,22 @@ const { announcement } = Astro.props as { announcement: Announcement };
   h1 { margin-top: 18px; max-width: 16ch; font-size: clamp(42px, 7vw, 78px); letter-spacing: -.055em; }
   .article-summary { max-width: 70ch; margin: 28px 0 0; color: var(--text-dim); font-size: 19px; }
   .article-grid { display: grid; grid-template-columns: 240px minmax(0, 720px); gap: 80px; padding-top: 72px; padding-bottom: 120px; }
-  aside { position: sticky; top: 92px; align-self: start; padding-top: 8px; }
-  aside span { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--text-faint); }
-  aside p { font-size: 14px; color: var(--text-dim); }
+  aside, .article-body { min-width: 0; overflow-wrap: anywhere; }
+  .article-toc { position: sticky; top: 92px; align-self: start; padding-top: 8px; }
+  .article-toc span { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--text-faint); }
+  .article-toc ol { margin: 18px 0 0; padding: 0; list-style: none; }
+  .article-toc li + li { margin-top: 11px; }
+  .article-toc a { color: var(--text-dim); font-size: 13px; line-height: 1.4; }
+  .article-toc a:hover { color: var(--accent); }
   .article-body section + section { margin-top: 64px; }
   .article-body h2 { font-size: 28px; letter-spacing: -.035em; }
   .article-body h3 { margin-top: 0; font: 600 12px var(--mono); letter-spacing: .02em; color: var(--text-dim); }
+  .article-section-meta { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px 18px; margin: 20px 0 26px; padding: 18px 20px; border-left: 3px solid var(--border); background: var(--bg-elev); }
+  .article-section-meta dt { font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); }
+  .article-section-meta dd { margin: 0; color: var(--text-dim); font-size: 15px; line-height: 1.55; }
+  .article-module-list { display: flex; flex-wrap: wrap; gap: 5px 0; }
+  .article-module + .article-module { margin-left: .65ch; }
+  .article-module-list code { color: var(--text); font: 12px var(--mono); }
   .article-body p, .article-body li { color: var(--text-dim); font-size: 17px; line-height: 1.75; }
   .article-body ul { padding-left: 20px; }
   .article-body li { padding-left: 8px; margin: 10px 0; }
@@ -97,8 +129,10 @@ const { announcement } = Astro.props as { announcement: Announcement };
   .article-next span { color: var(--text-faint); }
   .article-next a { color: var(--accent); font-weight: 700; }
   @media (max-width: 760px) {
-    .article-grid { grid-template-columns: 1fr; gap: 28px; }
-    aside { position: static; border-bottom: 1px solid var(--border); }
+    .article-grid { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+    .article-toc { position: static; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
     .article-next { flex-direction: column; gap: 6px; }
+    .article-section-meta { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .article-section-meta dd + dt { margin-top: 10px; }
   }
 </style>

@@ -118,6 +118,24 @@ test('ignores declaration-emitter quote style and redundant type parentheses', (
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('ignores declaration-emitter grouping of associative union types', () => {
+  const { root, base } = fixture();
+  const detailPath = path.join(root, 'dist/types/detail.d.ts');
+  writeFileSync(
+    detailPath,
+    'export type Detail = (string | number) | undefined;\n',
+  );
+  assert.equal(run(root, '--base-ref', base, '--write-baseline').status, 0);
+  writeFileSync(
+    detailPath,
+    'export type Detail = string | number | undefined;\n',
+  );
+
+  const result = run(root, '--base-ref', base);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('ignores declaration-emitter export style and top-level ordering', () => {
   const { root, base } = fixture();
   const detailPath = path.join(root, 'dist/types/detail.d.ts');

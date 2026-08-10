@@ -44,13 +44,13 @@ const haveSample11 = existsSync(samplePath(11));
 describe.skipIf(!skia || !docxMod || !rendererMod || !navMod || !haveSample11)(
   'docx internal-anchor navigation resolves on a real fixture (sample-11)',
   () => {
-    function buildMap(): Map<string, number> {
+    async function buildMap(): Promise<Map<string, number>> {
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
-        const { parseDocx } = docxMod!;
+        const { materializeDocxDocument } = docxMod!;
         const { createLayoutServices, layoutDocument } = rendererMod!;
         const { buildBookmarkPageMap } = navMod!;
-        const doc = parseDocx(readFileSync(samplePath(11)));
+        const doc = await materializeDocxDocument(readFileSync(samplePath(11)));
         const layoutServices = createLayoutServices(doc);
         const layout = layoutDocument(doc, layoutServices, { currentDateMs: 0 });
         return buildBookmarkPageMap(layout);
@@ -59,8 +59,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !navMod || !haveSample11)(
       }
     }
 
-    it('extracts TOC bookmarks and resolves every anchor to a real page', (context) => {
-      const map = buildMap();
+    it('extracts TOC bookmarks and resolves every anchor to a real page', async (context) => {
+      const map = await buildMap();
       const tocNames = [...map.keys()].filter((k) => k.startsWith('_Toc'));
       if (tocNames.length === 0) {
         context.skip('the installed local fixture is not the TOC navigation corpus');

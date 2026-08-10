@@ -258,7 +258,21 @@ describe('run box (w:bdr §17.3.2.4) + shading (w:shd §17.3.2.32) geometry', ()
   });
 });
 
-describe('highlight fill spans justification slack (§17.3.1.15 highlight + §17.18.44 both)', () => {
+describe('highlight fill spans justification slack (§17.3.2.15 highlight + §17.18.44 both)', () => {
+  it('uses the selected font box instead of the paragraph line advance', async () => {
+    const events = await render(
+      [textRun('Highlighted', { highlight: 'black' })],
+      { lineSpacing: { value: 30, rule: 'exact', explicit: true } },
+    );
+    const fill = events.find(
+      (event): event is Extract<DrawEvent, { kind: 'fillRect' }> =>
+        event.kind === 'fillRect' && event.style.toUpperCase() === '#000000',
+    );
+
+    expect(fill).toBeDefined();
+    expect(fill?.h).toBeCloseTo(16);
+  });
+
   it('tiles the highlight with no gaps across justified inter-word spaces', async () => {
     // A justified ('both') paragraph that wraps to 2+ lines. Line 0 is justified,
     // so its inter-word spaces are expanded by the per-gap slack. Word highlights

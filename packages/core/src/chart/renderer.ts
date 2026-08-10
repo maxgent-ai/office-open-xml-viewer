@@ -1201,7 +1201,12 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const pwEst = isH
     ? w - ((chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW) - (legRightW + w * 0.03)
     : 0;
-  const valAxisLenPt = (isH ? pwEst : phEst) / ptToPx;
+  // A deleted value axis has no ticks whose density needs adapting to the
+  // available screen length. Office falls back to its default automatic scale
+  // target in that case. Feeding the plot length into the visible-tick planner
+  // over-refines the major unit and stretches bars relative to slide-authored
+  // overlay labels.
+  const valAxisLenPt = chart.valAxisHidden ? undefined : (isH ? pwEst : phEst) / ptToPx;
 
   // Value-axis extent. Bars extend from the zero line (the category-axis
   // crossing) toward each value, so the axis must span both the positive and

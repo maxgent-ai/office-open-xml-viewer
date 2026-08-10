@@ -1,0 +1,23 @@
+{
+  "name": "@ooxml-framework-examples/vue",
+  "private": true,
+  "type": "module",
+  "stackblitz": {
+    "startCommand": false
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@silurus/ooxml": "^0.75.3",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vue-tsc": "^3.1.0"
+  }
+}

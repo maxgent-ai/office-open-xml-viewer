@@ -19,6 +19,7 @@ describe('normalizeResourcePolicy', () => {
     ).toEqual({
       maxArchiveEntryBytes: 64 * 1024 * 1024,
       maxTotalInflatedBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxTotalInflatedBytes,
+      maxArchiveEntries: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntries,
     });
   });
 
@@ -30,6 +31,7 @@ describe('normalizeResourcePolicy', () => {
     ).toEqual({
       maxArchiveEntryBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntryBytes,
       maxTotalInflatedBytes: null,
+      maxArchiveEntries: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntries,
     });
     expect(
       normalizeResourcePolicy({
@@ -38,6 +40,16 @@ describe('normalizeResourcePolicy', () => {
     ).toEqual({
       maxArchiveEntryBytes: null,
       maxTotalInflatedBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxTotalInflatedBytes,
+      maxArchiveEntries: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntries,
+    });
+    expect(
+      normalizeResourcePolicy({
+        resourceLimits: { maxArchiveEntries: null },
+      }),
+    ).toEqual({
+      maxArchiveEntryBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntryBytes,
+      maxTotalInflatedBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxTotalInflatedBytes,
+      maxArchiveEntries: null,
     });
   });
 
@@ -49,20 +61,31 @@ describe('normalizeResourcePolicy', () => {
     ['maxArchiveEntryBytes', Number.NaN],
     ['maxTotalInflatedBytes', 0],
     ['maxTotalInflatedBytes', Number.POSITIVE_INFINITY],
+    ['maxArchiveEntries', 0],
+    ['maxArchiveEntries', -1],
+    ['maxArchiveEntries', 1.5],
+    ['maxArchiveEntries', Number.POSITIVE_INFINITY],
   ] as const)('rejects invalid resourceLimits.%s before worker conversion', (name, value) => {
     expect(() =>
       normalizeResourcePolicy({ resourceLimits: { [name]: value } }),
     ).toThrow(
       new RangeError(
-        `resourceLimits.${name} must be null or a positive safe integer number of bytes`,
+        `resourceLimits.${name} must be null or a positive safe integer${name === 'maxArchiveEntries' ? '' : ' number of bytes'}`,
       ),
     );
+  });
+
+  it('rejects a configurable entry count above the non-disableable hard ceiling', () => {
+    expect(() => normalizeResourcePolicy({
+      resourceLimits: { maxArchiveEntries: 20_001 },
+    })).toThrow(/must not exceed the internal hard ceiling of 20000/);
   });
 
   it('maps the deprecated positive maxZipEntryBytes override', () => {
     expect(normalizeResourcePolicy({ maxZipEntryBytes: 4096 })).toEqual({
       maxArchiveEntryBytes: 4096,
       maxTotalInflatedBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxTotalInflatedBytes,
+      maxArchiveEntries: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntries,
     });
   });
 
@@ -93,6 +116,7 @@ describe('normalizeResourcePolicy', () => {
     ).toEqual({
       maxArchiveEntryBytes: 4096,
       maxTotalInflatedBytes: DEFAULT_OOXML_RESOURCE_LIMITS.maxTotalInflatedBytes,
+      maxArchiveEntries: DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntries,
     });
   });
 
@@ -168,8 +192,9 @@ describe('resourcePolicyForWasm', () => {
       resourcePolicyForWasm({
         maxArchiveEntryBytes: 1024,
         maxTotalInflatedBytes: 2048,
+        maxArchiveEntries: 32,
       }),
-    ).toEqual([1024n, 2048n]);
+    ).toEqual([1024n, 2048n, 32n]);
   });
 
   it('uses zero as the internal ABI sentinel for an explicitly disabled limit', () => {
@@ -177,7 +202,8 @@ describe('resourcePolicyForWasm', () => {
       resourcePolicyForWasm({
         maxArchiveEntryBytes: null,
         maxTotalInflatedBytes: null,
+        maxArchiveEntries: null,
       }),
-    ).toEqual([0n, 0n]);
+    ).toEqual([0n, 0n, 0n]);
   });
 });

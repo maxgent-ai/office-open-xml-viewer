@@ -402,6 +402,7 @@ describe('textbox rich text — per-run formatting', () => {
     shape.defaultTextColor = 'FFFFFF';
     shape.textBlocks![0].indentLeft = 36;
     shape.textBlocks![0].indentFirst = -36;
+    shape.textBlocks![0].paragraphMarkColor = '000000';
     shape.textBlocks![0].numbering = {
       numId: 5,
       level: 0,

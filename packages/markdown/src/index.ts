@@ -6,22 +6,20 @@
  *
  * Usage modes:
  *
- *   - **Node / CLI**: call `initFromFile()` once at startup, then pass file
- *     bytes (read with `readFileSync`) to the matching `*ToMarkdown`
- *     function. The CLI binary at `bin/ooxml-md.mjs` does this.
+ *   - **Node / workspace CLI**: call the matching `init*FromBytes()` once at
+ *     startup, then pass file bytes to the matching `*ToMarkdown` function.
  *
  *   - **Browser bundlers (Vite / webpack)**: import the `.wasm` URL via the
  *     bundler-specific syntax (`?url` in Vite), fetch it, and call
- *     `initFromBytes()`. Then call `*ToMarkdown` on a `File.arrayBuffer()`.
+ *     `init*FromBytes()`. Then call `*ToMarkdown` on a `File.arrayBuffer()`.
  */
 
 // Resolve each parser's wasm-bindgen glue through its package `exports` map
 // (`./wasm` → `src/wasm/<fmt>_parser.js`) rather than a monorepo-relative
-// sibling path. The relative form (`../../pptx/src/wasm/...`) only resolves
-// inside this checkout and breaks for anyone who installs
-// `@silurus/ooxml-markdown` standalone; the subpath export resolves both in the
-// workspace (pnpm symlinks) and after a plain `npm i`. This mirrors the CLI,
-// which reads the raw binary through the sibling `./wasm-binary` export.
+// sibling path. The package remains an internal workspace adapter, but using
+// package boundaries keeps its development CLI and tests independent of the
+// monorepo's physical directory layout. This mirrors the CLI, which reads the
+// raw binary through the sibling `./wasm-binary` export.
 // @ts-ignore — wasm-pack JS shim, exports typed individually below
 import * as pptxWasm from '@silurus/ooxml-pptx/wasm';
 // @ts-ignore
@@ -50,14 +48,14 @@ function syncInit(mod: WasmModule, bytes: Uint8Array, state: { initialized: bool
 }
 
 /** Initialise from raw WASM bytes. Works in both Node and browser. */
-export function initPptxFromBytes(bytes: Uint8Array): void {
-  syncInit(pptxWasm as WasmModule, bytes, pptxState);
+export function initPptxFromBytes(bytes: ArrayBuffer | Uint8Array): void {
+  syncInit(pptxWasm as WasmModule, toUint8(bytes), pptxState);
 }
-export function initDocxFromBytes(bytes: Uint8Array): void {
-  syncInit(docxWasm as WasmModule, bytes, docxState);
+export function initDocxFromBytes(bytes: ArrayBuffer | Uint8Array): void {
+  syncInit(docxWasm as WasmModule, toUint8(bytes), docxState);
 }
-export function initXlsxFromBytes(bytes: Uint8Array): void {
-  syncInit(xlsxWasm as WasmModule, bytes, xlsxState);
+export function initXlsxFromBytes(bytes: ArrayBuffer | Uint8Array): void {
+  syncInit(xlsxWasm as WasmModule, toUint8(bytes), xlsxState);
 }
 
 // The public buffer type is `ArrayBuffer | Uint8Array` ONLY. A Node `Buffer`
@@ -66,11 +64,10 @@ export function initXlsxFromBytes(bytes: Uint8Array): void {
 // published `.d.ts` and break browser consumers that (correctly) do not
 // install Node types.
 function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  if (buffer instanceof Uint8Array) return buffer;
-  if (buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
-  // Defensive: a typed-array-like from another realm (instanceof fails across
-  // realms); wrap its underlying ArrayBuffer.
-  return new Uint8Array((buffer as { buffer: ArrayBuffer }).buffer);
+  if (ArrayBuffer.isView(buffer)) {
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  }
+  return new Uint8Array(buffer);
 }
 
 /** Convert a `.pptx` archive's bytes to GitHub-flavoured markdown. Title

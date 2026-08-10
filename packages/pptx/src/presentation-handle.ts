@@ -80,8 +80,22 @@ export async function createPresentationHandle(
   baseCtx.drawImage(canvas, 0, 0);
 
   const states: MediaState[] = [];
-  const unavailableRects: Array<{ x: number; y: number; w: number; h: number }> = [];
   let disposed = false;
+
+  const releaseStates = () => {
+    for (const state of states) {
+      state.detachListeners();
+      state.media.pause();
+      state.media.removeAttribute('src');
+      try {
+        state.media.load();
+      } catch {
+        // Best-effort cleanup must not replace the original initialization error.
+      }
+      URL.revokeObjectURL(state.objectUrl);
+    }
+    states.length = 0;
+  };
 
   const reportError = (error: Error) => {
     if (disposed) return;
@@ -94,9 +108,8 @@ export async function createPresentationHandle(
     try {
       blob = await opts.fetchMedia(el.mediaPath);
     } catch (cause) {
-      reportError(mediaFetchError(el, cause));
-      unavailableRects.push(mediaRect(el, slideScale));
-      continue;
+      releaseStates();
+      throw mediaFetchError(el, cause);
     }
     // getMedia already types the blob in main mode; re-wrapping copies the whole
     // payload, so only do it when the type is actually missing/wrong (worker mode
@@ -160,8 +173,9 @@ export async function createPresentationHandle(
     try {
       media.load();
     } catch (cause) {
-      state.loadState = 'error';
-      reportError(mediaRuntimeError(el, media, 'load', cause));
+      const error = mediaRuntimeError(el, media, 'load', cause);
+      releaseStates();
+      throw error;
     }
   }
 
@@ -173,10 +187,6 @@ export async function createPresentationHandle(
     const cssW = canvas.width / opts.dpr;
     const cssH = canvas.height / opts.dpr;
     ctx.drawImage(base, 0, 0, canvas.width, canvas.height, 0, 0, cssW, cssH);
-
-    for (const rect of unavailableRects) {
-      drawMediaStatus(ctx, rect, 'Media unavailable');
-    }
 
     for (const s of states) {
       const media = s.media;
@@ -343,10 +353,6 @@ export async function createPresentationHandle(
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.style.cursor = 'pointer';
     tick();
-  } else if (unavailableRects.length > 0) {
-    // A slide whose every media fetch failed has no RAF-backed state. Paint the
-    // explicit failure status once over the already-rendered poster.
-    drawFrame();
   }
 
   return {
@@ -372,13 +378,7 @@ export async function createPresentationHandle(
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.style.cursor = '';
-      for (const s of states) {
-        s.detachListeners();
-        s.media.pause();
-        s.media.removeAttribute('src');
-        s.media.load();
-        URL.revokeObjectURL(s.objectUrl);
-      }
+      releaseStates();
     },
   };
 }

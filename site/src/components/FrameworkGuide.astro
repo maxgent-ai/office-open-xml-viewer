@@ -1,0 +1,105 @@
+---
+import Base from '../layouts/Base.astro';
+import Nav from './Nav.astro';
+import FrameworkStackBlitz from './FrameworkStackBlitz.astro';
+import SiteFooter from './SiteFooter.astro';
+import {
+  frameworkGuides,
+  getFrameworkGuide,
+  type FrameworkId,
+} from '../lib/framework-guides';
+import { canonicalPageUrl } from '../lib/seo';
+
+interface Props {
+  framework: FrameworkId;
+}
+
+const { framework } = Astro.props;
+const guide = getFrameworkGuide(framework);
+const installCommand = `npm install @silurus/ooxml`;
+const canonicalPath = `/frameworks/${guide.id}`;
+const structuredData = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: guide.title,
+  description: guide.description,
+  url: canonicalPageUrl(canonicalPath),
+  proficiencyLevel: 'Beginner',
+  dependencies: `${guide.name}, TypeScript, @silurus/ooxml`,
+});
+---
+<Base title={guide.title} description={guide.description} canonicalPath={canonicalPath}>
+  <Nav active="frameworks" />
+
+  <main>
+    <header class="guide-hero">
+      <div class="wrap guide-hero-grid">
+        <div class="guide-copy">
+          <p class="eyebrow">{guide.name} + TypeScript guide</p>
+          <h1>Render Office files in the browser with <em>{guide.name}.</em></h1>
+          <p class="guide-lead">
+            A portable {guide.name} integration for displaying DOCX, XLSX, and PPTX files with
+            <code>@silurus/ooxml</code>. Choose a local file and render it without uploading it.
+          </p>
+          <span class="install-command">{installCommand}</span>
+        </div>
+        <dl class="guide-facts">
+          <div><dt>Formats</dt><dd>DOCX · XLSX · PPTX</dd></div>
+          <div><dt>Language</dt><dd>TypeScript</dd></div>
+          <div><dt>Integration</dt><dd>{guide.integrationName}</dd></div>
+          <div><dt>Rendering</dt><dd>Canvas + WebAssembly</dd></div>
+        </dl>
+      </div>
+    </header>
+
+    <section class="section live-section">
+      <div class="wrap">
+        <div class="section-intro">
+          <p class="eyebrow">Framework example</p>
+          <h2 class="section-title">Read the code. Run it on StackBlitz.</h2>
+          <p class="section-lead">Browse the complete {guide.name} project here, then open the live project to choose a local DOCX, XLSX, or PPTX file.</p>
+        </div>
+        <FrameworkStackBlitz framework={guide.name} src={guide.stackBlitzEmbedUrl} openUrl={guide.stackBlitzUrl} />
+      </div>
+    </section>
+
+    <nav class="framework-rail wrap" aria-label="Framework integration guides">
+      <span>Other framework guides</span>
+      {frameworkGuides.filter((candidate) => candidate.id !== guide.id).map((candidate) => (
+        <a href={`/frameworks/${candidate.id}`}>{candidate.name} &#x2197;&#xFE0E;</a>
+      ))}
+    </nav>
+  </main>
+
+  <SiteFooter />
+  <script type="application/ld+json" set:html={structuredData}></script>
+</Base>
+
+<style>
+  .guide-hero { padding: 88px 0 92px; background: var(--hero-bg); color: var(--hero-text); border-bottom: 1px solid var(--hero-line); }
+  .guide-hero-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; }
+  .guide-copy { grid-column: 1 / 9; }
+  .guide-copy h1 { max-width: 11ch; margin-top: 24px; font-size: clamp(48px, 7vw, 84px); letter-spacing: -.055em; }
+  .guide-copy h1 em { color: var(--hero-text); font-style: normal; background: linear-gradient(transparent 72%, var(--signal) 72%, var(--signal) 90%, transparent 90%); }
+  .guide-lead { max-width: 68ch; margin: 36px 0 0; color: var(--hero-muted); font-size: 17px; }
+  .guide-lead code { color: var(--hero-text); font: .92em var(--mono); }
+  .install-command { display: inline-flex; margin-top: 32px; padding: 11px 14px; border: 1px solid var(--hero-line); font: 12px var(--mono); }
+  .guide-facts { grid-column: 10 / 13; margin: 58px 0 0; border-top: 1px solid var(--hero-line); }
+  .guide-facts div { padding: 15px 0; border-bottom: 1px solid var(--hero-line); }
+  .guide-facts dt { color: var(--hero-faint); font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+  .guide-facts dd { margin: 5px 0 0; font-size: 14px; }
+  .section-intro { margin-bottom: 40px; }
+  .section-intro .section-title { max-width: none; }
+  .live-section { background: var(--showcase-bg); }
+  .framework-rail { display: flex; align-items: center; gap: 22px; padding-top: 28px; padding-bottom: 28px; border-top: 1px solid var(--border); font: 12px var(--mono); }
+  .framework-rail span { margin-right: auto; color: var(--text-faint); text-transform: uppercase; letter-spacing: .08em; }
+  .framework-rail a { border-bottom: 1px solid var(--signal); }
+  @media (max-width: 900px) {
+    .guide-copy { grid-column: 1 / 10; }.guide-facts { grid-column: 10 / 13; }
+  }
+  @media (max-width: 680px) {
+    .guide-hero { padding: 58px 0 64px; }.guide-copy, .guide-facts { grid-column: 1 / 13; }.guide-facts { margin-top: 20px; }
+    .guide-copy h1 { font-size: clamp(42px, 13vw, 58px); }
+    .framework-rail { align-items: flex-start; flex-direction: column; gap: 12px; }.framework-rail span { margin-right: 0; }
+  }
+</style>

@@ -18,7 +18,7 @@ function recordingContext(operations: unknown[]): PaintCanvas2D {
     direction: 'ltr',
     letterSpacing: '0px',
     fontKerning: 'auto',
-    fillRect() {},
+    fillRect(x, y, width, height) { operations.push(['fillRect', x, y, width, height]); },
     strokeRect() {},
     setLineDash(pattern) { operations.push(['dash', pattern]); },
     fillText() {},
@@ -154,5 +154,27 @@ describe('retained Canvas border paint', () => {
     expect(operations).not.toContainEqual(['lineJoin', 'bevel']);
     expect(operations).not.toContainEqual(['save']);
     expect(operations).not.toContainEqual(['restore']);
+  });
+
+  it('paints thin-thick compound borders as distinct unequal rails', () => {
+    const operations: unknown[] = [];
+    const context: CanvasPaintContext = {
+      ctx: recordingContext(operations),
+      scale: 1,
+      dpr: 4,
+      resources: { paint() {} },
+    };
+
+    paintStrokeSegment({
+      edge: 'top', from: { xPt: 0, yPt: 10 }, to: { xPt: 100, yPt: 10 },
+      color: '#000000', widthPt: 3, authoredStyle: 'thinThickSmallGap',
+      style: 'compound', dashPatternPt: [],
+    }, context);
+
+    const fills = operations.filter((operation) =>
+      Array.isArray(operation) && operation[0] === 'fillRect') as unknown[][];
+    expect(fills).toHaveLength(2);
+    expect(fills[0]?.[4]).toBeLessThan(fills[1]?.[4] as number);
+    expect(operations).not.toContainEqual(['stroke', 3]);
   });
 });

@@ -1,54 +1,52 @@
 import type { ParsedWorkbook, Row, Worksheet } from '@silurus/ooxml-xlsx';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
-  BoundedPullSession,
   decodeOoxmlResourceUsage,
-  normalizeLoadResourceOptions,
-  OoxmlResourceMetricsSession,
   parseResourceLimitError,
-  resourcePolicyForWasm,
+  type OoxmlResourceMetricsSession,
   type PullSessionCommand,
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
-// The package typecheck alias maps '@silurus/ooxml-xlsx' to types.ts (types
-// only), so the resolver value is imported from source directly — mirroring the
-// relative WASM import below. (index.ts re-exports it for external consumers.)
+// The Node facade consumes the format-owned coordinator through its explicit
+// internal entry point rather than reconstructing XLSX orchestration here.
 import {
-  resolveSharedStringRows,
-  resolveSharedStrings,
-} from '../../xlsx/src/shared-strings.ts';
-import {
+  acquireXlsxNodeSession,
+  addWorksheetCacheUsage,
+  addWorksheetUsage,
+  assertWorksheetCacheUsage,
+  assertWorksheetJsonBytes,
+  assertWorksheetModelUsage,
+  completeWorksheetUsage,
+  measureRows,
+  XlsxWorksheetPullClient,
   WorksheetPullWorker,
-  XLSX_WORKSHEET_PULL_BYTES,
-  type WorksheetWireChunk,
-} from '../../xlsx/src/worksheet-pull-worker.ts';
-// @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
-import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
-import { InProcessPullTransport } from './in-process-pull-transport.ts';
+  type WorksheetCacheUsage,
+  type WorksheetModelUsage,
+  type XlsxNodeArchive,
+} from '@silurus/ooxml-xlsx/internal/session';
+import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
-import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
+import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
+import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 
-let initialized = false;
+const getXlsxWasmModule = createLazyWasmModule(() => resolveWasm(
+    import.meta.url,
+    'xlsx_parser_bg.wasm',
+    '@silurus/ooxml-xlsx/wasm-binary',
+  ));
 
-interface XlsxArchiveHandle {
-  free(): void;
-  parse(): Uint8Array;
-  resource_usage(): Uint8Array;
-  open_sheet_cursor(sheetIndex: number, name: string): void;
-  pull_sheet_cursor(rowCredit: number): Uint8Array;
-  sheet_cursor_pull_finished(): boolean;
-  sheet_cursor_resource_usage(): Uint8Array;
-  acknowledge_sheet_cursor_terminal(): void;
-  cancel_sheet_cursor(): void;
-  close_sheet_cursor(): void;
-}
+export type DeepReadonly<T> =
+  T extends (...args: never[]) => unknown ? T
+    : T extends readonly (infer TValue)[] ? readonly DeepReadonly<TValue>[]
+      : T extends object ? { readonly [TKey in keyof T]: DeepReadonly<T[TKey]> }
+        : T;
 
-interface XlsxArchiveConstructor {
-  new (
-    data: Uint8Array,
-    maxArchiveEntryBytes?: bigint | null,
-    maxTotalInflatedBytes?: bigint | null,
-  ): XlsxArchiveHandle;
+export type ReadonlyParsedWorkbook = DeepReadonly<ParsedWorkbook>;
+
+export interface MaterializedXlsxWorkbook {
+  readonly workbookIndex: ParsedWorkbook;
+  /** Caller-owned worksheets in workbook sheet-index order. */
+  readonly worksheets: readonly Worksheet[];
 }
 
 /** Options for the bounded Node workbook session. */
@@ -78,85 +76,12 @@ export type XlsxWorksheetRowChunk =
  * because the native archive owns one worksheet cursor.
  */
 export interface XlsxWorkbookSession {
+  readonly workbookIndex: ReadonlyParsedWorkbook;
   readonly sheetCount: number;
   readonly sheetNames: ReadonlyArray<string>;
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk, void, void>;
   close(): Promise<void>;
-}
-
-function ensureInit(): void {
-  if (initialized) return;
-  const wasmPath = resolveWasm(import.meta.url, '../../xlsx/src/wasm/xlsx_parser_bg.wasm');
-  loadWasmModule(xlsxWasm as unknown as { initSync: (m: WebAssembly.Module) => unknown }, wasmPath);
-  initialized = true;
-}
-
-/** Parse the workbook index (sheet list + styles + shared strings) from a
- *  `.xlsx` archive. Individual sheet cell data is parsed lazily via
- *  {@link parseSheet}. */
-export function parseXlsx(buffer: ArrayBuffer | Uint8Array | Buffer): ParsedWorkbook {
-  ensureInit();
-  const bytes = toUint8(buffer);
-  // `parse_xlsx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
-  // parse once. Matches the browser main-thread receiver.
-  const json = (xlsxWasm as unknown as { parse_xlsx: (b: Uint8Array) => Uint8Array }).parse_xlsx(
-    bytes,
-  );
-  return JSON.parse(new TextDecoder().decode(json)) as ParsedWorkbook;
-}
-
-/** Parse a single sheet's cell model without resolving shared-string cells
- *  (they stay `{type:'shared',si}`). Internal — callers resolve against the
- *  workbook's sharedStrings table. */
-function parseSheetRaw(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
-  sheetIndex: number,
-  sheetName: string,
-): Worksheet {
-  ensureInit();
-  const bytes = toUint8(buffer);
-  // `parse_sheet` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
-  // parse once.
-  const json = (xlsxWasm as unknown as {
-    parse_sheet: (b: Uint8Array, idx: number, name: string) => Uint8Array;
-  }).parse_sheet(bytes, sheetIndex, sheetName);
-  return JSON.parse(new TextDecoder().decode(json)) as Worksheet;
-}
-
-/** Parse a single sheet's cell data and layout. The browser path does this
- *  on demand from a Web Worker; in Node we just call the WASM export
- *  synchronously. Shared-string cells are resolved to concrete text against the
- *  workbook table (matching the browser `XlsxWorkbook` path), so callers reading
- *  `cell.value` always get `{type:'text',...}` rather than a `{type:'shared'}`
- *  reference. */
-export function parseSheet(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
-  sheetIndex: number,
-  sheetName: string,
-): Worksheet {
-  const ws = parseSheetRaw(buffer, sheetIndex, sheetName);
-  return resolveSharedStrings(ws, parseXlsx(buffer).sharedStrings);
-}
-
-/** Eagerly parse every sheet referenced by the workbook. Useful for batch
- *  jobs (diffing two workbooks, dumping to markdown) where you want the
- *  whole model in one go. */
-export function parseXlsxAllSheets(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
-): { workbook: ParsedWorkbook['workbook']; worksheets: Record<string, Worksheet> } {
-  const parsed = parseXlsx(buffer);
-  const worksheets: Record<string, Worksheet> = {};
-  for (let i = 0; i < parsed.workbook.sheets.length; i++) {
-    const meta = parsed.workbook.sheets[i];
-    // Resolve against the already-parsed table (avoids re-parsing the workbook
-    // index once per sheet, which routing through `parseSheet` would do).
-    worksheets[meta.name] = resolveSharedStrings(
-      parseSheetRaw(buffer, i, meta.name),
-      parsed.sharedStrings,
-    );
-  }
-  return { workbook: parsed.workbook, worksheets };
 }
 
 /**
@@ -165,60 +90,33 @@ export function parseXlsxAllSheets(
  * callers consume worksheet rows sequentially without reopening the package.
  */
 export async function openXlsxWorkbook(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<XlsxWorkbookSession> {
-  const resourceOptions = normalizeLoadResourceOptions(options);
-  const metrics = new OoxmlResourceMetricsSession({
-    enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
-    format: 'xlsx',
-    mode: 'node',
-    scope: 'session',
-    policy: resourceOptions.policy,
-    onMetrics: resourceOptions.onResourceMetrics,
-    emitToConsole: resourceOptions.debug,
-  });
   const bytes = toUint8(buffer);
-  metrics.setSourceBytes(bytes.byteLength);
-  let archive: XlsxArchiveHandle | undefined;
-  try {
-    throwIfAborted(options.signal);
-    ensureInit();
-    const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
-    const Archive = (xlsxWasm as unknown as { XlsxArchive: XlsxArchiveConstructor }).XlsxArchive;
-    archive = createArchive(Archive, bytes, maxEntry, maxTotal);
-    const workbook = JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook;
-    const usage = decodeUsage(archive.resource_usage());
-    metrics.observeUsage(usage);
-    metrics.checkpoint('workbook index ready');
-    return new XlsxWorkbookSessionImpl(archive, workbook, metrics, usage, options.signal);
-  } catch (error) {
-    try {
-      archive?.free();
-    } catch {
-      // Preserve the open/index failure.
-    }
-    const normalized = parseResourceLimitError(error) ?? error;
-    metrics.fail(normalized);
-    throw normalized;
-  }
+  const acquired = await acquireXlsxNodeSession(bytes, getXlsxWasmModule(), options);
+  return new XlsxWorkbookSessionImpl(
+    acquired.closeArchive,
+    acquired.archive,
+    acquired.workbookIndex,
+    acquired.metrics,
+    acquired.usage,
+    options.signal,
+  );
 }
 
 type ActiveWorksheetOperation = {
-  readonly identity: Readonly<{ sessionId: number; operationId: number; generation: number }>;
-  client?: BoundedPullSession<ArrayBuffer, number>;
-  terminalAcknowledged: boolean;
   cleanupPromise?: Promise<void>;
 };
 
 class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
+  readonly workbookIndex: ReadonlyParsedWorkbook;
   readonly sheetCount: number;
   readonly sheetNames: ReadonlyArray<string>;
 
   private readonly pull: WorksheetPullWorker;
   private readonly transport: InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>>;
-  private workbook: ParsedWorkbook | null;
-  private nextOperationId = 1;
+  private readonly worksheetPullClient: XlsxWorksheetPullClient;
   private active: ActiveWorksheetOperation | undefined;
   private closed = false;
   private closePromise: Promise<void> | undefined;
@@ -228,14 +126,15 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
   private emittedRows = 0;
 
   constructor(
-    private readonly archive: XlsxArchiveHandle,
+    private readonly closeArchive: () => void,
+    private readonly archive: XlsxNodeArchive,
     workbook: ParsedWorkbook,
     private readonly metrics: OoxmlResourceMetricsSession,
     usage: OoxmlResourceUsageSnapshot | undefined,
     private readonly signal?: AbortSignal,
   ) {
-    this.workbook = workbook;
-    this.sheetNames = Object.freeze(workbook.workbook.sheets.map((sheet) => sheet.name));
+    this.workbookIndex = freezeRecursively(workbook);
+    this.sheetNames = Object.freeze(this.workbookIndex.workbook.sheets.map((sheet) => sheet.name));
     this.sheetCount = this.sheetNames.length;
     this.lastUsage = usage;
     this.pull = new WorksheetPullWorker(() => this.archive);
@@ -246,6 +145,18 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
       ),
       () => undefined,
     );
+    this.worksheetPullClient = new XlsxWorksheetPullClient({
+      transport: this.transport,
+      sharedStrings: workbook.sharedStrings,
+      open: async (sheetIndex, sheetName, identity) => {
+        this.pull.reserveOpen(identity);
+        await this.pull.open(sheetIndex, sheetName, identity);
+      },
+      onUsage: (nextUsage) => {
+        this.lastUsage = nextUsage;
+        this.metrics.observeUsage(nextUsage);
+      },
+    });
   }
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
@@ -273,64 +184,38 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
       throw new RangeError('sheetIndex must be a non-negative safe integer');
     }
     const sheetName = this.requireSheetName(sheetIndex);
-    throwIfAborted(this.signal);
-
-    const operationId = this.nextOperationId++;
-    const operation: ActiveWorksheetOperation = {
-      identity: { sessionId: operationId, operationId, generation: 1 },
-      terminalAcknowledged: false,
-    };
+    const operation: ActiveWorksheetOperation = {};
     this.active = operation;
     let operationError: unknown;
     try {
-      this.pull.reserveOpen(operation.identity);
-      await this.pull.open(sheetIndex, sheetName, operation.identity);
-      const client = new BoundedPullSession(this.transport, {
-        ...operation.identity,
-        maxByteCredit: XLSX_WORKSHEET_PULL_BYTES,
-      });
-      operation.client = client;
-
-      for (;;) {
+      for await (const unit of this.worksheetPullClient.stream(
+        sheetIndex,
+        sheetName,
+        this.signal,
+      )) {
         if (this.closed) throw new Error('XLSX workbook session is closed');
-        throwIfAborted(this.signal);
-        const chunk = await client.pull(XLSX_WORKSHEET_PULL_BYTES, { signal: this.signal });
-        this.lastUsage = chunk.usage ?? this.lastUsage;
-        this.metrics.observeUsage(chunk.usage);
-        const decoded = JSON.parse(
-          new TextDecoder().decode(new Uint8Array(chunk.payload)),
-        ) as WorksheetWireChunk;
-        if (chunk.done !== (decoded.kind === 'finished')) {
-          throw new Error('worksheet cursor terminal marker mismatch');
-        }
-        if (decoded.kind === 'rows') {
-          resolveSharedStringRows(decoded.rows, this.requireWorkbook().sharedStrings);
+        if (unit.kind === 'rows') {
           this.rowBatches += 1;
-          this.emittedRows += decoded.rows.length;
+          this.emittedRows += unit.rows.length;
           yield {
             kind: 'rows',
-            rows: decoded.rows,
-            sequence: chunk.sequence,
-            wireBytes: chunk.byteLength,
-            usage: chunk.usage,
+            rows: unit.rows,
+            sequence: unit.sequence,
+            wireBytes: unit.wireBytes,
+            usage: unit.usage,
           };
-          await chunk.ack({ signal: this.signal });
           continue;
         }
-        decoded.worksheet.rows = [];
         yield {
           kind: 'finished',
-          worksheet: decoded.worksheet,
-          sequence: chunk.sequence,
-          wireBytes: chunk.byteLength,
-          usage: chunk.usage,
+          worksheet: unit.worksheet,
+          sequence: unit.sequence,
+          wireBytes: unit.wireBytes,
+          usage: unit.usage,
         };
-        await chunk.ack({ signal: this.signal });
-        operation.terminalAcknowledged = true;
-        this.completedWorksheets += 1;
-        this.metrics.checkpoint('worksheet stream complete', chunk.usage);
-        return;
       }
+      this.completedWorksheets += 1;
+      this.metrics.checkpoint('worksheet stream complete', this.lastUsage);
     } catch (error) {
       operationError = parseResourceLimitError(error) ?? error;
       this.metrics.fail(operationError);
@@ -364,12 +249,10 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
     if (operation.cleanupPromise) return operation.cleanupPromise;
     operation.cleanupPromise = (async () => {
       let cleanupError: unknown;
-      if (operation.client && !operation.terminalAcknowledged) {
-        try {
-          await operation.client.cancel(reason);
-        } catch (error) {
-          cleanupError = parseResourceLimitError(error) ?? error;
-        }
+      try {
+        await this.worksheetPullClient.cancelAll(reason);
+      } catch (error) {
+        cleanupError = parseResourceLimitError(error) ?? error;
       }
       try {
         await this.pull.reset();
@@ -392,9 +275,8 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
       }
     }
     this.transport.terminate();
-    this.workbook = null;
     try {
-      this.archive.free();
+      this.closeArchive();
     } catch (error) {
       cleanupError ??= parseResourceLimitError(error) ?? error;
     }
@@ -410,29 +292,139 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
     });
   }
 
-  private requireWorkbook(): ParsedWorkbook {
-    if (!this.workbook) throw new Error('XLSX workbook session is closed');
-    return this.workbook;
-  }
-
   private requireSheetName(sheetIndex: number): string {
-    const sheet = this.requireWorkbook().workbook.sheets[sheetIndex];
+    const sheet = this.workbookIndex.workbook.sheets[sheetIndex];
     if (!sheet) throw new RangeError(`Sheet index ${sheetIndex} out of range`);
     return sheet.name;
   }
 }
 
-function createArchive(
-  Archive: XlsxArchiveConstructor,
-  bytes: Uint8Array,
-  maxEntry: bigint,
-  maxTotal: bigint,
-): XlsxArchiveHandle {
-  try {
-    return new Archive(bytes, maxEntry, maxTotal);
-  } catch (error) {
-    throw parseResourceLimitError(error) ?? error;
+/** Materialize only the workbook metadata/index through the canonical owned
+ * archive. No worksheet cursor is opened. */
+export async function materializeXlsxWorkbookIndex(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OpenXlsxWorkbookOptions = {},
+): Promise<ParsedWorkbook> {
+  return usingOwnedSession(
+    () => openXlsxWorkbook(buffer, options),
+    async (session) => structuredClone(session.workbookIndex) as ParsedWorkbook,
+  );
+}
+
+/** Materialize one caller-owned worksheet by sheet index. */
+export async function materializeXlsxWorksheet(
+  buffer: ArrayBuffer | Uint8Array,
+  sheetIndex: number,
+  options: OpenXlsxWorkbookOptions = {},
+): Promise<Worksheet> {
+  return usingOwnedSession(
+    () => openXlsxWorkbook(buffer, options),
+    async (session) => (await materializeWorksheetFromSession(session, sheetIndex)).worksheet,
+  );
+}
+
+/** Materialize the complete workbook without reopening the package per sheet. */
+export async function materializeXlsxWorkbook(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OpenXlsxWorkbookOptions = {},
+): Promise<MaterializedXlsxWorkbook> {
+  return usingOwnedSession(
+    () => openXlsxWorkbook(buffer, options),
+    async (session) => {
+      const worksheets: Worksheet[] = [];
+      let retainedUsage: WorksheetCacheUsage = {
+        rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0,
+      };
+      for (let sheetIndex = 0; sheetIndex < session.sheetCount; sheetIndex += 1) {
+        const materialized = await materializeWorksheetFromSession(session, sheetIndex);
+        const nextUsage = addWorksheetCacheUsage(retainedUsage, materialized.usage);
+        assertWorksheetCacheUsage(
+          nextUsage,
+          'materialize-workbook',
+          undefined,
+          materialized.resourceUsage,
+        );
+        retainedUsage = nextUsage;
+        worksheets.push(materialized.worksheet);
+      }
+      return {
+        workbookIndex: structuredClone(session.workbookIndex) as ParsedWorkbook,
+        worksheets: Object.freeze(worksheets),
+      };
+    },
+  );
+}
+
+async function materializeWorksheetFromSession(
+  session: XlsxWorkbookSession,
+  sheetIndex: number,
+): Promise<{
+  worksheet: Worksheet;
+  usage: WorksheetModelUsage & { jsonBytes: number };
+  resourceUsage?: OoxmlResourceUsageSnapshot;
+}> {
+  const rows: Row[] = [];
+  let modelUsage: WorksheetModelUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0 };
+  let retainedUsage: (WorksheetModelUsage & { jsonBytes: number }) | undefined;
+  let terminal: Worksheet | undefined;
+  let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
+  for await (const chunk of session.worksheetRows(sheetIndex)) {
+    resourceUsage = chunk.usage ?? resourceUsage;
+    if (chunk.kind === 'rows') {
+      const nextUsage = addWorksheetUsage(modelUsage, measureRows(chunk.rows));
+      assertWorksheetModelUsage(
+        nextUsage,
+        'materialize-worksheet',
+        undefined,
+        resourceUsage,
+      );
+      rows.push(...chunk.rows);
+      modelUsage = nextUsage;
+    } else {
+      terminal = chunk.worksheet;
+      terminal.rows = terminal.parseError ? [] : rows;
+      const measured = completeWorksheetUsage(
+        terminal,
+        terminal.parseError
+          ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+          : modelUsage,
+      );
+      assertWorksheetModelUsage(
+        measured,
+        'materialize-worksheet',
+        undefined,
+        resourceUsage,
+      );
+      assertWorksheetJsonBytes(
+        measured.jsonBytes,
+        'materialize-worksheet',
+        undefined,
+        resourceUsage,
+      );
+      modelUsage = measured;
+      retainedUsage = measured;
+    }
   }
+  if (!terminal || !retainedUsage) {
+    throw new Error(`XLSX worksheet ${sheetIndex} did not produce a terminal model`);
+  }
+  return {
+    // The coordinator decoded this terminal graph and the retained row units
+    // exclusively for this materializer. Transfer ownership directly instead
+    // of doubling the complete worksheet graph at the session boundary.
+    worksheet: terminal,
+    usage: retainedUsage,
+    resourceUsage,
+  };
+}
+
+function freezeRecursively<T>(value: T, seen = new WeakSet<object>()): DeepReadonly<T> {
+  if (value === null || typeof value !== 'object') return value as DeepReadonly<T>;
+  const object = value as object;
+  if (seen.has(object)) return value as DeepReadonly<T>;
+  seen.add(object);
+  for (const child of Object.values(object)) freezeRecursively(child, seen);
+  return Object.freeze(value) as DeepReadonly<T>;
 }
 
 function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined {
@@ -444,13 +436,6 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
   }
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  const error = new Error('XLSX workbook session was aborted');
-  error.name = 'AbortError';
-  throw error;
 }

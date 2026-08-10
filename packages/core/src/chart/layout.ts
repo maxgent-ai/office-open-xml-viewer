@@ -387,26 +387,16 @@ export function computeChartFrame(
     if (pml && pml.w != null && pml.h != null) {
       const manualLeft = x + pml.x * w;
       const manualTop = y + pml.y * h;
-      const manualRight = manualLeft + pml.w * w;
-      const manualBottom = manualTop + pml.h * h;
-      if (pml.layoutTarget === 'inner') {
-        // ECMA-376 §21.2.2.89: an "inner" manual layout describes only the
-        // data region, excluding axes and labels. Browser font metrics can
-        // require slightly more gutter than the producer reserved, so keep
-        // that outer content inside the chart frame without moving the
-        // declared plot's right/bottom edges.
-        px0 = Math.max(manualLeft, x + pad.l);
-        py0 = Math.max(manualTop, y + pad.t);
-        const right = Math.min(manualRight, x + w - pad.r);
-        const bottom = Math.min(manualBottom, y + h - pad.b);
-        pw = Math.max(0, right - px0);
-        ph = Math.max(0, bottom - py0);
-      } else {
-        px0 = manualLeft;
-        py0 = manualTop;
-        pw = pml.w * w;
-        ph = pml.h * h;
-      }
+      // ECMA-376 §21.2.2.89: layoutTarget="inner" means the authored
+      // rectangle is the plot area excluding axes and labels; "outer" includes
+      // them. In either case the manual rectangle is authoritative. The
+      // auto-layout pads describe a different layout mode and must not clamp
+      // or move an explicitly authored edge. Clamping an inner rectangle can
+      // shift stacked bars away from separately authored overlay labels.
+      px0 = manualLeft;
+      py0 = manualTop;
+      pw = pml.w * w;
+      ph = pml.h * h;
     } else {
       px0 = x + pad.l;
       py0 = y + pad.t;

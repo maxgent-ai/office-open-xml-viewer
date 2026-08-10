@@ -154,6 +154,28 @@ describe('§17.4.50 tblInd — table indent from the leading margin', () => {
     expectNear(Math.min(...withInd.xs), 10, 'LTR left origin = contentX + tblInd = 20 + (-10)');
   });
 
+  it('keeps exact-height row clipping open across the signed table extent', () => {
+    const recording = makeRecordingCanvas();
+    const doc = tableDoc(160, -10, false);
+    const row = (doc.body[0] as DocTable).rows[0];
+    if (!row) throw new Error('expected table row');
+    row.rowHeight = 20;
+    row.rowHeightRule = 'exact';
+    const services = createLayoutServices(doc, {
+      measureContext: recording.canvas.getContext('2d') as CanvasRenderingContext2D,
+    });
+
+    const retained = layoutDocument(doc, services, { currentDateMs: 0 }).pages[0]?.layers.body[0];
+
+    if (retained?.kind !== 'table') throw new Error('expected retained table geometry');
+    expect(retained.rows[0]?.cells[0]?.clipBounds).toEqual({
+      xPt: 10,
+      yPt: 20,
+      widthPt: 170,
+      heightPt: 20,
+    });
+  });
+
   it('preserves an authored width beyond the text band when the indented table fits the page', () => {
     // §17.18.87 allows AutoFit to override the preferred table width until the
     // table reaches the page width. The 180pt authored grid is wider than the

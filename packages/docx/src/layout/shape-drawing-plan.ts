@@ -12,7 +12,7 @@ import type { TextLayoutService } from './text.js';
 
 type ShapeDrawingCommand = Extract<
   DrawingPaintCommand,
-  { kind: 'noop' | 'drawingml-shape' | 'watermark-text' }
+  { kind: 'noop' | 'drawingml-shape' | 'drawingml-image-fill' | 'watermark-text' }
 >;
 
 export type ShapeDrawingPlanResult =
@@ -66,6 +66,7 @@ export function planShapeDrawing(
   bounds: LayoutRect,
   text?: TextLayoutService,
   textPath?: Readonly<VmlTextPathAcquisitionInput>,
+  imageFillResourceKey?: string,
 ): ShapeDrawingPlanResult {
   const parserControlled = textPath !== undefined && (
     textPath.textPathOk !== undefined
@@ -84,6 +85,9 @@ export function planShapeDrawing(
       : true
   );
   if (textPathEnabled) {
+    if (shape.fill?.fillType === 'image') {
+      return unsupportedTextPathPlan('VML textPath with a DrawingML image fill is not rendered');
+    }
     if (textPath.fitPath === true) {
       return unsupportedTextPathPlan('VML textPath fitPath=true is not rendered');
     }
@@ -192,7 +196,7 @@ export function planShapeDrawing(
           kind: 'custom',
           subpaths: shape.subpaths.map((subpath) => subpath.map((command) => ({ ...command }))),
         },
-    fill: shape.fill ? { ...shape.fill, ...(shape.fill.fillType === 'gradient'
+    fill: shape.fill && shape.fill.fillType !== 'image' ? { ...shape.fill, ...(shape.fill.fillType === 'gradient'
       ? { stops: shape.fill.stops.map((stop) => ({ ...stop })) }
       : {}) } : null,
     stroke: shapeStroke(shape),
@@ -202,6 +206,38 @@ export function planShapeDrawing(
       flipV: shape.flipV ?? false,
     },
   };
+  if (shape.fill?.fillType === 'image') {
+    if (shape.fill.tile !== undefined) {
+      return Object.freeze({
+        status: 'unsupported',
+        command: Object.freeze({ kind: 'noop' }),
+        diagnostics: Object.freeze([Object.freeze({
+          code: 'UNSUPPORTED_FEATURE',
+          severity: 'error',
+          message: 'Tiled DrawingML shape image fills are not rendered',
+        })]),
+      });
+    }
+    if (!imageFillResourceKey) {
+      throw new Error('DrawingML shape image fill requires a retained image resource key');
+    }
+    return Object.freeze({
+      status: 'planned',
+      command: snapshotPlainData({
+        kind: 'drawingml-image-fill' as const,
+        plan,
+        resourceKey: imageFillResourceKey,
+        ...(shape.fill.fillRect === undefined ? {} : {
+          fillRect: {
+            l: shape.fill.fillRect.l ?? 0,
+            t: shape.fill.fillRect.t ?? 0,
+            r: shape.fill.fillRect.r ?? 0,
+            b: shape.fill.fillRect.b ?? 0,
+          },
+        }),
+      }, 'DrawingML shape image-fill command'),
+    });
+  }
   return Object.freeze({
     status: 'planned',
     command: snapshotPlainData(

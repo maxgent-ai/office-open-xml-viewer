@@ -1,6 +1,15 @@
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 
+function setSelectionData(element: HTMLElement, key: string, value?: string): void {
+  if (element.dataset) {
+    if (value === undefined) delete element.dataset[key];
+    else element.dataset[key] = value;
+  } else if (value !== undefined) {
+    element.setAttribute?.(`data-${key.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`)}`, value);
+  }
+}
+
 /**
  * Build the transparent text-selection overlay for a rendered pptx slide. Unlike
  * docx (flat spans), pptx groups runs into one positioned `<div>` per shape frame
@@ -43,18 +52,22 @@ export function buildPptxTextLayer(
   cssWidth: number,
   cssHeight: number,
   onHyperlinkClick?: (target: HyperlinkTarget) => void,
+  slideIndex?: number,
 ): void {
   layer.innerHTML = '';
+  setSelectionData(layer, 'ooxmlSelectionSurface', 'pptx');
+  setSelectionData(layer, 'slideIndex', slideIndex === undefined ? undefined : String(slideIndex));
 
   // Group runs by shape (same shapeX/shapeY/rotation)
   type ShapeKey = string;
   const shapeMap = new Map<ShapeKey, { div: HTMLDivElement; x: number; y: number; w: number; h: number; rot: number }>();
 
-  for (const run of runs) {
+  const ownerDocument = layer.ownerDocument ?? document;
+  for (const [runIndex, run] of runs.entries()) {
     const totalRot = run.rotation + (run.textBodyRotation ?? 0);
     const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
     if (!shapeMap.has(key)) {
-      const div = document.createElement('div');
+      const div = ownerDocument.createElement('div');
       // The shape frame is placed as a % of the slide box so it tracks the
       // canvas's actual rendered size; its width/height are % too, so the child
       // spans (positioned as % of THIS box) scale with it. rotate() is applied to
@@ -74,7 +87,12 @@ export function buildPptxTextLayer(
     }
 
     const shape = shapeMap.get(key)!;
-    const span = document.createElement('span');
+    const span = ownerDocument.createElement('span');
+    setSelectionData(span, 'ooxmlSelectionRun', 'pptx');
+    setSelectionData(span, 'runIndex', String(runIndex));
+    if (run.shapeId !== undefined) setSelectionData(span, 'shapeId', run.shapeId);
+    if (run.elementIndex !== undefined) setSelectionData(span, 'elementIndex', String(run.elementIndex));
+    if (run.origin !== undefined) setSelectionData(span, 'elementOrigin', run.origin);
     span.textContent = run.text;
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent

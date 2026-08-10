@@ -9,7 +9,11 @@ import {
 } from './coordinate-space.js';
 import { columnSeparatorSegments } from './column-separators.js';
 import { materializePageBorderLayout } from './page-border.js';
-import { createPageLayers, type PageLayerNode } from './page-graph.js';
+import {
+  createPageLayers,
+  orderedPagePaintNodes,
+  type PageLayerNode,
+} from './page-graph.js';
 import type { BodyOccurrenceDestination } from './occurrence-projection.js';
 import type {
   DeepReadonly,
@@ -432,6 +436,49 @@ export function derivePageBookmarkStarts(
     });
   }
   return starts;
+}
+
+function bookmarkSectionByDomain(page: LayoutPage): ReadonlyMap<string, string> {
+  const regions = page.sectionRegions ?? [];
+  const regionById = new Map(regions.map((region) => [region.id, region]));
+  const sectionByDomain = new Map<string, string>();
+  for (const region of regions) {
+    for (const domainId of region.flowDomainIds) {
+      sectionByDomain.set(domainId, region.sectionOccurrenceId);
+    }
+  }
+  for (const domain of page.flowDomains) {
+    if (domain.kind !== 'footnote' && domain.kind !== 'endnote') continue;
+    const region = domain.sectionRegionId
+      ? regionById.get(domain.sectionRegionId)
+      : regions[0];
+    if (region) sectionByDomain.set(domain.id, region.sectionOccurrenceId);
+  }
+  return sectionByDomain;
+}
+
+export function deriveRetainedPageBookmarkStarts(
+  page: LayoutPage,
+  sectionByDomain: ReadonlyMap<string, string> = bookmarkSectionByDomain(page),
+): readonly PageBookmarkStart[] {
+  return derivePageBookmarkStarts(
+    orderedPagePaintNodes(page),
+    page.sectionOccurrenceId ?? '',
+    sectionByDomain,
+  );
+}
+
+/** Bookmark navigation metadata is a projection of the complete retained page
+ * graph. Page stories and notes join that graph after initial body pagination,
+ * so the final document boundary derives the projection again from the graph
+ * that paint and navigation will actually retain. ECMA-376 §17.13.6.2 permits
+ * bookmark starts in paragraph content regardless of the owning story. */
+export function finalizePageBookmarkStarts(page: LayoutPage): LayoutPage {
+  if (page.parityBlank) return page;
+  return Object.freeze({
+    ...page,
+    bookmarkStarts: Object.freeze([...deriveRetainedPageBookmarkStarts(page)]),
+  });
 }
 
 export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {

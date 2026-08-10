@@ -970,7 +970,7 @@ function buildConcreteBodyLayoutKernel(
               // The catalogued projection preserves the §17.3.1.11 authored
               // exclusion height; see WORD_LOWERED_DROP_CAP_ANCHOR_LEADING.
               blockExtentPt: dropCapAnchorLeadingPt,
-              lineEndBoundaries: Object.freeze([]),
+              fragmentation: Object.freeze({ kind: 'indivisible' as const }),
               placement: Object.freeze({
                 coordinateSpace: 'logical-body' as const,
                 xPt: member.fragment.flowBounds.xPt,
@@ -1037,7 +1037,12 @@ function buildConcreteBodyLayoutKernel(
           return Object.freeze({
             layout,
             blockExtentPt: layout.advancePt,
-            lineEndBoundaries: Object.freeze(allBoundaries),
+            fragmentation: measured.markOnly
+              ? Object.freeze({ kind: 'indivisible' as const })
+              : Object.freeze({
+                  kind: 'splittable' as const,
+                  lineEndBoundaries: Object.freeze(allBoundaries),
+                }),
             ...(measured.markOnly
               ? { markBelowBaselinePt: measured.lastLineBelowBaselinePt }
               : {}),
@@ -2247,6 +2252,11 @@ function resolveColumnWidths(
   const maximumTableWidthPt = isLeadingMarginPageStoryTable
     ? Math.max(contentWPt, pageFitCeilingPt)
     : contentWPt;
+  const effectiveLayout = format.firstRowException?.layout === 'fixed'
+    ? 'fixed'
+    : table.layout;
+  const isFixedNestedTable = effectiveLayout === 'fixed'
+    && state.storyContext?.containers.some((container) => container.kind === 'tableCell');
 
   const intrinsicWidthsForTable = (
     owner: TableLayoutSource,
@@ -2316,7 +2326,14 @@ function resolveColumnWidths(
     table,
     contentWPt,
     intrinsicWidthsForTable(table, format),
-    state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
+    isFixedNestedTable
+      // ECMA-376 §17.18.87 resolves a fixed table from its authored tblGrid,
+      // tblW, and tcW constraints. A containing cell is not an implicit tblW:
+      // Word permits such a table to overflow its cell instead of scaling it.
+      // `null` explicitly removes the unrelated physical cell ceiling; it is
+      // not a numeric width and therefore cannot alter authored geometry.
+      ? null
+      : state.acquisitionInputs.tableParticipatesInOrdinaryFlow(table)
       ? maximumTableWidthPt
       : Math.max(contentWPt, state.pageWidth),
   ))];
@@ -2357,6 +2374,7 @@ function frameAnchorLineHeightPx(
       state.resolvedLocalFonts,
       state.layoutServices?.text,
       state.acquisitionInputs.paragraphMarkShapeInput(p),
+      state.layoutSettings.compat.useFeLayout,
     );
   }
   const fp = frameEl;
@@ -2372,6 +2390,7 @@ function frameAnchorLineHeightPx(
     state.resolvedLocalFonts,
     state.layoutServices?.text,
     state.acquisitionInputs.paragraphMarkShapeInput(fp),
+    state.layoutSettings.compat.useFeLayout,
   );
 }
 
@@ -2986,21 +3005,19 @@ function effCellMargins(
 
 // ───────────────────────────────────────────────────────────────────────────
 // ECMA-376 §17.6.5 docGrid CHARACTER grid (字詰め). When the section's docGrid
-// `type` is "linesAndChars" or "snapToChars" AND a `charSpace` is declared,
-// every full-width East-Asian glyph gains a fixed per-EA-glyph spacing delta
+// `type` is "linesAndChars" AND a `charSpace` is declared, every character gains
+// a fixed spacing delta
 //   Δpt = charSpace / 4096   in FLAT POINTS (NEGATIVE = tighter)
 // that is INDEPENDENT of font size — it is added to the glyph's MEASURED advance
 // (≈1em for full-width EA glyphs), NOT scaled by it. (`gridCharDeltaPx` returns
 // exactly `charSpacePt * scale` = charSpace/4096 pt in px; it does not multiply
-// by the font size.) Latin / digits are NOT snapped (they keep their natural
-// advance), so the grid delta applies only to EA code points.
+// by the font size.)
 //
 // ── The single advance model (measure == draw) ──────────────────────────────
 // To make line-break MEASUREMENT and the draw ADVANCE provably identical, the
-// grid delta enters in exactly ONE way: as a per-code-point spacing on a
-// PURE-EA segment. `gridSegDeltaPx` returns the total delta a segment's box
-// gains (`len × Δpx` for a pure-EA segment, else 0 — mixed/Latin segments get
-// no grid effect, sidestepping any contextual-metric or justification drift),
+// grid delta enters in exactly ONE way: as a per-code-point spacing selected by
+// the retained grid kind. `gridSegDeltaPx` returns the total delta a segment's
+// box gains (`len × Δpx` for every `linesAndChars` segment),
 // and `segAdvanceWidth` folds it into the run's complete advance together with
 // §17.3.2.43 `w:w` and §17.3.2.35 `w:spacing`. BOTH the layout's `measuredWidth`
 // and every draw path derive the segment's advance from this SAME quantity:

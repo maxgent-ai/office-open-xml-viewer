@@ -234,6 +234,28 @@ describe('text-box marker color (§17.9.24)', () => {
     expect(textboxMarkerFill({ color: '00b050' })).toBe('#00b050');
   });
 
+  it('uses the retained paragraph-mark color instead of the first content color', () => {
+    expect(textboxMarkerFill({
+      paragraphMarkColor: 'ff0000',
+      color: '00b050',
+      runs: [{ text: 'item', fontSizePt: 10, color: '00b050' }],
+    })).toBe('#ff0000');
+  });
+
+  it('uses default ink when parser-owned paragraph-mark resolution serializes null', () => {
+    expect(textboxMarkerFill({
+      paragraphMarkColor: null,
+      color: '00b050',
+      runs: [{ text: 'item', fontSizePt: 10, color: '00b050' }],
+    })).toBe('#000000');
+  });
+
+  it('preserves the legacy first-run color fallback when paragraph-mark facts are absent', () => {
+    expect(textboxMarkerFill({
+      runs: [{ text: 'item', fontSizePt: 10, color: '00b050' }],
+    })).toBe('#00b050');
+  });
+
   it('explicit level auto stops at the default ink, not the block color', () => {
     const fill = textboxMarkerFill({
       color: '00b050',

@@ -1,5 +1,7 @@
 import {
   HARD_MAX_XLSX_WORKBOOK_CACHED_CELLS,
+  HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES,
+  HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES,
   HARD_MAX_XLSX_WORKBOOK_CACHED_ROWS,
   HARD_MAX_XLSX_WORKSHEET_CELLS,
   HARD_MAX_XLSX_WORKSHEET_CELL_CONTENT_UTF8_BYTES,
@@ -24,6 +26,9 @@ export const XLSX_MAX_MATERIALIZED_OWNED_UTF8_BYTES =
 export const XLSX_MAX_MATERIALIZED_JSON_BYTES = HARD_MAX_XLSX_WORKSHEET_JSON_BYTES;
 export const XLSX_MAX_CACHED_ROWS = HARD_MAX_XLSX_WORKBOOK_CACHED_ROWS;
 export const XLSX_MAX_CACHED_CELLS = HARD_MAX_XLSX_WORKBOOK_CACHED_CELLS;
+export const XLSX_MAX_CACHED_OWNED_UTF8_BYTES =
+  HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES;
+export const XLSX_MAX_CACHED_JSON_BYTES = HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES;
 
 export interface WorksheetModelUsage {
   rows: number;
@@ -34,6 +39,8 @@ export interface WorksheetModelUsage {
 export interface WorksheetCacheUsage {
   rows: number;
   cells: number;
+  ownedUtf8Bytes: number;
+  jsonBytes: number;
 }
 
 const ZERO_RESOURCE_USAGE: OoxmlResourceUsageSnapshot = Object.freeze({
@@ -74,7 +81,16 @@ export function measureRows(rows: readonly Row[]): WorksheetModelUsage {
 }
 
 export function measureWorksheet(worksheet: Worksheet): WorksheetModelUsage & { jsonBytes: number } {
-  const model = measureRows(worksheet.rows);
+  return completeWorksheetUsage(worksheet, measureRows(worksheet.rows));
+}
+
+/** Complete an incrementally accumulated row/cell measurement with the exact
+ * retained JSON size. Streaming callers already measured each row chunk, so
+ * repeating that full traversal at terminal admission adds cost but no safety. */
+export function completeWorksheetUsage(
+  worksheet: Worksheet,
+  model: WorksheetModelUsage,
+): WorksheetCacheUsage {
   const measured = measureStructuralJson(worksheet, Math.max(
     XLSX_MAX_MATERIALIZED_OWNED_UTF8_BYTES,
     XLSX_MAX_MATERIALIZED_JSON_BYTES,
@@ -99,17 +115,25 @@ export function addWorksheetUsage(
 
 export function addWorksheetCacheUsage(
   current: WorksheetCacheUsage,
-  addition: Pick<WorksheetModelUsage, 'rows' | 'cells'>,
+  addition: WorksheetModelUsage & { jsonBytes: number },
   subtraction: Partial<WorksheetCacheUsage> = {},
 ): WorksheetCacheUsage {
   const baseRows = current.rows - (subtraction.rows ?? 0);
   const baseCells = current.cells - (subtraction.cells ?? 0);
-  if (baseRows < 0 || baseCells < 0) {
+  const baseOwnedUtf8Bytes = current.ownedUtf8Bytes - (subtraction.ownedUtf8Bytes ?? 0);
+  const baseJsonBytes = current.jsonBytes - (subtraction.jsonBytes ?? 0);
+  if (baseRows < 0 || baseCells < 0 || baseOwnedUtf8Bytes < 0 || baseJsonBytes < 0) {
     throw new Error('worksheet cache accounting underflow');
   }
   return {
     rows: cappedAdd(baseRows, addition.rows, XLSX_MAX_CACHED_ROWS),
     cells: cappedAdd(baseCells, addition.cells, XLSX_MAX_CACHED_CELLS),
+    ownedUtf8Bytes: cappedAdd(
+      baseOwnedUtf8Bytes,
+      addition.ownedUtf8Bytes,
+      XLSX_MAX_CACHED_OWNED_UTF8_BYTES,
+    ),
+    jsonBytes: cappedAdd(baseJsonBytes, addition.jsonBytes, XLSX_MAX_CACHED_JSON_BYTES),
   };
 }
 
@@ -201,6 +225,28 @@ export function assertWorksheetCacheUsage(
   if (usage.cells > XLSX_MAX_CACHED_CELLS) {
     throw worksheetLimitError(
       operation, part, 'worksheet-cache', 'cells', XLSX_MAX_CACHED_CELLS, usage.cells, resourceUsage,
+    );
+  }
+  if (usage.ownedUtf8Bytes > XLSX_MAX_CACHED_OWNED_UTF8_BYTES) {
+    throw worksheetLimitError(
+      operation,
+      part,
+      'worksheet-cache',
+      'owned-utf8-bytes',
+      XLSX_MAX_CACHED_OWNED_UTF8_BYTES,
+      usage.ownedUtf8Bytes,
+      resourceUsage,
+    );
+  }
+  if (usage.jsonBytes > XLSX_MAX_CACHED_JSON_BYTES) {
+    throw worksheetLimitError(
+      operation,
+      part,
+      'worksheet-cache',
+      'bytes',
+      XLSX_MAX_CACHED_JSON_BYTES,
+      usage.jsonBytes,
+      resourceUsage,
     );
   }
 }

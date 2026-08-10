@@ -292,7 +292,7 @@ mod tests {
                     inflated_snapshots.push(
                         archive
                             .operation
-                            .as_ref()
+                            .active()
                             .unwrap()
                             .usage()
                             .unwrap()
@@ -319,7 +319,7 @@ mod tests {
             "the same operation continues inflating after earlier row pulls"
         );
         assert!(tail.shell_xml.contains("<sheetData></sheetData>"));
-        assert!(archive.operation.as_ref().unwrap().usage().is_some());
+        assert!(archive.operation.active().unwrap().usage().is_some());
         archive.finish_operation().expect("same operation finishes");
     }
 
@@ -480,6 +480,6 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error, "xlsx package operation is not active");
-        assert!(archive.operation.is_none());
+        assert!(!archive.operation.is_active());
     }
 }

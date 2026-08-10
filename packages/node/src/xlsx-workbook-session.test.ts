@@ -96,6 +96,43 @@ describe('Node bounded XLSX workbook session', () => {
       outcome: expect.objectContaining({ worksheets: 1, rows: 257 }),
     }));
   });
+
+  it('applies the configurable archive entry-count policy before workbook parsing', async () => {
+    await expect(openXlsxWorkbook(bytes, {
+      resourceLimits: { maxArchiveEntries: 1 },
+    })).rejects.toMatchObject({
+      name: 'OoxmlResourceLimitError',
+      code: 'ooxml-resource-limit',
+      details: expect.objectContaining({
+        violation: expect.objectContaining({
+          metric: 'entry-count',
+          configurable: true,
+          limit: 1,
+        }),
+      }),
+    });
+  });
+
+  it('invalidates sibling sessions after a trap and recovers on a fresh generation', async () => {
+    const openCursor = vi.spyOn(archivePrototype(), 'open_sheet_cursor')
+      .mockImplementationOnce(() => { throw new RangeError('synthetic trap'); });
+    const first = await openXlsxWorkbook(bytes);
+    const sibling = await openXlsxWorkbook(bytes);
+    try {
+      await expect(first.worksheetRows(0).next())
+        .rejects.toMatchObject({ name: 'WasmTrapError', code: 'parser-crashed' });
+      await expect(sibling.worksheetRows(0).next())
+        .rejects.toMatchObject({ name: 'WasmTrapError', code: 'parser-crashed' });
+    } finally {
+      await first.close().catch(() => undefined);
+      await sibling.close().catch(() => undefined);
+      openCursor.mockRestore();
+    }
+
+    const recovered = await openXlsxWorkbook(bytes);
+    await expect(collectRows(recovered.worksheetRows(0))).resolves.toHaveLength(257);
+    await recovered.close();
+  });
 });
 
 async function collectRows(
@@ -108,7 +145,10 @@ async function collectRows(
   return rows;
 }
 
-type ArchivePrototype = { free(): void };
+type ArchivePrototype = {
+  free(): void;
+  open_sheet_cursor(sheetIndex: number, name: string): void;
+};
 
 function archivePrototype(): ArchivePrototype {
   return (xlsxWasm as unknown as { XlsxArchive: { prototype: ArchivePrototype } })

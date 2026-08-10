@@ -95,4 +95,25 @@ describe('official-site layout stability', () => {
     expect(darkHexToken('signal-ink')).toEqual([0x39, 0xc6, 0xda]);
     expect(darkHexToken('accent-2')).toEqual([0x6c, 0xc8, 0xda]);
   });
+
+  it('reserves most desktop API-table width for descriptions', () => {
+    expect(apiReference).toContain('<col class="api-option-col" />');
+    expect(apiReference).toContain('<col class="api-type-col" />');
+    expect(apiReference).toContain('<col class="api-default-col" />');
+    expect(apiReference).toContain('<col class="api-description-col" />');
+    expect(apiReference).toContain('.api-options-table { table-layout: fixed; min-width: 760px; }');
+    expect(apiReference).toContain('.api-option-col { width: 18%; }');
+    expect(apiReference).toContain('.api-type-col { width: 22%; }');
+    expect(apiReference).toContain('.api-default-col { width: 15%; }');
+    expect(apiReference).toContain('.api-description-col { width: 45%; }');
+  });
+
+  it('groups properties before event handlers in every options table', () => {
+    expect(apiReference).toContain("const isEventHandler = (name: string) => name.startsWith('on');");
+    expect(apiReference).toContain('const groupedClasses = classes.map((apiClass) => ({');
+    expect(apiReference).toContain('{c.properties.map((o) => (');
+    expect(apiReference).toContain('{c.eventHandlers.map((o) => (');
+    expect(apiReference).toContain('<th scope="rowgroup" colspan="4">Properties</th>');
+    expect(apiReference).toContain('<th scope="rowgroup" colspan="4">Event handlers</th>');
+  });
 });

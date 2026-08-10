@@ -83,10 +83,9 @@ export default defineConfig(({ command }) => ({
     // inputs and fail against Storybook's dev-server graph.
     ...(command === 'build'
       ? dts({
-          // TypeScript 7 intentionally has no stable Compiler API yet. Keep the
-          // declaration generator on the TS 6 compatibility package while the
-          // project's normal typecheck uses the native TS 7 CLI.
-          generator: 'tsc',
+          // TypeScript 7 is the repository's sole compiler. Its native tsgo
+          // declaration generator avoids the removed JavaScript Compiler API.
+          generator: 'tsgo',
           tsconfig: './tsconfig.lib.json',
         })
       : []),

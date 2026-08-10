@@ -6,7 +6,7 @@ import {
 } from '../../docx/src/conformance/generate.ts';
 import { layoutDocument } from '../../docx/src/document-layout.ts';
 import { createLayoutServices } from '../../docx/src/layout-runtime.ts';
-import { parseDocx } from './docx.ts';
+import { materializeDocxDocument } from './docx.ts';
 
 function objectRecords(value: unknown): Array<Record<string, unknown>> {
   const output: Array<Record<string, unknown>> = [];
@@ -25,7 +25,7 @@ function objectRecords(value: unknown): Array<Record<string, unknown>> {
 }
 
 describe('Node DOCX public parser projection', () => {
-  it('hides parser-private recovery runs while same-realm layout retains geometry', () => {
+  it('hides parser-private recovery runs while same-realm layout retains geometry', async () => {
     const testCase = CONFORMANCE_CASES.find(({ axes }) =>
       axes.story === 'body'
       && axes.container === 'paragraph'
@@ -34,7 +34,7 @@ describe('Node DOCX public parser projection', () => {
     const parts = new Map(generateConformanceParts(testCase));
     parts.delete('word/media/pixel.png');
 
-    const model = parseDocx(storeZip(parts));
+    const model = await materializeDocxDocument(storeZip(parts));
     const serialized = JSON.stringify(model);
     expect(objectRecords(model).some((record) =>
       record.type === 'unavailableDrawing')).toBe(false);

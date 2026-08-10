@@ -57,7 +57,9 @@ describe('PptxViewer.destroy() — find state invalidation', () => {
     const v = new PptxViewer(canvas as unknown as HTMLCanvasElement);
     const engine = new FakePptxEngine(1, 9144000, 6858000);
     engine.feedTextRuns = [run('hello world')];
-    (v as unknown as { engine: PptxPresentation }).engine = engine.asPres();
+    (v as unknown as {
+      presentationOwner: { install(presentation: PptxPresentation): void };
+    }).presentationOwner.install(engine.asPres());
 
     // A live find with a real active match…
     const matches = await v.findText('hello');

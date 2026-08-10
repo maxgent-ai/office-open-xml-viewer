@@ -1,0 +1,44 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #172333;
+  background: #e8eef5;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input { font: inherit; }
+
+.app {
+  width: min(1040px, 100%);
+  margin: 0 auto;
+  padding: 28px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.toolbar button {
+  padding: 8px 12px;
+  border: 1px solid #aab8c8;
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+
+.toolbar button:hover { border-color: #087e8f; }
+.file-input { max-width: 220px; font-size: 12px; }
+.status { margin-left: auto; font: 12px ui-monospace, monospace; }
+.error { color: #b42318; }
+
+.stage {
+  width: 100%;
+  height: min(74vh, 680px);
+  min-height: 480px;
+  overflow: hidden;
+  background: #53606d;
+}

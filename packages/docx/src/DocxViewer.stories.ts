@@ -1,8 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
-import init, { parse_docx } from './wasm/docx_parser.js';
-import wasmUrl from './wasm/docx_parser_bg.wasm?url';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
 // In the monorepo the stories build the same MathRenderer from the core engine.
 import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
@@ -136,59 +134,6 @@ function createCanvasSpinner(): HTMLElement {
   }
   return el;
 }
-
-// ---------------------------------------------------------------------------
-// Debug: raw JSON from WASM parser
-// ---------------------------------------------------------------------------
-export const DebugJson: Story = {
-  name: 'Debug – raw parse JSON',
-  args: { width: 700 },
-  render() {
-    const root = document.createElement('div');
-    root.style.cssText = 'font-family:sans-serif;padding:16px;';
-
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.docx';
-
-    const pre = document.createElement('pre');
-    pre.style.cssText =
-      'font-size:11px;line-height:1.4;max-height:600px;overflow:auto;' +
-      'background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;';
-    pre.textContent = 'Load a .docx to see the parsed JSON here.';
-
-    root.append(fileInput, pre);
-
-    // Kick off wasm init eagerly so it overlaps with the user picking a file.
-    // The change handler awaits the same promise — wasm-pack's init() is
-    // idempotent and cached, so the second await resolves instantly. This
-    // closes the race where picking a file before init resolved would silently
-    // return and leave the placeholder visible.
-    const wasmReady = init({ module_or_path: wasmUrl });
-
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files?.[0];
-      if (!file) return;
-      pre.textContent = `Parsing ${file.name}…`;
-      try {
-        await wasmReady;
-        const buf = await file.arrayBuffer();
-        // `parse_docx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>);
-        // decode + parse to inspect the model.
-        const json = parse_docx(new Uint8Array(buf));
-        const parsed = JSON.parse(new TextDecoder().decode(json));
-        // Images now carry a short `imagePath` (zip path) + `mimeType` rather
-        // than inlined base64, so the JSON is already readable as-is.
-        pre.textContent = JSON.stringify(parsed, null, 2);
-        console.log('[docx debug] full JSON:', parsed);
-      } catch (err) {
-        pre.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    });
-
-    return root;
-  },
-};
 
 // ---------------------------------------------------------------------------
 // File-upload viewer

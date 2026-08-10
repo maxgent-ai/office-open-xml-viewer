@@ -121,7 +121,7 @@ type KnownPairRule = Readonly<{
 const KNOWN_PAIR_RULES = new Map<string, KnownPairRule>([
   ['archive-entry:declared-inflated-bytes', { stage: 'container', part: 'required' }],
   ['archive-entry:actual-inflated-bytes', { stage: 'decompression', part: 'required' }],
-  ['archive:entry-count', { stage: 'container', part: 'forbidden', configurable: false }],
+  ['archive:entry-count', { stage: 'container', part: 'forbidden' }],
   ['archive:central-directory-bytes', { stage: 'container', part: 'forbidden', configurable: false }],
   ['archive:distinct-inflated-bytes', { stage: 'decompression', part: 'required' }],
   ['xml-event:bytes', { stage: 'parsing', part: 'optional', configurable: false }],

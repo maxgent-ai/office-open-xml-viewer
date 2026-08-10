@@ -35,8 +35,13 @@ describe('PptxViewer.load() — no orphaned engine on re-load (SC20)', () => {
       .mockResolvedValueOnce(first.asPres())
       .mockResolvedValueOnce(second.asPres());
 
-    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement);
+    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, { password: 'secret' });
     await v.load('one.pptx');
+    expect(loadSpy).toHaveBeenNthCalledWith(
+      1,
+      'one.pptx',
+      expect.objectContaining({ password: 'secret' }),
+    );
     expect(first.destroyed).toBe(false); // still current after first load
 
     await v.load('two.pptx');
@@ -60,9 +65,9 @@ describe('PptxViewer.load() — no orphaned engine on re-load (SC20)', () => {
     const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, { onError });
     await v.load('one.pptx');
 
-    await v.load('bad.pptx');
-    // The failed load reported via onError and left the first engine intact.
-    expect(onError).toHaveBeenCalledTimes(1);
+    await expect(v.load('bad.pptx')).rejects.toThrow('boom');
+    // The rejected reload leaves the first engine intact and is not duplicated.
+    expect(onError).not.toHaveBeenCalled();
     expect(first.destroyed).toBe(false);
     expect(v.slideCount).toBe(3);
 

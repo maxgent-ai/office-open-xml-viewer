@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderDocumentToCanvas } from './renderer.js';
+import { attachBarTabRules } from './layout/paragraph.js';
 import type { DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 
 // ECMA-376 §17.3.1.37 (tabs) + §17.15.1.25 (defaultTabStop): a paragraph's
@@ -84,6 +85,22 @@ function rowPara(
   } as unknown as DocParagraph;
 }
 
+function splitRowPara(
+  texts: string[],
+  tabStops: { pos: number; alignment: string; leader: string }[],
+): DocParagraph {
+  return {
+    ...rowPara('', { indentLeft: 0, tabStops }),
+    runs: texts.map((text) => ({
+      type: 'text', text,
+      bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 9, color: null, fontFamily: 'Times New Roman',
+      fontFamilyEastAsia: 'Times New Roman', isLink: false, background: null,
+      vertAlign: null, hyperlink: null,
+    })),
+  } as unknown as DocParagraph;
+}
+
 function doc(paras: DocParagraph[]): DocxDocumentModel {
   return {
     section: {
@@ -140,5 +157,66 @@ describe('tab-stop grid (§17.15.1.25 automatic stops, margin-relative)', () => 
     expect(w, '"W" must be drawn').toBeDefined();
     // Two automatic tabs at the 18pt interval: 18 -> 36.
     expect(w!.x).toBeCloseTo(36, 3);
+  });
+
+  it('aligns the first halfwidth period across following runs and falls back to end', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const decimal = [{ pos: 144, alignment: 'decimal', leader: 'none' }];
+    await renderDocumentToCanvas(
+      doc([
+        splitRowPara(['A', '\t', '12', '.', '34'], decimal),
+        splitRowPara(['B', '\t', '1234.56'], decimal),
+        splitRowPara(['C', '\t', '1234'], decimal),
+      ]),
+      canvas, 0, { dpr: 1, width: 300 },
+    );
+
+    const splitPeriod = fills.find((fill) => fill.text === '.');
+    const whole = fills.find((fill) => fill.text === '1234.56');
+    const integer = fills.find((fill) => fill.text === '1234');
+    expect(splitPeriod?.x).toBeCloseTo(144, 6);
+    expect((whole?.x ?? 0) + 4 * 9).toBeCloseTo(144, 6);
+    expect((integer?.x ?? 0) + 4 * 9).toBeCloseTo(144, 6);
+  });
+
+  it('uses the implicit decimal separator after the first number before a suffix', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const decimal = [{ pos: 144, alignment: 'decimal', leader: 'none' }];
+    await renderDocumentToCanvas(
+      doc([
+        splitRowPara(['D', '\t', '12', '3', 'kg'], decimal),
+      ]),
+      canvas, 0, { dpr: 1, width: 300 },
+    );
+
+    const firstDigits = fills.find((fill) => fill.text === '12');
+    const finalDigit = fills.find((fill) => fill.text === '3');
+    const suffix = fills.find((fill) => fill.text === 'kg');
+    expect(firstDigits?.x).toBeCloseTo(117, 6);
+    expect(finalDigit?.x).toBeCloseTo(135, 6);
+    expect(suffix?.x).toBeCloseTo(144, 6);
+  });
+
+  it('retains bar rules at the logical leading-edge coordinate without creating a stop', () => {
+    const line = {
+      range: { start: 0, end: 1 },
+      bounds: { xPt: 20, yPt: 30, widthPt: 10, heightPt: 18 },
+      baselinePt: 42,
+      advancePt: 18,
+      placements: [],
+    };
+    const stops = [{ pos: 72, alignment: 'bar' as const, leader: 'none' as const }];
+    const ltr = attachBarTabRules([line], 20, 300, false, stops)[0];
+    const rtl = attachBarTabRules([line], 20, 300, true, stops)[0];
+
+    expect(ltr?.barTabRules?.[0]).toMatchObject({
+      from: { xPt: 92, yPt: 30 },
+      to: { xPt: 92, yPt: 48 },
+      widthPt: 0,
+    });
+    expect(rtl?.barTabRules?.[0]).toMatchObject({
+      from: { xPt: 248, yPt: 30 },
+      to: { xPt: 248, yPt: 48 },
+    });
   });
 });

@@ -33,13 +33,12 @@ describe.skipIf(!skia || !xlsxMod || !findMod || !numfmtMod || !haveDemo)(
     type Cell = { row: number; col: number; value: unknown; styleIndex?: number };
     type Ws = { rows: { cells: Cell[] }[]; date1904?: boolean };
 
-    function buildController() {
-      const { parseXlsx, parseXlsxAllSheets } = xlsxMod as {
-        parseXlsx: (b: Uint8Array) => { styles: unknown };
-        parseXlsxAllSheets: (b: Uint8Array) => {
-          workbook: { sheets: { name: string }[] };
-          worksheets: Record<string, Ws>;
-        };
+    async function buildController() {
+      const { materializeXlsxWorkbook } = xlsxMod as {
+        materializeXlsxWorkbook: (b: Uint8Array) => Promise<{
+          workbookIndex: { workbook: { sheets: { name: string }[] }; styles: unknown };
+          worksheets: readonly Ws[];
+        }>;
       };
       const { formatCellValue } = numfmtMod as {
         formatCellValue: (cell: Cell, styles: unknown, cf: unknown, date1904?: boolean) => string;
@@ -57,15 +56,15 @@ describe.skipIf(!skia || !xlsxMod || !findMod || !numfmtMod || !haveDemo)(
       };
 
       const bytes = readFileSync(DEMO);
-      const styles = parseXlsx(bytes).styles;
-      const all = parseXlsxAllSheets(bytes);
-      const names = all.workbook.sheets.map((s) => s.name);
+      const all = await materializeXlsxWorkbook(bytes);
+      const styles = all.workbookIndex.styles;
+      const names = all.workbookIndex.workbook.sheets.map((s) => s.name);
 
       return new XlsxFindController(
         () => names.length,
         (s) => names[s] ?? '',
         (s) => {
-          const ws = all.worksheets[names[s]];
+          const ws = all.worksheets[s];
           const cells: { row: number; col: number; text: string }[] = [];
           for (const row of ws?.rows ?? []) {
             for (const cell of row.cells) {
@@ -79,7 +78,7 @@ describe.skipIf(!skia || !xlsxMod || !findMod || !numfmtMod || !haveDemo)(
     }
 
     it('finds a known cell value and reports its sheet + A1 ref', async () => {
-      const ctrl = buildController();
+      const ctrl = await buildController();
       // "Northridge" is a region name in the demo's Regional Overview table.
       const matches = await ctrl.find('northridge');
       expect(matches.length).toBeGreaterThanOrEqual(1);
@@ -93,7 +92,7 @@ describe.skipIf(!skia || !xlsxMod || !findMod || !numfmtMod || !haveDemo)(
     });
 
     it('matches the rendered display text across multiple sheets', async () => {
-      const ctrl = buildController();
+      const ctrl = await buildController();
       // "Biodiversity" appears on several sheets (Dashboard + its own sheet).
       const matches = await ctrl.find('biodiversity');
       expect(matches.length).toBeGreaterThanOrEqual(1);
@@ -105,8 +104,8 @@ describe.skipIf(!skia || !xlsxMod || !findMod || !numfmtMod || !haveDemo)(
     });
 
     it('is case-insensitive by default; caseSensitive narrows', async () => {
-      const ci = await buildController().find('FOREST');
-      const cs = await buildController().find('FOREST', { caseSensitive: true });
+      const ci = await (await buildController()).find('FOREST');
+      const cs = await (await buildController()).find('FOREST', { caseSensitive: true });
       expect(ci.length).toBeGreaterThanOrEqual(cs.length);
     });
   },

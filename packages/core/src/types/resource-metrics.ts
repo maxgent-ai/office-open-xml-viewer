@@ -7,6 +7,7 @@ import type {
 export interface OoxmlResourcePolicySnapshot {
   readonly maxArchiveEntryBytes: number | null;
   readonly maxTotalInflatedBytes: number | null;
+  readonly maxArchiveEntries: number | null;
 }
 
 export interface OoxmlResourceMetricsCheckpoint {

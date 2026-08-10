@@ -6,7 +6,7 @@
 
 A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
 
-> **Private by design.** All parsing and rendering happens locally inside the VS Code Webview via WebAssembly. **No file contents, no metadata, and no telemetry ever leave your machine.** The extension makes **no network requests** out of the box. Only two strictly opt-in features can cause any outbound request — the [MCP server](#mcp-server-for-ai-agents) (downloads a binary from GitHub) and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) (loads metric-compatible fonts from a CDN) — and both are off by default.
+> **Private by default.** Parsing and rendering happen locally inside the VS Code Webview via WebAssembly, with no extension telemetry or outbound document requests. Two strictly opt-in features can communicate outside the extension: the [MCP server](#mcp-server-for-ai-agents) exposes requested file or active-preview context to the connected AI agent, and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) loads metric-compatible fonts from a CDN. Both are off by default and subject to the connected service's privacy policy when enabled.
 
 ## Screenshots
 
@@ -21,7 +21,7 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly, plus interactive playback for embedded audio and video.
 - **Find in preview** — Press **Ctrl+F / Cmd+F** to search the complete document, workbook, or presentation. Matching is case-insensitive; Enter / Shift+Enter moves between results.
 - **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
-- **MCP server (opt-in)** — Lets AI coding agents (Copilot, Claude, etc.) read `.xlsx` / `.docx` / `.pptx` files in your workspace through dedicated tools instead of unzipping XML by hand. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
+- **MCP server (opt-in)** — Lets GitHub Copilot Chat in Agent mode read `.xlsx` / `.docx` / `.pptx` files and the active Viewer selection through dedicated tools instead of unzipping XML by hand. Claude Code and Codex can use the same binary for file tools through their own MCP configuration, but do not receive active Viewer selection. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
 
 All three formats share the same Rust parser (`wasm-pack`) for accuracy and speed.
 
@@ -54,8 +54,42 @@ The ordinary and active match backgrounds are themeable through
 Open a workspace that contains a `.xlsx` / `.docx` / `.pptx` file and the extension offers to enable an [MCP server](https://modelcontextprotocol.io/) — a tiny native binary that lets AI coding agents read those files directly. Without it, agents typically resort to running `unzip` + XML parsing in Python; with it, they call typed tools like `xlsx_get_cell_range`, `docx_extract_text`, or `pptx_get_slide_structure`.
 
 - The first time you click **Enable**, a ~5 MB prebuilt binary is downloaded from this repo's [GitHub Releases](https://github.com/yukiyokotani/office-open-xml-viewer/releases) and verified by SHA256. Subsequent workspaces reuse the cached binary.
-- If you already have `ooxml-mcp-server` on your `PATH` (e.g. installed via `cargo install --git ...`), it is used as-is — no download.
-- The server is registered with VS Code's MCP API, so any agent that supports MCP (GitHub Copilot Agent mode, Claude, etc.) picks it up automatically.
+- If you already have a same-version `ooxml-mcp-server` on your `PATH` (e.g. installed via `cargo install --git ...`), it is used as-is — no download. An older binary is not reused because it may lack tools expected by the current extension; set `ooxmlViewer.mcpServer.binaryPath` explicitly only when intentionally testing a custom build.
+- The server is registered with VS Code's MCP API for GitHub Copilot Chat in Agent mode. Claude Code and Codex use separate MCP configuration and do not pick up this dynamic definition.
+- When an OOXML preview is active, agents resolve the current document, view,
+  and bounded selection through `ooxml_get_active_context`: selected DOCX/PPTX
+  text, XLSX ranges and populated cells, or a selected chart, picture, or shape
+  in any format. Local
+  files include a trusted path for existing detailed tools; remote previews
+  expose only the document name, with no path or URI for file tools.
+
+For example, select a cell range and ask “Evaluate these numbers”, select a
+paragraph and ask “Explain this”, or click a chart, picture, or shape in any format
+and ask “Find related information for this element”. The extension does not add
+editing or save operations; the selection is read-only context for the connected
+agent.
+
+### Use the active selection in VS Code
+
+The Viewer extension supplies the MCP server and preview context; it does not
+add a chat panel or a button that runs the tool directly. Active Viewer
+selection is currently supported through GitHub Copilot Chat in Agent mode:
+
+1. Reload the VS Code window after installing or updating the Viewer extension.
+2. Run **OOXML Viewer: Install / Enable MCP Server** from the Command Palette.
+3. Run **MCP: List Servers** and confirm that `ooxml-mcp-server` is listed.
+4. Open the Office file in the OOXML Viewer and select cells or text, or click a
+   chart, picture, or shape in any format.
+5. Open the chat client in **Agent** mode, make sure the OOXML MCP tools are
+   enabled, and ask naturally: “Explain the selected cells” or “What does this
+   paragraph mean?”
+
+Do not add a separate `.vscode/mcp.json` entry when you want active preview
+selection. The extension-provided MCP definition carries a private, in-memory
+bridge to the active Viewer; a manually launched standalone server can still
+read files but reports active selection as unavailable. This includes servers
+launched from the separate MCP configurations used by the Claude Code and Codex
+VS Code extensions.
 
 **Settings:**
 - `ooxmlViewer.mcpServer.enabled`: `auto` (default — prompt only when the workspace contains OOXML files), `always`, or `never`.
@@ -84,7 +118,7 @@ Enabling **`ooxmlViewer.useGoogleFonts`** lets the preview load *metric-compatib
 
 - **Local file I/O only.** The viewer reads bytes via `vscode.workspace.fs.readFile` and never writes back — files are opened read-only.
 - **Webview is offline by default.** The Webview's Content Security Policy disallows outbound connections to any origin other than the extension itself. No analytics, no remote API. The only exception is the opt-in [Google Fonts substitution](#font-substitution-google-fonts-opt-in): enabling `ooxmlViewer.useGoogleFonts` widens the CSP to allow `fonts.googleapis.com` / `fonts.gstatic.com` and nothing else, and only in trusted workspaces.
-- **MCP server is opt-in and offline-after-install.** Until you accept the install prompt the extension makes no network requests. The download itself only contacts `github.com`, is checksum-verified, and the resulting binary parses local files only — it does not phone home. Whatever the connected AI agent does with the data is governed by that agent's own privacy settings.
+- **MCP server is opt-in and offline-after-install.** Until you accept the install prompt the extension makes no network requests. The download itself only contacts `github.com`, is checksum-verified, and the resulting binary parses local files only — it does not phone home. Active selection context is kept in extension memory and exposed to that MCP child through an authenticated IPv4-loopback bridge; it is never written to disk. Whatever the connected AI agent does with the data is governed by that agent's own privacy settings.
 - **Open source.** Source code at [github.com/yukiyokotani/office-open-xml-viewer](https://github.com/yukiyokotani/office-open-xml-viewer).
 
 VS Code's own telemetry is independent of this extension and can be controlled via the `telemetry.telemetryLevel` setting.

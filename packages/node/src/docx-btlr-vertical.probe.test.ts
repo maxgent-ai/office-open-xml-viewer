@@ -131,9 +131,9 @@ interface Run { t: string; x: number; y: number; w: number; h: number; tr: strin
 async function renderDoc(
   bytes: Uint8Array,
 ): Promise<{ runs: Run[]; pixels: Uint8ClampedArray; w: number; h: number }> {
-  const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
+  const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (b: Uint8Array) => Any };
   const { renderDocumentToCanvas } = rendererMod!;
-  const doc = parseDocx(bytes);
+  const doc = await materializeDocxDocument(bytes);
   // Single-section docs: `doc.section` is the sectPr's verbatim PHYSICAL page
   // box (the vertical swap happens inside renderDocumentToCanvas).
   const physWidthPt = doc.section.pageWidth;

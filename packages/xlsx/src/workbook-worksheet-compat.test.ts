@@ -68,7 +68,7 @@ function makeWorkbook(
   instance.sheetCache = new Map();
   instance.sheetLoads = new Map();
   instance.bridge = bridge;
-  instance.retainedSheetUsage = { rows: 0, cells: 0 };
+  instance.retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
   instance.resourceFailure = null;
   instance.workerTimeoutMs = workerTimeoutMs;
   return { workbook: instance as unknown as WorkbookProbe, request };
@@ -129,19 +129,30 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
     });
     const state = workbook as unknown as {
       parsedWorkbook: ParsedWorkbook;
-      retainedSheetUsage: { rows: number; cells: number };
+      retainedSheetUsage: {
+        rows: number;
+        cells: number;
+        ownedUtf8Bytes: number;
+        jsonBytes: number;
+      };
     };
     state.parsedWorkbook.workbook.sheets.push({ name: 'Sheet2' } as ParsedWorkbook['workbook']['sheets'][number]);
-    state.retainedSheetUsage = { rows: 199_999, cells: 499_999 };
+    state.retainedSheetUsage = {
+      rows: 199_999,
+      cells: 499_999,
+      ownedUtf8Bytes: 0,
+      jsonBytes: 0,
+    };
 
     const first = await workbook.getWorksheet(0);
     const afterFirst = request.mock.calls.length;
     expect(await workbook.getWorksheet(0)).toBe(first);
     expect(request).toHaveBeenCalledTimes(afterFirst);
-    expect(state.retainedSheetUsage).toEqual({ rows: 200_000, cells: 500_000 });
+    expect(state.retainedSheetUsage).toMatchObject({ rows: 200_000, cells: 500_000 });
+    const committedUsage = { ...state.retainedSheetUsage };
 
     await expect(workbook.getWorksheet(1)).rejects.toBeInstanceOf(OoxmlResourceLimitError);
-    expect(state.retainedSheetUsage).toEqual({ rows: 200_000, cells: 500_000 });
+    expect(state.retainedSheetUsage).toEqual(committedUsage);
     const secondSession = messages.filter(
       (message): message is PullSessionCommand<number> =>
         'kind' in message && message.sessionId === 2,

@@ -5,7 +5,9 @@ use ooxml_common::json_measurement::measure_json;
 use ooxml_common::ns::is_r_ns;
 #[cfg(test)]
 use ooxml_common::package_session::PackageLimitReporter;
-use ooxml_common::package_session::{PackageOperation, PackageSessionHandle};
+use ooxml_common::package_session::{
+    PackageOperation, PackageSessionHandle, RetainedPackageOperation,
+};
 use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::rels::relationship_part_path;
 use ooxml_common::resource::{
@@ -558,12 +560,18 @@ impl PptxArchive {
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Result<PptxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` can degrade it to a placeholder presentation
         // instead of the constructor failing with an opaque error.
-        let archive = open_zip_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes);
+        let archive = open_zip_with_policy(
+            data,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+            max_archive_entries,
+        );
         if let Err(error) = &archive {
             if error.starts_with("OOXML_RESOURCE_LIMIT:") {
                 return Err(JsValue::from_str(error));
@@ -837,7 +845,7 @@ impl PptxArchive {
             return Err(error);
         }
         let zip = self.archive.as_mut().map_err(|error| error.clone())?;
-        self.last_slide_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+        self.last_slide_usage = zip.operation.usage();
         if let Err(error) = zip.finish_operation() {
             self.cancel_slide();
             return Err(error);
@@ -859,7 +867,7 @@ impl PptxArchive {
             }
         }
         if let Ok(zip) = self.archive.as_mut() {
-            self.last_slide_usage = zip.operation.as_ref().and_then(PackageOperation::usage);
+            self.last_slide_usage = zip.operation.usage();
             zip.cancel_operation();
         }
     }
@@ -874,8 +882,7 @@ impl PptxArchive {
             .archive
             .as_ref()
             .ok()
-            .and_then(|zip| zip.operation.as_ref())
-            .and_then(PackageOperation::usage)
+            .and_then(|zip| zip.operation.usage())
             .or(self.last_slide_usage)
             .ok_or_else(|| JsValue::from_str("slide cursor usage is unavailable"))?;
         serde_json::to_vec(&usage)
@@ -910,9 +917,9 @@ impl PptxArchive {
     pub fn extract_media(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let zip = self
             .archive
-            .as_mut()
+            .as_ref()
             .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
-        zip.run_operation("extract-media", |zip| read_zip_bytes(zip, path))
+        zip.read_part_in_independent_operation("extract-media", path)
             .map_err(|e| JsValue::from_str(&e))
     }
 
@@ -923,9 +930,9 @@ impl PptxArchive {
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
         let zip = self
             .archive
-            .as_mut()
+            .as_ref()
             .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
-        zip.run_operation("extract-image", |zip| read_zip_bytes(zip, path))
+        zip.read_part_in_independent_operation("extract-image", path)
             .map_err(|e| JsValue::from_str(&e))
     }
 
@@ -975,7 +982,7 @@ impl PptxArchive {
 /// a compatibility operation while using the same bounded reader path.
 pub(crate) struct PptxZip {
     session: PackageSessionHandle,
-    operation: Option<PackageOperation>,
+    operation: RetainedPackageOperation,
 }
 
 impl PptxZip {
@@ -985,48 +992,28 @@ impl PptxZip {
     }
 
     fn begin_operation(&mut self, name: &str) -> Result<(), String> {
-        if self.operation.is_some() {
-            return Err("pptx package operation is already active".to_string());
-        }
-        self.operation = Some(self.session.begin_operation(name)?);
-        Ok(())
+        self.operation.begin(&self.session, name)
     }
 
     fn operation(&mut self) -> Result<&PackageOperation, String> {
-        if self.operation.is_none() {
-            #[cfg(test)]
-            {
-                self.operation = Some(self.session.begin_operation("pptx-parser-compat")?);
-            }
-            #[cfg(not(test))]
-            {
-                return Err("pptx package read requires an active operation".to_string());
-            }
-        }
-        Ok(self
-            .operation
-            .as_ref()
-            .expect("operation initialized above"))
+        #[cfg(test)]
+        let compatibility_name = Some("pptx-parser-compat");
+        #[cfg(not(test))]
+        let compatibility_name = None;
+        self.operation.operation(&self.session, compatibility_name)
     }
 
     #[cfg(test)]
     fn active_operation(&self) -> Result<&PackageOperation, String> {
-        self.operation
-            .as_ref()
-            .ok_or_else(|| "pptx package operation is not active".to_string())
+        self.operation.active()
     }
 
     fn finish_operation(&mut self) -> Result<(), String> {
-        let Some(mut operation) = self.operation.take() else {
-            return Ok(());
-        };
-        operation.finish()
+        self.operation.finish()
     }
 
     fn cancel_operation(&mut self) {
-        if let Some(mut operation) = self.operation.take() {
-            let _ = operation.cancel();
-        }
+        self.operation.cancel();
     }
 
     fn run_operation<T>(
@@ -1036,23 +1023,7 @@ impl PptxZip {
     ) -> Result<T, String> {
         self.begin_operation(name)?;
         let result = run(self);
-        if let Err(resource_error) = self.assert_healthy() {
-            self.cancel_operation();
-            return Err(resource_error);
-        }
-        match result {
-            Ok(value) => match self.finish_operation() {
-                Ok(()) => Ok(value),
-                Err(error) => {
-                    self.cancel_operation();
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                self.cancel_operation();
-                Err(error)
-            }
-        }
+        self.operation.settle(&self.session, result)
     }
 
     fn assert_healthy(&self) -> Result<(), String> {
@@ -1063,29 +1034,26 @@ impl PptxZip {
         self.session.usage()
     }
 
+    /// Raw package parts are independent of the retained slide cursor. Give
+    /// each read its own package operation so rendering slide N may overlap the
+    /// acknowledged pull lifecycle for slide N+1 without sharing ownership or
+    /// accounting state.
+    fn read_part_in_independent_operation(
+        &self,
+        operation_name: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.session
+            .run_operation(operation_name, |operation| operation.read_bytes(path))
+    }
+
     fn index_for_name(&self, path: &str) -> Option<()> {
         self.session.contains_entry(path).then_some(())
     }
 }
 
 fn settle_pptx_operation<T>(zip: &mut PptxZip, result: Result<T, String>) -> Result<T, String> {
-    if let Err(resource_error) = zip.assert_healthy() {
-        zip.cancel_operation();
-        return Err(resource_error);
-    }
-    match result {
-        Ok(value) => match zip.finish_operation() {
-            Ok(()) => Ok(value),
-            Err(error) => {
-                zip.cancel_operation();
-                Err(error)
-            }
-        },
-        Err(error) => {
-            zip.cancel_operation();
-            Err(error)
-        }
-    }
+    zip.operation.settle(&zip.session, result)
 }
 
 pub(crate) fn read_zip_str(
@@ -1583,6 +1551,7 @@ fn parse_slide(
         .ok_or("missing spTree")?;
 
     let mut elements = Vec::new();
+    let mut element_sources = Vec::new();
 
     // ── showMasterSp resolution (ECMA-376 §19.3.1.38 sld / §19.3.1.39
     // sldLayout, AG_ChildSlide, default true) ─────────────────────────────
@@ -1610,6 +1579,7 @@ fn parse_slide(
     // override path. `elements` is still empty here, so ordering (master
     // decorations first) is unchanged either way.
     if show_master_sp {
+        let start = elements.len();
         if eff.is_some() {
             if let Some(mxml) = master_xml {
                 note_layout_master_parse();
@@ -1628,6 +1598,9 @@ fn parse_slide(
         } else {
             elements.extend(master_decorative.iter().cloned());
         }
+        element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
+            origin: SlideElementOrigin::Master,
+        }));
     }
 
     // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
@@ -1640,6 +1613,7 @@ fn parse_slide(
             if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
                 let empty_lph = LayoutPlaceholders::default();
                 for node in lsp_tree.children().filter(|n| n.is_element()) {
+                    let start = elements.len();
                     parse_sp_tree_node(
                         node,
                         &empty_lph,
@@ -1653,6 +1627,9 @@ fn parse_slide(
                         None, // no inherited group fill at top level
                         ooxml_common::depth::DepthGuard::root(),
                     );
+                    element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
+                        origin: SlideElementOrigin::Layout,
+                    }));
                 }
             }
         }
@@ -1660,6 +1637,7 @@ fn parse_slide(
 
     // ── Slide shapes ─────────────────────────────────────────────────────
     for node in sp_tree.children().filter(|n| n.is_element()) {
+        let start = elements.len();
         parse_sp_tree_node(
             node,
             &lph,
@@ -1673,7 +1651,12 @@ fn parse_slide(
             None,
             ooxml_common::depth::DepthGuard::root(),
         );
+        element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
+            origin: SlideElementOrigin::Slide,
+        }));
     }
+
+    debug_assert_eq!(elements.len(), element_sources.len());
 
     // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
     let notes = load_notes_slide(zip, slide_dir, rels);
@@ -1686,6 +1669,7 @@ fn parse_slide(
         part_name: None,
         background,
         elements,
+        element_sources,
         notes,
         comments,
         hidden,
@@ -1705,6 +1689,7 @@ fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
         part_name: Some(part.to_string()),
         background: None,
         elements: Vec::new(),
+        element_sources: Vec::new(),
         notes: None,
         comments: Vec::new(),
         hidden: false,
@@ -1857,15 +1842,30 @@ fn open_zip_with_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<PptxZip, String> {
+    open_zip_with_policy(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        None,
+    )
+}
+
+fn open_zip_with_policy(
+    data: Vec<u8>,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+    max_archive_entries: Option<u64>,
+) -> Result<PptxZip, String> {
     PackageSessionHandle::open(
         data,
         ooxml_common::resource::OoxmlFormat::Pptx,
         max_archive_entry_bytes,
         max_total_inflated_bytes,
+        max_archive_entries,
     )
     .map(|session| PptxZip {
         session,
-        operation: None,
+        operation: RetainedPackageOperation::new("pptx"),
     })
     .map_err(ooxml_common::zip::tag_container_error)
 }
@@ -1894,6 +1894,7 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
             part_name: None,
             background: None,
             elements: Vec::new(),
+            element_sources: Vec::new(),
             notes: None,
             comments: Vec::new(),
             hidden: false,
@@ -4033,7 +4034,7 @@ mod tests {
                 let fr = fill_rect.expect("fillRect should be present");
                 assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
                 assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
-                assert!(is_zero_f64(&fr.l) && is_zero_f64(&fr.r));
+                assert!(fr.l.abs() < 1e-9 && fr.r.abs() < 1e-9);
                 assert!(tile.is_none(), "stretch fill must not carry tile");
                 assert!((alpha.expect("alpha") - 0.8).abs() < 1e-6);
             }
@@ -4138,14 +4139,14 @@ mod tests {
                 assert!((t.sx - 0.5).abs() < 1e-9, "sx={}", t.sx);
                 assert!((t.sy - 0.75).abs() < 1e-9, "sy={}", t.sy);
                 assert_eq!(t.flip, "xy");
-                assert_eq!(t.algn, "ctr");
+                assert_eq!(t.algn.as_deref(), Some("ctr"));
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
     }
 
-    /// §20.1.8.58 defaults: a bare `<a:tile/>` yields tx/ty=0, sx/sy=1.0
-    /// (100% native size), flip="none", algn="tl".
+    /// §20.1.8.58: a bare `<a:tile/>` yields the schema defaults for tx/ty,
+    /// sx/sy and flip, while omitted algn remains absent for the host policy.
     #[test]
     fn test_parse_background_blip_fill_tile_defaults() {
         let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -4168,7 +4169,7 @@ mod tests {
                 assert!((t.sx - 1.0).abs() < 1e-9);
                 assert!((t.sy - 1.0).abs() < 1e-9);
                 assert_eq!(t.flip, "none");
-                assert_eq!(t.algn, "tl");
+                assert_eq!(t.algn, None);
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
@@ -5007,6 +5008,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -5651,6 +5653,7 @@ mod tests {
                 None, // inherited_italic
                 None, // inherited_caps
                 None, // inherited_anchor
+                None, // inherited_text_insets
                 None, // inherited_alignment
                 None, // inherited_ea_ln_brk
                 None, // inherited_space_before
@@ -5717,6 +5720,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -5808,6 +5812,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -5885,6 +5890,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -6318,7 +6324,10 @@ mod tests {
     /// decorative picture (image1.png at a non-centred position) plus a
     /// solid-fill rectangle. `layout_show_master_sp` controls the layout's
     /// `showMasterSp` attribute so the test can exercise the suppression path.
-    fn build_master_sp_pptx(layout_show_master_sp: Option<bool>) -> Vec<u8> {
+    fn build_master_sp_pptx(
+        layout_show_master_sp: Option<bool>,
+        include_layout_and_slide_shapes: bool,
+    ) -> Vec<u8> {
         use zip::write::SimpleFileOptions;
 
         // 1×1 transparent PNG (smallest valid PNG).
@@ -6334,6 +6343,16 @@ mod tests {
             Some(true) => r#" showMasterSp="1""#.to_string(),
             Some(false) => r#" showMasterSp="0""#.to_string(),
             None => String::new(),
+        };
+        let layout_shape = if include_layout_and_slide_shapes {
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="20" name="LayoutBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="300000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
+        } else {
+            ""
+        };
+        let slide_shape = if include_layout_and_slide_shapes {
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="30" name="SlideShape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="500000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
+        } else {
+            ""
         };
 
         let presentation_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -6408,6 +6427,7 @@ mod tests {
   <p:cSld><p:spTree>
     <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
     <p:grpSpPr/>
+    {layout_shape}
   </p:spTree></p:cSld>
 </p:sldLayout>"#
         );
@@ -6417,15 +6437,18 @@ mod tests {
   <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
 </Relationships>"#;
 
-        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        let slide_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
   xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
   <p:cSld><p:spTree>
     <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
     <p:grpSpPr/>
+    {slide_shape}
   </p:spTree></p:cSld>
-</p:sld>"#;
+</p:sld>"#
+        );
 
         let slide_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -6468,7 +6491,7 @@ mod tests {
     /// and the slide has no elements.
     #[test]
     fn master_sptree_pic_appears_on_slide() {
-        let data = build_master_sp_pptx(None);
+        let data = build_master_sp_pptx(None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6493,13 +6516,43 @@ mod tests {
             .iter()
             .any(|e| matches!(e, SlideElement::Shape(_)));
         assert!(has_band, "master decorative shape should be rendered");
+        assert_eq!(slide.element_sources.len(), slide.elements.len());
+        assert!(
+            slide
+                .element_sources
+                .iter()
+                .all(|source| { source.origin == SlideElementOrigin::Master }),
+            "every inherited master decoration must retain master provenance"
+        );
+    }
+
+    #[test]
+    fn element_sources_distinguish_composite_paint_origins() {
+        let data = build_master_sp_pptx(None, true);
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
+        let slide = &pres.slides[0];
+
+        assert_eq!(slide.element_sources.len(), slide.elements.len());
+        assert_eq!(
+            slide
+                .element_sources
+                .iter()
+                .map(|source| source.origin)
+                .collect::<Vec<_>>(),
+            vec![
+                SlideElementOrigin::Master,
+                SlideElementOrigin::Master,
+                SlideElementOrigin::Layout,
+                SlideElementOrigin::Slide,
+            ],
+        );
     }
 
     /// §19.3.1.39: a layout with showMasterSp="0" suppresses the master's
     /// decorative shapes for slides using that layout.
     #[test]
     fn master_sptree_hidden_when_layout_show_master_sp_false() {
-        let data = build_master_sp_pptx(Some(false));
+        let data = build_master_sp_pptx(Some(false), false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6522,7 +6575,7 @@ mod tests {
     /// guards against an inverted boolean parse.
     #[test]
     fn master_sptree_shown_when_layout_show_master_sp_true() {
-        let data = build_master_sp_pptx(Some(true));
+        let data = build_master_sp_pptx(Some(true), false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
         assert!(
@@ -8671,7 +8724,7 @@ mod tests {
     fn slide_cursor_random_access_credit_replay_ack_and_fixed_oracle() {
         let data = build_three_slide_deck(usize::MAX, "");
         let legacy_data = data.clone();
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
 
         let bootstrap: serde_json::Value =
             serde_json::from_slice(&archive.presentation_bootstrap().unwrap()).unwrap();
@@ -8706,13 +8759,13 @@ mod tests {
             retained_ptr,
             "prepared bytes move; they are not cloned"
         );
-        const FIXED_SLIDE_3: &str = r#"{"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":null,"defColor":null,"defBold":null,"defItalic":null,"defFontFamily":null,"tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":null,"color":null,"fontFamily":null,"fieldType":null}]}],"defaultFontSize":null,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}]}"#;
+        const FIXED_SLIDE_3: &str = r#"{"index":2,"slideNumber":3,"partName":"ppt/slides/slide3.xml","background":null,"elements":[{"type":"shape","x":0,"y":0,"width":1000000,"height":1000000,"rotation":0.0,"flipH":false,"flipV":false,"geometry":"rect","fill":null,"stroke":null,"textBody":{"verticalAnchor":"t","paragraphs":[{"alignment":"l","marL":0,"marR":0,"indent":0,"spaceBefore":null,"spaceAfter":null,"spaceLine":null,"lvl":0,"bullet":{"type":"inherit"},"defFontSize":null,"defColor":null,"defBold":null,"defItalic":null,"defFontFamily":null,"tabStops":[],"eaLnBrk":true,"runs":[{"type":"text","text":"slide 3","bold":null,"italic":null,"underline":false,"strikethrough":false,"fontSize":null,"color":null,"fontFamily":null,"fieldType":null}]}],"defaultFontSize":null,"defaultBold":null,"defaultItalic":null,"lIns":91440,"rIns":91440,"tIns":45720,"bIns":45720,"wrap":"square","vert":"horz","autoFit":"none"},"defaultTextColor":null,"custGeom":null,"adj":null,"adj2":null,"adj3":null,"adj4":null,"adj5":null,"adj6":null,"adj7":null,"adj8":null,"shadow":null,"id":"2","name":"T"}],"elementSources":[{"origin":"slide"}]}"#;
         assert_eq!(bytes, FIXED_SLIDE_3.as_bytes());
         let legacy: serde_json::Value =
             serde_json::from_str(&parse_pptx_native(&legacy_data).unwrap()).unwrap();
         let fixed: serde_json::Value = serde_json::from_str(FIXED_SLIDE_3).unwrap();
         assert_eq!(legacy["slides"][2], fixed);
-        let mut materializing = PptxArchive::new(legacy_data, None, None).unwrap();
+        let mut materializing = PptxArchive::new(legacy_data, None, None, None).unwrap();
         materializing.parse().unwrap();
         assert!(
             materializing.presentation.is_none(),
@@ -8761,7 +8814,7 @@ mod tests {
     #[test]
     fn slide_cursor_journal_preserves_old_cache_and_removes_only_current_insertions() {
         let mut archive =
-            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None).unwrap();
+            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let shared = archive.presentation.as_mut().unwrap();
         shared
@@ -8788,7 +8841,7 @@ mod tests {
     #[test]
     fn bootstrap_projection_and_descriptor_limits_accept_exact_and_reject_plus_one() {
         let data = build_three_slide_deck(usize::MAX, "");
-        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let mut baseline = PptxArchive::new(data.clone(), None, None, None).unwrap();
         baseline.presentation_bootstrap().unwrap();
         let shared = baseline.presentation.as_ref().unwrap();
         assert!(
@@ -8813,7 +8866,7 @@ mod tests {
                 bootstrap_projection_bytes: exact_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut exact = PptxArchive::new(data.clone(), None, None, None).unwrap();
             exact.presentation_bootstrap().unwrap();
         }
         {
@@ -8822,7 +8875,7 @@ mod tests {
                 bootstrap_projection_bytes: exact_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut over = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut over = PptxArchive::new(data.clone(), None, None, None).unwrap();
             let error = over.ensure_presentation().unwrap_err();
             assert!(error.contains("pptx-bootstrap"), "{error}");
             assert!(error.contains(r#""metric":"slides""#), "{error}");
@@ -8833,7 +8886,7 @@ mod tests {
                 bootstrap_projection_bytes: exact_projection - 1,
                 ..PptxInternalLimits::default()
             });
-            let mut over = PptxArchive::new(data, None, None).unwrap();
+            let mut over = PptxArchive::new(data, None, None, None).unwrap();
             let error = over.ensure_presentation().unwrap_err();
             assert!(error.contains("pptx-bootstrap"), "{error}");
             assert!(error.contains("projected-bytes"), "{error}");
@@ -8852,7 +8905,7 @@ mod tests {
             xml.replacen("slides/slide1.xml", &long_target, 1)
         });
 
-        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let mut baseline = PptxArchive::new(data.clone(), None, None, None).unwrap();
         let exact_bytes = baseline.presentation_bootstrap().unwrap().len() as u64;
 
         BOOTSTRAP_OUTPUT_SLIDES_RETAINED.with(|count| count.set(0));
@@ -8861,7 +8914,7 @@ mod tests {
                 bootstrap_json_bytes: exact_bytes,
                 ..PptxInternalLimits::default()
             });
-            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut exact = PptxArchive::new(data.clone(), None, None, None).unwrap();
             let bytes = exact
                 .presentation_bootstrap()
                 .expect("the exact bootstrap JSON ceiling is inclusive");
@@ -8877,7 +8930,7 @@ mod tests {
             bootstrap_json_bytes: exact_bytes - 1,
             ..PptxInternalLimits::default()
         });
-        let mut over = PptxArchive::new(data, None, None).unwrap();
+        let mut over = PptxArchive::new(data, None, None, None).unwrap();
         let error = over.presentation_bootstrap_inner().unwrap_err();
         assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
         assert!(error.contains("pptx-bootstrap-json"), "{error}");
@@ -8892,7 +8945,7 @@ mod tests {
     #[test]
     fn shared_cache_accounting_is_transactional_and_projection_cap_accumulates() {
         let data = build_three_slide_deck(usize::MAX, "");
-        let mut baseline = PptxArchive::new(data.clone(), None, None).unwrap();
+        let mut baseline = PptxArchive::new(data.clone(), None, None, None).unwrap();
         baseline.presentation_bootstrap().unwrap();
         baseline
             .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -8961,7 +9014,7 @@ mod tests {
                 shared_dependency_projection_bytes: max_dependency_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut exact = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut exact = PptxArchive::new(data.clone(), None, None, None).unwrap();
             exact.presentation_bootstrap().unwrap();
             exact
                 .pull_slide_inner(0, 2, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -8988,7 +9041,7 @@ mod tests {
                 shared_dependency_projection_bytes: max_dependency_projection,
                 ..PptxInternalLimits::default()
             });
-            let mut over = PptxArchive::new(data, None, None).unwrap();
+            let mut over = PptxArchive::new(data, None, None, None).unwrap();
             over.presentation_bootstrap().unwrap();
             let error = over
                 .pull_slide_inner(0, 4, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9005,7 +9058,7 @@ mod tests {
                 ..PptxInternalLimits::default()
             });
             let mut over =
-                PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None).unwrap();
+                PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None, None).unwrap();
             over.presentation_bootstrap().unwrap();
             let error = over
                 .pull_slide_inner(0, 5, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9050,7 +9103,7 @@ mod tests {
                 materialized_slide_json_bytes: 1,
                 ..PptxInternalLimits::default()
             });
-            let mut cursor = PptxArchive::new(data, None, None).unwrap();
+            let mut cursor = PptxArchive::new(data, None, None, None).unwrap();
             cursor
                 .pull_slide_inner(0, 5, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .unwrap();
@@ -9074,7 +9127,7 @@ mod tests {
             expected,
         );
 
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         archive
             .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9107,7 +9160,7 @@ mod tests {
     #[test]
     fn slide_cursor_rejects_bad_identity_index_and_poison_before_ack() {
         let data = build_three_slide_deck(usize::MAX, "");
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         assert!(archive.pull_slide_inner(0, 0, 1, 1).is_err());
         assert!(archive.pull_slide_inner(99, 1, 1, 1024).is_err());
         assert!(archive.prepared_slide.is_none());
@@ -9188,7 +9241,7 @@ mod tests {
 
         {
             let _limit = SlideXmlLimitOverride::set(exact);
-            let mut archive = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut archive = PptxArchive::new(data.clone(), None, None, None).unwrap();
             archive.presentation_bootstrap().unwrap();
             archive
                 .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9198,7 +9251,7 @@ mod tests {
 
         let limit = exact - 1;
         let _limit = SlideXmlLimitOverride::set(limit);
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let parses_before = LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get);
         let error = archive
@@ -9237,7 +9290,7 @@ mod tests {
                 xml_dom_complexity: exact,
                 ..PptxInternalLimits::default()
             });
-            let mut archive = PptxArchive::new(data.clone(), None, None).unwrap();
+            let mut archive = PptxArchive::new(data.clone(), None, None, None).unwrap();
             archive
                 .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .expect("the exact XML DOM complexity ceiling is inclusive");
@@ -9248,7 +9301,7 @@ mod tests {
             xml_dom_complexity: exact - 1,
             ..PptxInternalLimits::default()
         });
-        let mut archive = PptxArchive::new(data, None, None).unwrap();
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let parses_before = LAYOUT_MASTER_PARSE_COUNT.with(std::cell::Cell::get);
         let error = archive
@@ -9292,7 +9345,7 @@ mod tests {
                 shared_dependency_xml_bytes: exact,
                 ..PptxInternalLimits::default()
             });
-            let mut archive = PptxArchive::new(oversized.clone(), None, None).unwrap();
+            let mut archive = PptxArchive::new(oversized.clone(), None, None, None).unwrap();
             archive
                 .pull_slide_inner(0, 3, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .expect("the exact dependency XML byte ceiling includes EOF/CRC validation");
@@ -9302,7 +9355,7 @@ mod tests {
             shared_dependency_xml_bytes: exact - 1,
             ..PptxInternalLimits::default()
         });
-        let mut archive = PptxArchive::new(oversized, None, None).unwrap();
+        let mut archive = PptxArchive::new(oversized, None, None, None).unwrap();
         archive.presentation_bootstrap().unwrap();
         let error = archive
             .pull_slide_inner(0, 4, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
@@ -9402,7 +9455,7 @@ mod tests {
         };
         let cursor_error = {
             let _limit = SlideJsonLimitOverride::set(limit);
-            let mut archive = PptxArchive::new(data, None, None).unwrap();
+            let mut archive = PptxArchive::new(data, None, None, None).unwrap();
             let error = archive
                 .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
                 .unwrap_err();
@@ -9412,7 +9465,7 @@ mod tests {
         };
         let archive_error = {
             let _limit = SlideJsonLimitOverride::set(limit);
-            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None)
+            PptxArchive::new(build_three_slide_deck(usize::MAX, ""), None, None, None)
                 .unwrap()
                 .parse_inner()
                 .unwrap_err()
@@ -9427,7 +9480,7 @@ mod tests {
 
     #[test]
     fn corrupt_container_bootstrap_and_slide_preserve_degraded_contract() {
-        let mut archive = PptxArchive::new(vec![1, 2, 3], None, None).unwrap();
+        let mut archive = PptxArchive::new(vec![1, 2, 3], None, None, None).unwrap();
         let bootstrap: serde_json::Value =
             serde_json::from_slice(&archive.presentation_bootstrap().unwrap()).unwrap();
         assert_eq!(bootstrap["slideCount"], 1);
@@ -10067,7 +10120,7 @@ mod tests {
             extract_media;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
             extract_image;
-        let _: fn(Vec<u8>, Option<u64>, Option<u64>) -> Result<PptxArchive, JsValue> =
+        let _: fn(Vec<u8>, Option<u64>, Option<u64>, Option<u64>) -> Result<PptxArchive, JsValue> =
             PptxArchive::new;
         let _: fn(&mut PptxArchive) -> Result<Vec<u8>, JsValue> = PptxArchive::parse;
         let _: fn(&mut PptxArchive, &str) -> Result<Vec<u8>, JsValue> = PptxArchive::extract_media;

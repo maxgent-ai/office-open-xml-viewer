@@ -1,4 +1,4 @@
-import type { Worksheet, Cell, CellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
+import type { Worksheet, Cell, WorksheetCellRange, CfStop, CfValue, Dxf, CfRule, CellFill, Border, DefinedName } from './types.js';
 import { evalFormulaToBool } from './formula.js';
 import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 
@@ -7,7 +7,7 @@ import { buildCellCoordinateIndex } from './renderer-coordinate-index.js';
 // ────────────────────────────────────────────────────────────────
 export interface CompiledCfRule {
   rule: CfRule;
-  sqref: CellRange[];
+  sqref: WorksheetCellRange[];
   scaleMin?: number;
   scaleMax?: number;
   scaleStops?: number[];
@@ -49,7 +49,7 @@ export interface CfResult {
   border?: Border;
 }
 
-function rangeContains(ranges: CellRange[], row: number, col: number): boolean {
+function rangeContains(ranges: WorksheetCellRange[], row: number, col: number): boolean {
   for (const r of ranges) {
     if (row >= r.top && row <= r.bottom && col >= r.left && col <= r.right) return true;
   }
@@ -68,7 +68,7 @@ function cellTextValue(cell: Cell | undefined): string | null {
   return null;
 }
 
-function collectNumericValuesInRanges(worksheet: Worksheet, ranges: CellRange[]): number[] {
+function collectNumericValuesInRanges(worksheet: Worksheet, ranges: WorksheetCellRange[]): number[] {
   const out: number[] = [];
   for (const row of worksheet.rows) {
     for (const c of row.cells) {

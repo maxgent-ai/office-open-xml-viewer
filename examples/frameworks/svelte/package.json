@@ -1,0 +1,23 @@
+{
+  "name": "@ooxml-framework-examples/svelte",
+  "private": true,
+  "type": "module",
+  "stackblitz": {
+    "startCommand": false
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@silurus/ooxml": "^0.75.3",
+    "svelte": "^5.56.8"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "svelte-check": "^4.7.4",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8"
+  }
+}

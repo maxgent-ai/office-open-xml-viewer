@@ -1,7 +1,13 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
 import { installDom, makeContainer, type FakeEl } from './viewer-destroy-test-dom.js';
-import { applySizeOverrides, type WireSizeOverrides } from './worker-protocol.js';
+import {
+  applySizeOverrides,
+  createSizeOverriddenWorksheet,
+  WorksheetViewProjectionCache,
+  type WireSizeOverrides,
+} from './worker-protocol.js';
+import { getSheetRenderCache, inheritSheetRenderCache } from './renderer.js';
 import type { Worksheet } from './types.js';
 import type { OutlineLayout } from './outline.js';
 
@@ -14,7 +20,7 @@ afterEach(() => {
  * Worker-mode model-sync for view-only size mutations.
  *
  * The render worker draws from its own worker-local parsed-sheet cache
- * (render-worker.ts parseSheetLocally), so a main-thread Worksheet mutation —
+ * (the render worker's worksheet-cursor cache), so a main-thread Worksheet mutation —
  * outline collapse/expand mapping bands to the size-0 hidden encoding, or
  * drag-to-resize (#567) — never reaches the worker on its own: the gutter and
  * overlays would update while the grid bitmap kept the file's original sizes
@@ -81,14 +87,14 @@ interface ViewerPriv {
   renderCurrentSheet(): Promise<void>;
 }
 
-/** Worker-mode viewer over the outline worksheet, with a fake workbook whose
- *  renderViewportToBitmap records every request (never resolves — only the
- *  synchronously-sent request matters here). */
+/** Worker-mode viewer over the outline worksheet, with a controllable first
+ *  bitmap so the latest-only render queue can be advanced deterministically. */
 function buildWorker() {
   installDom();
   const container = makeContainer();
   const v = new XlsxViewer(container as unknown as HTMLElement, { mode: 'worker' });
-  const renderViewportToBitmap = vi.fn(() => new Promise<never>(() => undefined));
+  const renderGate = deferred<ImageBitmap>();
+  const renderViewportToBitmap = vi.fn(() => renderGate.promise);
   const fakeWb = {
     renderViewportToBitmap,
     sheetNames: ['Outline'],
@@ -102,7 +108,17 @@ function buildWorker() {
   priv.canvasArea.clientWidth = 800;
   priv.canvasArea.clientHeight = 600;
   priv.buildOutline(priv.currentWorksheet);
-  return { v, priv, renderViewportToBitmap };
+  return { v, priv, renderViewportToBitmap, completeRender: renderGate.resolve };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: resolvePromise };
+}
+
+async function settleRenders(): Promise<void> {
+  for (let index = 0; index < 8; index++) await Promise.resolve();
 }
 
 /** The `sizeOverrides` of the most recent render request, if any. */
@@ -133,14 +149,16 @@ describe('worker-mode outline collapse/expand reaches the grid bitmap', () => {
     expect(workerSheet.rowHeights[4]).toBeUndefined(); // was 0 (hidden) pre-override
   });
 
-  it('re-collapsing sends rows back as 0-height overrides', () => {
-    const { priv, renderViewportToBitmap } = buildWorker();
+  it('re-collapsing sends rows back as 0-height overrides', async () => {
+    const { priv, renderViewportToBitmap, completeRender } = buildWorker();
     const expand = priv.rowOutline?.groups.find((g) => g.level === 3);
     priv.applyGroupToggle(expand as OutlineLayout['groups'][number], 'row');
     // The layout was rebuilt after the expand — fetch the group's new object.
     const collapse = priv.rowOutline?.groups.find((g) => g.level === 3);
     expect(collapse?.collapsed).toBe(false);
     priv.applyGroupToggle(collapse as OutlineLayout['groups'][number], 'row');
+    completeRender({ close: vi.fn() } as unknown as ImageBitmap);
+    await settleRenders();
 
     const o = lastOverrides(renderViewportToBitmap);
     expect(o?.rows).toMatchObject({ 4: 0, 5: 0, 6: 0, 7: 0 });
@@ -199,6 +217,58 @@ describe('applySizeOverrides wire semantics', () => {
     expect(JSON.stringify(ws.rowHeights)).toBe(snapshot);
     applySizeOverrides(ws, undefined); // absent overrides: no mutation
     expect(JSON.stringify(ws.rowHeights)).toBe(snapshot);
+  });
+
+  it('creates an isolated render projection for each viewer override set', () => {
+    const cached = outlineWorksheet();
+    const first = createSizeOverriddenWorksheet(cached, { rows: { 4: null }, cols: { 2: 12 } });
+    const second = createSizeOverriddenWorksheet(cached, { rows: { 4: 30 }, cols: { 2: 18 } });
+
+    expect(first.rowHeights[4]).toBeUndefined();
+    expect(first.colWidths[2]).toBe(12);
+    expect(second.rowHeights[4]).toBe(30);
+    expect(second.colWidths[2]).toBe(18);
+    expect(cached.rowHeights[4]).toBe(0);
+    expect(cached.colWidths[2]).toBeUndefined();
+  });
+
+  it('reuses viewport-independent render indexes across size projections', () => {
+    const cached = outlineWorksheet();
+    const first = createSizeOverriddenWorksheet(cached, { rows: { 4: null } });
+    const second = createSizeOverriddenWorksheet(cached, { cols: { 2: 18 } });
+
+    inheritSheetRenderCache(cached, first);
+    inheritSheetRenderCache(cached, second);
+
+    expect(getSheetRenderCache(first)).toBe(getSheetRenderCache(cached));
+    expect(getSheetRenderCache(second)).toBe(getSheetRenderCache(cached));
+  });
+
+  it('reuses one worksheet projection across viewport frames until its revision changes', () => {
+    const source = outlineWorksheet();
+    const cache = new WorksheetViewProjectionCache();
+    const first = cache.resolve(source, 0, { id: 7, revision: 1 }, { cols: { 2: 18 } });
+    const nextFrame = cache.resolve(source, 0, { id: 7, revision: 1 }, { cols: { 2: 18 } });
+    expect(first.created).toBe(true);
+    expect(nextFrame.created).toBe(false);
+    expect(nextFrame.worksheet).toBe(first.worksheet);
+
+    const resized = cache.resolve(source, 0, { id: 7, revision: 2 }, { cols: { 2: 21 } });
+    expect(resized.created).toBe(true);
+    expect(resized.worksheet).not.toBe(first.worksheet);
+    expect(resized.worksheet.colWidths[2]).toBe(21);
+
+    cache.release(7);
+    const reopened = cache.resolve(source, 0, { id: 7, revision: 2 }, { cols: { 2: 21 } });
+    expect(reopened.created).toBe(true);
+    expect(reopened.worksheet).not.toBe(resized.worksheet);
+    const lateFrame = cache.resolve(source, 0, { id: 7, revision: 2 }, { cols: { 2: 21 } });
+    expect(lateFrame.worksheet).not.toBe(reopened.worksheet);
+
+    cache.clear();
+    const nextWorkbook = cache.resolve(source, 0, { id: 7, revision: 2 }, { cols: { 2: 21 } });
+    const nextWorkbookFrame = cache.resolve(source, 0, { id: 7, revision: 2 }, { cols: { 2: 21 } });
+    expect(nextWorkbookFrame.worksheet).toBe(nextWorkbook.worksheet);
   });
 });
 

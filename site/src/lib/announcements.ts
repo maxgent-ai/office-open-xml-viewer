@@ -1,5 +1,9 @@
 export interface AnnouncementSection {
   readonly title: string;
+  /** Published packages or integration modules affected by the section. */
+  readonly modules?: readonly string[];
+  /** Product/API reason for the change, separate from migration mechanics. */
+  readonly rationale?: string;
   readonly paragraphs: readonly string[];
   readonly bullets?: readonly string[];
   readonly kind?: 'summary';
@@ -24,9 +28,323 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v077-migration-guide',
+    date: '2026-08-10',
+    label: 'Release note',
+    version: 'v0.77',
+    title: 'Migrating to v0.77',
+    summary: 'v0.77 updates selection APIs, adds selectable document elements, simplifies OOXML MCP tools, and makes errors from asynchronous Viewer methods easier to handle.',
+    audience: 'Applications that control XLSX selection, consume DOCX/XLSX/PPTX selection context, use the OOXML MCP server, or configure Viewer onError callbacks.',
+    sections: [
+      {
+        title: 'In short',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/node', 'office-open-xml-viewer (VS Code extension)', 'ooxml-mcp-server'],
+        rationale: 'v0.77 makes one coherent selection and error contract available across the browser library, VS Code extension and MCP server.',
+        kind: 'summary',
+        paragraphs: [
+          'Most applications that only load and display documents do not need source changes. Review the sections below if your code uses XLSX selection, selection context, removed option or type names, OOXML MCP tools, or Viewer onError callbacks.',
+          'v0.77 deliberately removes short-lived compatibility surfaces instead of maintaining two APIs for the same operation. Update the affected calls before upgrading; there are no temporary aliases for the removed names.',
+        ],
+        bullets: [
+          'XLSX selection: replace select(), selection and onSelectionChange with setSelection(), selectionState and onSelectionStateChange.',
+          'Selection context: check context.kind before reading text, cell-range or element details.',
+          'Element selection: opt in with enableElementSelection to select charts, pictures and shapes and show their non-editable outline.',
+          'Context menus: use onContextMenu and await getContext(); originalEvent remains available synchronously for preventDefault().',
+          'MCP: use the consolidated active-context and replacement format tools; removed subset tools are not retained as aliases.',
+          'API cleanup: remove non-functional options and exact aliases, and stop passing load-only or render-only options to APIs that cannot use them.',
+          'Errors: awaitable Viewer methods reject; onError is reserved for Viewer-managed background work with no Promise to await.',
+        ],
+      },
+      {
+        title: 'Why these changes ship together',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', 'office-open-xml-viewer (VS Code extension)', 'ooxml-mcp-server'],
+        rationale: 'The Viewer keeps the current selection, while integrations receive a size-limited copy that they can inspect without editing the document.',
+        paragraphs: [
+          'The old XLSX API described only one range and could not preserve all Excel selection details. DOCX and PPTX also lacked a consistent way to pass selected text or objects to another application. v0.77 gives all three formats explicit selection and a size-limited copy of the selected content.',
+          'The MCP and error-handling changes follow the same approach: each task now has one supported API, and asynchronous methods report errors through their returned Promise.',
+        ],
+      },
+      {
+        title: 'Replace the XLSX selection compatibility API',
+        modules: ['@silurus/ooxml/xlsx'],
+        rationale: 'The removed range-only model could not represent multiple selected areas, ActiveCell and the Shift-extension anchor as separate Excel concepts.',
+        paragraphs: [
+          'The previous select(), selection, onSelectionChange, CellRange and SelectionMode exports are removed. They could not represent Excel’s separate selected areas, ActiveCell and Shift-extension anchor without overloading one range value.',
+          'Use setSelection(), selectionState, onSelectionStateChange, XlsxSelectionState and XlsxSelectionArea. A1 strings remain accepted by setSelection() for the common single-range case.',
+          'Replace CellRange values with XlsxSelectionState, and describe each selected region with XlsxSelectionArea. If you constructed SelectionMode values directly, the old cols and all modes correspond to the new columns and sheet area kinds.',
+        ],
+        examples: [
+          {
+            title: 'Before',
+            code: `const viewer = new XlsxViewer(container, {
+  onSelectionChange(range) {
+    updateSelection(range);
+  },
+});
+
+viewer.select('B2:D6');`,
+          },
+          {
+            title: 'After',
+            code: `const viewer = new XlsxViewer(container, {
+  onSelectionStateChange(state) {
+    updateSelection(state);
+  },
+});
+
+viewer.setSelection('B2:D6');`,
+          },
+        ],
+      },
+      {
+        title: 'Check context.kind before reading selection details',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Selection details differ for text, cells and elements, so code must first check which kind it received.',
+        paragraphs: [
+          'The DocxSelectionContext and XlsxSelectionContext types can now contain selected text, XLSX cells, or an element such as a chart or picture. Check context.kind first so TypeScript knows which details are available.',
+          'The native DOCX helper readDocxSelectionContext() is renamed to readDocxTextSelectionContext() because it reads only a DOM text selection. Use DocxViewer.getSelectionContext() for the text-or-element union.',
+          'PptxElementSelectionContext is renamed to PptxElementContext. The data shape is unchanged, and the new name also fits direct point queries where no Viewer selection exists.',
+        ],
+        examples: [
+          {
+            title: 'Read a cross-format context safely',
+            code: `const context = viewer.getSelectionContext();
+
+if (context?.kind === 'text') {
+  consumeText(context.text);
+} else if (context?.kind === 'range') {
+  consumeCells(context.cells);
+} else if (context?.kind === 'element') {
+  consumeElement(context.elementType);
+}`,
+          },
+        ],
+      },
+      {
+        title: 'Use element selection and context menus explicitly',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Element selection changes what a click does and requires additional processing, so applications enable it explicitly. Context-menu target details may take a moment to obtain.',
+        paragraphs: [
+          'enableElementSelection defaults to false. When enabled, clicking a supported chart, picture or shape selects it and draws a non-editable outline.',
+          'onContextMenu provides originalEvent immediately and getContext() for the clicked content. getContext() returns a Promise; call originalEvent.preventDefault() before awaiting it when replacing the browser menu.',
+        ],
+        examples: [
+          {
+            title: 'Build a host-owned context menu',
+            code: `const viewer = new DocxViewer(canvas, {
+  enableElementSelection: true,
+  onContextMenu: async ({ originalEvent, getContext }) => {
+    originalEvent.preventDefault();
+
+    try {
+      showContextMenu(await getContext());
+    } catch (error) {
+      showContextError(error);
+    }
+  },
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Replace removed MCP subset tools',
+        modules: ['ooxml-mcp-server', 'office-open-xml-viewer (VS Code extension)'],
+        rationale: 'Keeping two tools for the same read operation makes agent routing less reliable and doubles the contract surface without adding capability.',
+        paragraphs: [
+          'Normal VS Code use does not require a manual change. Update only custom prompts, tool allowlists, or other integrations that refer to one of the removed tool names.',
+          'Use ooxml_get_active_context for the active OOXML preview and its current text, range or element context. This replaces the earlier active-selection tool name and keeps one routing entry point for all three formats.',
+        ],
+        bullets: [
+          'Replace xlsx_get_sheet_names with xlsx_parse.',
+          'Replace docx_get_paragraph with docx_get_body_element.',
+          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element.',
+          'Replace ooxml_get_active_selection with ooxml_get_active_context.',
+        ],
+      },
+      {
+        title: 'Remove unused rendering options',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/node'],
+        rationale: 'These options were accepted by TypeScript but could not affect the result of the operation on which they appeared.',
+        paragraphs: [
+          'DOCX showTrackChanges is removed from browser and Node render options because the retained paint pipeline never consulted it; true and false produced identical pixels. Tracked revisions continue to render as they do today, but the library no longer advertises a non-functional Final / No Markup switch.',
+          'Borrowed Viewer factories no longer accept load-only mode because they use the mode of the document that is already loaded. DocxDocument.collectPageRuns() now accepts only width and currentDate. PptxPresentation.presentSlide() no longer accepts skipMediaControls.',
+          'XlsxWorkbook.renderViewport() no longer accepts fetchImage or loadedImages because the workbook owns its image loading and cache.',
+        ],
+      },
+      {
+        title: 'Use public rendering option types',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx'],
+        rationale: 'Application code should use types named for public operations, not the internal messages exchanged with a worker.',
+        paragraphs: [
+          'Use XlsxRenderViewportOptions with XlsxWorkbook.renderViewport() and RenderViewportToBitmapOptions with renderViewportToBitmap(). Use CollectPageRunsOptions with DocxDocument.collectPageRuns().',
+          'WireRenderPageOptions, WireRenderViewportOptions and WireSizeOverrides were internal worker-message types and are no longer exported.',
+        ],
+      },
+      {
+        title: 'Rename exported type aliases',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'The removed aliases duplicated existing public types or used names that no longer matched the error stages they represented.',
+        paragraphs: [
+          'Replace XlsxChartSeries, SeriesDataLabels, DataLabelOverride, DataPointOverride, ErrBars and ManualLayout with ChartSeries, ChartSeriesDataLabels, ChartDataLabelOverride, ChartDataPointOverride, ChartErrBars and ChartManualLayout.',
+          'Replace OoxmlErrorSource with OoxmlErrorStage. Rename old stage values as follows: zip-part → decompression, parser → parsing, serializer → serialization and renderer → rendering.',
+        ],
+      },
+      {
+        title: 'Password-protected files now load through Viewers',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Self-loading Viewers now pass the documented password option to their document engine.',
+        paragraphs: [
+          'No source change is needed. Existing Viewer code that supplies LoadOptions.password now works as the public API already promised.',
+        ],
+      },
+      {
+        title: 'Catch every awaitable Viewer failure',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Errors from a method the application can await are reported by rejecting that Promise. onError remains for later background work.',
+        paragraphs: [
+          'Viewer load() and onError no longer form alternative completion channels. load(), navigation and every other public method that returns a Promise reject that Promise on failure, even when onError is configured. The same failure is never delivered twice.',
+          'Keep onError only when the application needs failures from Viewer-managed work that has no Promise to await, such as later virtualized rendering or embedded-media playback.',
+        ],
+        examples: [
+          {
+            title: 'Separate awaited and background failures',
+            code: `const viewer = new DocxViewer(canvas, {
+  onError(error) {
+    reportBackgroundFailure(error);
+  },
+});
+
+try {
+  await viewer.load(file);
+} catch (error) {
+  showLoadFailure(error);
+}`,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    slug: 'v076-migration-guide',
+    date: '2026-08-06',
+    label: 'Release note',
+    version: 'v0.76',
+    title: 'Migrating to v0.76',
+    summary: 'v0.76 makes shared-engine Viewer construction explicit, adds the canvas-mounted XLSX sheet Viewer, and replaces the synchronous Node parser compatibility APIs with one owned asynchronous pipeline.',
+    audience: 'Applications that share one parsed document across multiple Viewers, use the Node parser helpers, or want to render individual XLSX sheets into caller-owned canvases.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'Ordinary browser Viewer code that constructs a Viewer and awaits load(source) does not change. The migration applies to shared-engine construction and the Node parser helpers.',
+        ],
+        bullets: [
+          'Shared browser engine: replace the document, presentation or workbook constructor option with the matching named factory.',
+          'Node parser helpers: replace synchronous parse and extraction exports with an asynchronous materializer or owned session.',
+          'XLSX unit rendering: use XlsxSheetViewer for a caller-owned canvas without workbook tabs or footer controls.',
+          'Archive policy: maxArchiveEntries is now available in Browser and Node resourceLimits.',
+        ],
+      },
+      {
+        title: 'Use a named factory for a shared engine',
+        paragraphs: [
+          'The document, presentation and workbook Viewer options are removed. Load the engine once, then use fromDocument(), fromPresentation() or fromWorkbook(). The factory is synchronous because the engine is already loaded; rendering and navigation remain asynchronous.',
+          'Load-only settings such as mode, wasmUrl, resourceLimits, password and useGoogleFonts belong on the engine load call. A Viewer created by a factory cannot load another source.',
+          'This cleanup obligation is not new: the removed constructor-option injection also borrowed its engine, so viewer.destroy() intentionally left that engine open. Destroy the borrowed Viewers before destroying their caller-owned engine once.',
+        ],
+        examples: [
+          {
+            title: 'Before: constructor-option injection',
+            code: `const document = await DocxDocument.load(file);
+
+const viewer = new DocxViewer(canvas, {
+  document,
+});`,
+          },
+          {
+            title: 'After: explicit borrowed-engine factory',
+            code: `const document = await DocxDocument.load(file, {
+  mode: 'worker',
+});
+
+const viewer = DocxViewer.fromDocument(canvas, document);
+await viewer.goToPage(0);
+
+viewer.destroy();
+document.destroy();`,
+          },
+        ],
+        bullets: [
+          'DOCX: DocxViewer.fromDocument() and DocxScrollViewer.fromDocument().',
+          'PPTX: PptxViewer.fromPresentation() and PptxScrollViewer.fromPresentation().',
+          'XLSX: XlsxViewer.fromWorkbook() and XlsxSheetViewer.fromWorkbook().',
+        ],
+      },
+      {
+        title: 'Replace synchronous Node parser helpers',
+        paragraphs: [
+          'The old synchronous exports could not provide the same cancellation, limits, metrics, archive reuse and deterministic cleanup as the asynchronous parser pipeline. v0.76 removes that compatibility path instead of maintaining two subtly different implementations.',
+          'Use a materializer when the application needs a complete caller-owned model. Use an owned session for bounded sequential work and close it in finally. There is intentionally no synchronous wrapper around the new APIs.',
+          'In v0.75, parseXlsx() returned ParsedWorkbook: workbook metadata and sheet list, styles, and shared strings. It did not include worksheet cell rows; those required parseXlsxSheet() or parseXlsxAllSheets(). The v0.76 names make those three materialization scopes explicit.',
+          'session.workbookIndex is the already-parsed, read-only ParsedWorkbook property on a session returned by openXlsxWorkbook(); it is useful when the same session will also stream worksheetRows(). It is not a second direct replacement. If only the old parseXlsx() result is needed, use materializeXlsxWorkbookIndex().',
+        ],
+        bullets: [
+          'parseDocx() → await materializeDocxDocument().',
+          'parsePptx() → await materializePptxPresentation().',
+          'parseXlsx() → await materializeXlsxWorkbookIndex() for metadata/index only.',
+          'parseXlsxSheet() → await materializeXlsxWorksheet() for one caller-owned worksheet.',
+          'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost.',
+          'PPTX image and media extraction → await session.getImage() or session.getMedia() on openPptxPresentation().',
+        ],
+        examples: [
+          {
+            title: 'Owned session',
+            code: `const presentation = await openPptxPresentation(bytes);
+
+try {
+  for await (const slide of presentation.slides()) {
+    consume(slide);
+  }
+} finally {
+  await presentation.close();
+}`,
+          },
+        ],
+      },
+      {
+        title: 'Render one XLSX sheet into a canvas',
+        paragraphs: [
+          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs, footer controls or a native scrollbar.',
+          'This is an XLSX-specific Viewer boundary. A worksheet is not treated as equivalent to a DOCX page or PPTX slide; each format keeps the Viewer split that matches its own document model.',
+          'fromWorkbook() does not materialize an arbitrary first worksheet. The first goToSheet(index) materializes only the requested sheet, which keeps parse-once multi-window integrations efficient. The full XlsxViewer still starts its initial sheet display immediately.',
+        ],
+        examples: [
+          {
+            title: 'Borrow one workbook across sheet Viewers',
+            code: `const workbook = await XlsxWorkbook.load(file);
+const sheet = XlsxSheetViewer.fromWorkbook(canvas, workbook);
+
+await sheet.goToSheet(2);
+await sheet.setViewportOffset({ x: 120, y: 80 });
+
+sheet.destroy();
+workbook.destroy();`,
+          },
+        ],
+      },
+      {
+        title: 'Bound the number of archive entries',
+        paragraphs: [
+          'Browser and Node load or session options now accept resourceLimits.maxArchiveEntries. Omission uses the calibrated default, null disables that configurable limit, and the internal hard ceiling remains enforced.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v075-resource-governance',
     date: '2026-08-02',
-    label: 'Upcoming release',
+    label: 'Release note',
     version: 'v0.75',
     title: 'Resource limits, typed failures and metrics for large files',
     summary: 'v0.75 applies default inflated-package limits to every DOCX, XLSX and PPTX load, reports measured limit failures with typed errors, and exposes content-free usage metrics.',

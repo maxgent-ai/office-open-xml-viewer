@@ -17,59 +17,7 @@ use std::collections::HashMap;
 /// alpha identically (previously a pptx-local copy). Returns the fraction
 /// `amt/100000` when present and < 1.0; `None` otherwise.
 pub(crate) use ooxml_common::blip::parse_blip_alpha;
-
-/// Parse `<a:stretch><a:fillRect l t r b>` (ECMA-376 §20.1.8.58 / §20.1.8.30).
-/// Edge attributes are ST_Percentage (1000ths of a percent → /100000 gives a
-/// fraction). Negative values are valid (overscan). Returns None when there is
-/// no fillRect or all four edges are zero (= the source fills the whole box).
-pub(crate) fn parse_fill_rect(stretch: roxmltree::Node<'_, '_>) -> Option<FillRect> {
-    let fr = child(stretch, "fillRect")?;
-    let read = |name: &str| -> f64 {
-        attr(&fr, name)
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100_000.0)
-            .unwrap_or(0.0)
-    };
-    let rect = FillRect {
-        l: read("l"),
-        t: read("t"),
-        r: read("r"),
-        b: read("b"),
-    };
-    if is_zero_f64(&rect.l) && is_zero_f64(&rect.t) && is_zero_f64(&rect.r) && is_zero_f64(&rect.b)
-    {
-        None
-    } else {
-        Some(rect)
-    }
-}
-
-/// Parse `<a:tile tx ty sx sy flip algn>` (ECMA-376 §20.1.8.58 CT_TileInfoProperties).
-///
-/// - `tx` / `ty`: ST_Coordinate offset of the first tile, in EMU. Default 0.
-/// - `sx` / `sy`: ST_Percentage scale of the tile (1000ths of a percent →
-///   `/100000` gives a fraction). Absent → `1.0` (100% = native blip size).
-/// - `flip`: ST_TileFlipMode (none|x|y|xy). Default "none".
-/// - `algn`: ST_RectAlignment (tl|t|tr|l|ctr|r|bl|b|br) — the anchor corner the
-///   tile grid is registered against. The schema gives no default; PowerPoint
-///   treats an absent `algn` as "tl" (the first tile sits at the box origin
-///   plus tx/ty). We carry it verbatim and default to "tl".
-pub(crate) fn parse_tile(tile: roxmltree::Node<'_, '_>) -> TileInfo {
-    let scale = |name: &str| -> f64 {
-        attr(&tile, name)
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100_000.0)
-            .unwrap_or(1.0)
-    };
-    TileInfo {
-        tx: attr_i64(&tile, "tx").unwrap_or(0),
-        ty: attr_i64(&tile, "ty").unwrap_or(0),
-        sx: scale("sx"),
-        sy: scale("sy"),
-        flip: attr(&tile, "flip").unwrap_or_else(|| "none".to_owned()),
-        algn: attr(&tile, "algn").unwrap_or_else(|| "tl".to_owned()),
-    }
-}
+pub(crate) use ooxml_common::fill::{parse_fill_rect, parse_tile};
 
 // ===========================
 //  Color parsing

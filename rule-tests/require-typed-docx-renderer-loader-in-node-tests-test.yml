@@ -2,7 +2,7 @@ id: require-typed-docx-renderer-loader-in-node-tests
 valid:
   - |
     const docxMod = await importForTests(() => import('./docx.ts'), './docx.ts (docx WASM)')
-    const parsed = docxMod?.parseDocx(bytes)
+    const parsed = await docxMod?.materializeDocxDocument(bytes)
   - |
     const rendererMod = await loadDocxRendererForTests()
     const { layoutDocument } = rendererMod!

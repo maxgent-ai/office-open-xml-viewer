@@ -47,7 +47,7 @@ function textSeg(text: string): LayoutTextSeg {
 function lay(segs: LayoutSeg[], width: number): LayoutLine[] {
   return layoutLines(
     makeLinearCtx(), segs, width, 0, 1, [], undefined, {}, 0,
-    DEFAULT_KINSOKU_RULES, 0, 36, width, false,
+    DEFAULT_KINSOKU_RULES, undefined, 36, width, false,
   );
 }
 

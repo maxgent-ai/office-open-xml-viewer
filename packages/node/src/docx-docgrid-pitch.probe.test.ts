@@ -144,9 +144,9 @@ function sectPr(opts: { vertical?: boolean; pitchTw?: number; gridType?: string 
  *  physical y for horizontal pages, physical x (column advance, right→left
  *  page rotated to +x order) for vertical ones. */
 async function measurePitch(bytes: Uint8Array, axis: 'y' | 'x', marker = '国境'): Promise<number> {
-  const { parseDocx } = docxMod!;
+  const { materializeDocxDocument } = docxMod!;
   const { createLayoutServices, renderDocumentToCanvas } = rendererMod!;
-  const doc = parseDocx(bytes);
+  const doc = await materializeDocxDocument(bytes);
   const canvas = new Canvas(10, 10);
   const lineHeightRatio = (2257 * 1.3) / 2048;
   const localMetrics = Object.fromEntries(['Yu Mincho', '游明朝'].flatMap((family) => {

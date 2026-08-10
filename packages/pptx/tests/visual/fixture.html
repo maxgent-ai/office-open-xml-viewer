@@ -23,6 +23,11 @@
   <script type="module">
     import { PptxViewer } from '/src/index.ts';
 
+    // Text rasterization must not depend on how quickly Vite serves the
+    // fontsource CSS and weight-specific WOFF files. Regression baselines compare
+    // renderer output, so wait for the declared fixture fonts before painting.
+    await document.fonts.ready;
+
     const params   = new URLSearchParams(location.search);
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
     const pptxName = params.get('pptx') ?? 'sample';
@@ -45,9 +50,13 @@
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();
       await viewer.load(buf);
+      document.body.dataset.slideCount = String(viewer.slideCount);
       if (slideIdx !== 0) {
         await viewer.goToSlide(slideIdx);
       }
+      window.renderPptxVrtSlide = async (slideIndex) => {
+        await viewer.goToSlide(slideIndex);
+      };
       document.body.dataset.status = 'ready';
     } catch (err) {
       document.body.dataset.status = 'error';

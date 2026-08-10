@@ -1,5 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const vrtPort = Number(process.env.VRT_PORT ?? 5180);
+if (!Number.isInteger(vrtPort) || vrtPort < 1 || vrtPort > 65_535) {
+  throw new Error(`invalid VRT_PORT: ${process.env.VRT_PORT}`);
+}
+const privateCorpus = process.env.VRT_PRIVATE_CORPUS === '1';
+
 export default defineConfig({
   testDir: './tests/visual',
   testMatch: '**/*.spec.ts',
@@ -9,7 +15,7 @@ export default defineConfig({
     ['html', { outputFolder: 'tests/visual/report', open: 'never' }],
   ],
   use: {
-    baseURL: 'http://localhost:5180',
+    baseURL: `http://127.0.0.1:${vrtPort}`,
     actionTimeout: 30_000,
   },
   projects: [
@@ -43,9 +49,9 @@ export default defineConfig({
   // Start the Vite dev server separately before running tests:
   //   pnpm exec vite --port 5180
   webServer: {
-    command: 'pnpm exec vite --port 5180 --strictPort',
-    url: 'http://localhost:5180/tests/visual/fixture.html',
-    reuseExistingServer: true,
+    command: `pnpm exec vite --host 127.0.0.1 --port ${vrtPort} --strictPort`,
+    url: `http://127.0.0.1:${vrtPort}/tests/visual/fixture.html`,
+    reuseExistingServer: privateCorpus ? false : !process.env.CI,
     timeout: 120_000,
   },
 });

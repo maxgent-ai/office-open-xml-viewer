@@ -69,6 +69,12 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_type_caps: HashMap<String, String>,
     /// Vertical anchor ("t"/"ctr"/"b") per placeholder type, from layout/master bodyPr
     pub(crate) by_type_anchor: HashMap<String, String>,
+    /// Per-placeholder layout `bodyPr` text insets (`lIns`, `tIns`, `rIns`,
+    /// `bIns`). Each component stays optional so an omitted layout attribute
+    /// can continue through the theme/spec fallback instead of being replaced
+    /// by a synthetic layout default.
+    pub(crate) by_idx_text_insets: HashMap<u32, [Option<i64>; 4]>,
+    pub(crate) by_type_text_insets: HashMap<String, [Option<i64>; 4]>,
     /// Default paragraph alignment per placeholder type, from layout/master lstStyle
     pub(crate) by_type_alignment: HashMap<String, String>,
     /// Paragraph alignment per placeholder idx — layout placeholder's own algn,
@@ -346,6 +352,25 @@ impl LayoutPlaceholders {
         self.by_type_anchor.get(ph_type).cloned().or_else(|| {
             if ph_type == "body" {
                 self.by_type_anchor.get("").cloned()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Look up layout placeholder text insets. An explicit idx is strict so a
+    /// body placeholder cannot borrow another body slot's margins.
+    pub(crate) fn lookup_text_insets(
+        &self,
+        ph_type: &str,
+        ph_idx: Option<u32>,
+    ) -> Option<[Option<i64>; 4]> {
+        if let Some(i) = ph_idx {
+            return self.by_idx_text_insets.get(&i).copied();
+        }
+        self.by_type_text_insets.get(ph_type).copied().or_else(|| {
+            if ph_type == "body" {
+                self.by_type_text_insets.get("").copied()
             } else {
                 None
             }
@@ -1242,11 +1267,18 @@ pub(crate) fn parse_layout_placeholders(
             .and_then(|ls| child(ls, "spcPct"))
             .and_then(|s| attr_f64(&s, "val"));
 
-        // Layout bodyPr anchor; fall back to master anchor map
-        let layout_anchor: Option<String> = child(sp, "txBody")
-            .and_then(|tb| child(tb, "bodyPr"))
+        let layout_body_pr = child(sp, "txBody").and_then(|tb| child(tb, "bodyPr"));
+        // Layout bodyPr anchor; fall back to master anchor map.
+        let layout_anchor: Option<String> = layout_body_pr
             .and_then(|bp| attr(&bp, "anchor"))
             .map(|a| a.to_string());
+        let layout_text_insets: [Option<i64>; 4] = [
+            layout_body_pr.and_then(|bp| attr_i64(&bp, "lIns")),
+            layout_body_pr.and_then(|bp| attr_i64(&bp, "tIns")),
+            layout_body_pr.and_then(|bp| attr_i64(&bp, "rIns")),
+            layout_body_pr.and_then(|bp| attr_i64(&bp, "bIns")),
+        ];
+        let has_layout_text_inset = layout_text_insets.iter().any(Option::is_some);
 
         // Layout spPr > ln stroke (real visible border, not edit-mode indicator when solidFill is present)
         let layout_stroke: Option<Stroke> = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
@@ -1332,6 +1364,11 @@ pub(crate) fn parse_layout_placeholders(
                 if let Some(ls) = layout_line_spacing {
                     lph.by_idx_line_spacing.entry(idx).or_insert(ls);
                 }
+                if has_layout_text_inset {
+                    lph.by_idx_text_insets
+                        .entry(idx)
+                        .or_insert(layout_text_insets);
+                }
                 if let Some(ref bf) = layout_blip_fill {
                     lph.by_idx_blip_fill.entry(idx).or_insert(bf.clone());
                 }
@@ -1415,6 +1452,11 @@ pub(crate) fn parse_layout_placeholders(
                 lph.by_type_line_spacing
                     .entry(ph_type.clone())
                     .or_insert(ls);
+            }
+            if has_layout_text_inset {
+                lph.by_type_text_insets
+                    .entry(ph_type.clone())
+                    .or_insert(layout_text_insets);
             }
             // Anchor: layout bodyPr > fall back to master anchor map
             let effective_anchor = layout_anchor
@@ -1848,6 +1890,44 @@ mod placeholder_geometry_tests {
             &mut zip,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn slide_placeholder_inherits_layout_body_properties() {
+        let layout = r#"
+          <p:sp>
+            <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/>
+              <p:nvPr><p:ph type="title"/></p:nvPr>
+            </p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="12192000" cy="500000"/></a:xfrm></p:spPr>
+            <p:txBody>
+              <a:bodyPr lIns="216000" tIns="72000" rIns="216000" bIns="72000" anchor="ctr"/>
+              <a:lstStyle/><a:p/>
+            </p:txBody>
+          </p:sp>"#;
+        let placeholders = parse_layout_geometry(layout);
+        let slide = r#"
+          <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/>
+            <p:nvPr><p:ph type="title"/></p:nvPr>
+          </p:nvSpPr>
+          <p:spPr/>
+          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Title</a:t></a:r></a:p></p:txBody>"#;
+
+        let shape = parse_slide_shape(slide, &placeholders);
+        let body = shape.text_body.expect("placeholder text body");
+        assert_eq!(body.l_ins, 216_000);
+        assert_eq!(body.t_ins, 72_000);
+        assert_eq!(body.r_ins, 216_000);
+        assert_eq!(body.b_ins, 72_000);
+        assert_eq!(body.vertical_anchor, "ctr");
+
+        let local_left_override = slide.replace("<a:bodyPr/>", "<a:bodyPr lIns=\"0\"/>");
+        let shape = parse_slide_shape(&local_left_override, &placeholders);
+        let body = shape.text_body.expect("placeholder text body");
+        assert_eq!(body.l_ins, 0);
+        assert_eq!(body.t_ins, 72_000);
+        assert_eq!(body.r_ins, 216_000);
+        assert_eq!(body.b_ins, 72_000);
     }
 
     const LAYOUT_ELLIPSE: &str = r#"

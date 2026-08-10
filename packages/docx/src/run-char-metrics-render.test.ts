@@ -157,18 +157,43 @@ describe('WD4 run character metrics reach the glyph draw (measure==paint)', () =
   });
 
   it('w:position (§17.3.2.24) shifts the baseline up for a positive (raised) value', async () => {
-    const raised = await render([textRun('X', { position: 6 })]); // +6 pt raised
-    const plain = await render([textRun('X')]);
+    const raised = await render([
+      textRun('N'),
+      textRun('X', { position: 6 }),
+    ]); // +6 pt raised relative to the surrounding normal run
     const yRaised = drawOf(raised.fills, 'X').y;
-    const yPlain = drawOf(plain.fills, 'X').y;
+    const yPlain = drawOf(raised.fills, 'N').y;
     // Raised text sits HIGHER ⇒ smaller y (canvas y grows downward). 6 pt × scale 1.
     expect(yPlain - yRaised).toBeCloseTo(6, 5);
+    // The raised ink participates in the line extent, preventing a cell border
+    // or the following line from crossing the painted glyph.
+    expect(raised.runs[0].h).toBeCloseTo(FONT_PX + 6, 5);
   });
 
   it('w:position lowers the baseline for a negative value (mirrors raised)', async () => {
-    const lowered = await render([textRun('X', { position: -6 })]);
-    const plain = await render([textRun('X')]);
-    expect(drawOf(lowered.fills, 'X').y - drawOf(plain.fills, 'X').y).toBeCloseTo(6, 5);
+    const lowered = await render([
+      textRun('N'),
+      textRun('X', { position: -6 }),
+    ]);
+    expect(drawOf(lowered.fills, 'X').y - drawOf(lowered.fills, 'N').y).toBeCloseTo(6, 5);
+    expect(lowered.runs[0].h).toBeCloseTo(FONT_PX + 6, 5);
+  });
+
+  it('centers uniformly positioned runs within their enlarged line box', async () => {
+    // §17.3.2.24 defines position relative to surrounding non-positioned text.
+    // With no differently-positioned peer on the line, nothing pins the extra
+    // leading to one side, so the surplus is shared above and below the glyphs.
+    const plain = await render([textRun('N')]);
+    const uniformlyRaised = await render([
+      textRun('A', { position: 6 }),
+      textRun('B', { position: 6 }),
+    ]);
+
+    expect(uniformlyRaised.runs[0].h).toBeCloseTo(FONT_PX + 6, 5);
+    expect(drawOf(uniformlyRaised.fills, 'A').y - drawOf(plain.fills, 'N').y)
+      .toBeCloseTo(3, 5);
+    expect(drawOf(uniformlyRaised.fills, 'B').y - drawOf(plain.fills, 'N').y)
+      .toBeCloseTo(3, 5);
   });
 
   it('w:vertAlign raises superscript, lowers subscript, and leaves ordinary baselines unchanged', async () => {
@@ -189,11 +214,13 @@ describe('WD4 run character metrics reach the glyph draw (measure==paint)', () =
   });
 
   it('w:vertAlign baseline shift composes with an authored w:position', async () => {
-    const plainSuper = await render([textRun('S', { vertAlign: 'super' })]);
-    const raisedSuper = await render([textRun('S', { vertAlign: 'super', position: 4 })]);
+    const composed = await render([
+      textRun('S', { vertAlign: 'super' }),
+      textRun('P', { vertAlign: 'super', position: 4 }),
+    ]);
 
     expect(
-      drawOf(plainSuper.fills, 'S').y - drawOf(raisedSuper.fills, 'S').y,
+      drawOf(composed.fills, 'S').y - drawOf(composed.fills, 'P').y,
     ).toBeCloseTo(4, 5);
   });
 

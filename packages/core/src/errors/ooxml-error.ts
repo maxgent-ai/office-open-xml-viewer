@@ -34,20 +34,6 @@ export type OoxmlErrorStage =
   | 'worker';
 
 /**
- * @deprecated Use {@link OoxmlErrorStage}. Retained as a compatibility alias
- * for the short-lived resource-governance API that exposed this vocabulary;
- * scheduled for removal in a future breaking release.
- */
-export type OoxmlErrorSource =
-  | 'container'
-  | 'zip-part'
-  | 'parser'
-  | 'serializer'
-  | 'layout'
-  | 'renderer'
-  | 'worker';
-
-/**
  * Typed error thrown by the docx / pptx / xlsx `load()` factories for failures
  * that carry a stable, programmatic {@link OoxmlErrorCode} (e.g. a
  * password-protected or legacy-binary file detected from its container magic).

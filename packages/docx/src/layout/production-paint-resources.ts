@@ -85,6 +85,22 @@ function collectDescriptorCandidates(
     }
     if (run.type !== 'shape') return;
     const shape = run as ShapeRun & Readonly<{ textBoxContent?: BodyElement[] }>;
+    if (shape.fill?.fillType === 'image') {
+      addImage(
+        'image', source, shape.fill.imagePath, shape.fill.mimeType,
+        shape.widthPt, shape.heightPt,
+        {
+          ...(shape.fill.svgImagePath === undefined ? {} : {
+            svgImagePath: shape.fill.svgImagePath,
+          }),
+          ...(shape.fill.srcRect === undefined ? {} : {
+            srcRect: { ...shape.fill.srcRect },
+          }),
+          ...(shape.fill.alpha === undefined ? {} : { alpha: shape.fill.alpha }),
+          ...(shape.fill.duotone === undefined ? {} : { duotone: shape.fill.duotone }),
+        },
+      );
+    }
     const storyInstance = `${source.story}:${source.storyInstance}:${source.path.join('.')}`;
     if (shape.textBoxContent !== undefined) {
       visitBody(shape.textBoxContent, 'textbox', storyInstance);

@@ -29,6 +29,9 @@
     // duplicated first page (see the #993 Thai-sample regression).
     document.body.dataset.pageCount = String(doc.pageCount);
     await doc.renderPage(canvas, page, { width, dpr: 1 });
+    window.renderDocxVrtPage = async (pageIndex) => {
+      await doc.renderPage(canvas, pageIndex, { width, dpr: 1 });
+    };
     document.body.dataset.status = 'ready';
   } catch (e) {
     document.body.dataset.status = 'error';

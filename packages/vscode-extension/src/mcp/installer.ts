@@ -9,7 +9,7 @@
 //      bug fixes (e.g. v0.31.0 cached binary would silently miss the
 //      pptx_extract_text fix shipped in v0.32.0). Mismatched caches fall
 //      through to step 4 to redownload.
-//   3. Binary on PATH (e.g. installed via `cargo install` or Homebrew)
+//   3. Same-version binary on PATH (e.g. installed via `cargo install` or Homebrew)
 //   4. Download from GitHub Releases (only when the caller consents)
 //
 // The binary is intentionally NOT bundled into the extension — keeping the VSIX
@@ -48,6 +48,9 @@ export async function resolveBinaryPath(
 ): Promise<string> {
   if (opts.override && opts.override.trim()) {
     const p = opts.override.trim();
+    if (!path.isAbsolute(p)) {
+      throw new Error('Configured ooxml-mcp-server binaryPath must be an absolute path.');
+    }
     if (!fs.existsSync(p)) {
       throw new Error(`Configured ooxml-mcp-server binary not found: ${p}`);
     }
@@ -68,7 +71,7 @@ export async function resolveBinaryPath(
   const cacheExists = fs.existsSync(cached);
   if (!cacheExists) {
     const onPath = await findOnPath(binaryFileName());
-    if (onPath) return onPath;
+    if (onPath && await binaryVersionMatches(onPath, expected)) return onPath;
   }
 
   if (opts.consentToDownload) {
@@ -133,6 +136,28 @@ async function findOnPath(name: string): Promise<string | undefined> {
     return first || undefined;
   } catch {
     return undefined;
+  }
+}
+
+export function parseServerVersion(output: string): string | undefined {
+  const match = /^ooxml-mcp-server\s+(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\s*$/.exec(
+    output.trim(),
+  );
+  return match?.[1];
+}
+
+async function binaryVersionMatches(binaryPath: string, expected: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(binaryPath, ['--version'], {
+      timeout: 1_000,
+      windowsHide: true,
+    });
+    return parseServerVersion(stdout) === expected;
+  } catch {
+    // Older binaries did not implement --version and remain in stdio server
+    // mode. The timeout terminates that probe; the extension then offers its
+    // release-pinned download instead of silently omitting newer tools.
+    return false;
   }
 }
 

@@ -1,10 +1,29 @@
-import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { computeVisibleRange, EMU_PER_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type FindHighlightColors, type FindMatch, type FindMatchesOptions, type VisibleRange, type HyperlinkTarget, type OoxmlResourceMetrics, type ViewerContextMenuEvent, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import {
+  createCanvasElementOutlineLayer,
+  renderCanvasElementOutline,
+  resolveCanvasViewerMode,
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
 import { PptxFindController, type PptxMatchLocation } from './find';
 import { buildPptxHighlightLayer } from './find-highlight-layer';
+import {
+  readPptxTextSelectionContext,
+} from './selection-context';
+import type {
+  PptxElementContext,
+  PptxSelectionContext,
+  PptxSelectionContextOptions,
+} from './element-selection';
+import {
+  limitPptxElementContext,
+  MAX_ELEMENT_TEXT_CHARACTERS,
+} from './element-selection';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -28,24 +47,17 @@ const ZOOM_SETTLE_MS = 150;
  * {@link PptxScrollViewerOptions.pageShadow}.
  */
 const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+const borrowedPresentationOption = Symbol('PptxScrollViewer.borrowedPresentation');
+type InternalPptxScrollViewerOptions = PptxScrollViewerOptions & {
+  [borrowedPresentationOption]?: PptxPresentation;
+};
 
 /**
- * Options for {@link PptxScrollViewer}. Extends `RenderSlideOptions` (per-slide
- * render knobs, minus `onTextRun`) and `LoadOptions` (parse/worker knobs). See
- * design §8.2.
- *
- * `onTextRun` is omitted deliberately: the viewer drives it internally per
- * mounted slot to build the optional per-slide selection overlay (gated by
- * `enableTextSelection`), so exposing it here would let a caller's callback be
- * silently overridden.
- *
- * NOTE: `RenderSlideOptions` also carries `dim` and `skipMediaControls`. The v1
- * scroll viewer never sets `dim` or `skipMediaControls` (hidden-slide dimming is
- * a PAGER policy, not a scroll-viewer feature — design §8.2 / Delta 6). These
- * inherited fields are accepted for type-compatibility but are not part of the
- * scroll-viewer's supported API.
+ * Options for {@link PptxScrollViewer}. Only the `width` and `dpr` per-slide
+ * render knobs apply to this virtualized Viewer; it owns text-run collection,
+ * media controls, and hidden-slide dimming itself.
  */
-export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTextRun'>, LoadOptions {
+export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width' | 'dpr'>, LoadOptions {
   /** Base fit width in CSS px → base zoom scale. Default: the container's width
    *  at first non-zero layout (design §7/§11 zero-width deferral). */
   width?: number;
@@ -78,6 +90,18 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  shipped back beside the slide bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
+  /** Enable read-only slide-element selection with a non-editable outline. Default false. */
+  enableElementSelection?: boolean;
+  /** Straight-line hit tolerance in CSS pixels. Default 6. */
+  elementHitTolerance?: number;
+  /** Emits bounded, detached text or element context for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
@@ -132,13 +156,6 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *   here rather than two competing options.
    */
   pageShadow?: string | false;
-  /**
-   * Inject an already-loaded engine to share one parse across panes (design §14).
-   * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
-   * explicitly conflicting `opts.mode` throws at construction, design §11), and
-   * `destroy()` does NOT destroy this engine (the caller owns its lifecycle).
-   */
-  presentation?: PptxPresentation;
   /** Fires when the top-most visible slide changes. `topIndex` from
    *  `computeVisibleRange` (the first slide intersecting the viewport top,
    *  EXCLUDING overscan). */
@@ -150,11 +167,12 @@ export interface PptxScrollViewerOptions extends Omit<RenderSlideOptions, 'onTex
    *  `onScaleChange` to match the single-canvas viewers so all five share one
    *  notification shape. */
   onScaleChange?: (scale: number) => void;
-  /** Error callback. When set, `load()` invokes it and resolves (otherwise the
-   *  error is rethrown — shared viewer error contract). It ALSO fires for async
-   *  per-slot render failures (both main `renderSlide` and worker
-   *  `renderSlideToBitmap` rejections) and embedded-media fetch/decode/playback
-   *  failures. A failed slide is left blank rather than crashing the loop.
+  /** Receives asynchronous Viewer-managed failures that cannot be observed by
+   *  awaiting the method that started them. `load()` failures always reject and
+   *  are not also delivered here. Virtualized per-slot render failures (both
+   *  main `renderSlide` and worker `renderSlideToBitmap` rejections) and
+   *  embedded-media fetch/decode/playback failures invoke it. A failed slide is
+   *  left blank rather than crashing the loop.
    *  Without an `onError`, failures are logged via `console.error` so they are
    *  never fully silent. Stable cases can be narrowed with `OoxmlError`,
    *  `OoxmlResourceLimitError`, or `OoxmlDecodedImageLimitError` re-exported by
@@ -191,6 +209,7 @@ interface SlideSlot {
   canvas: HTMLCanvasElement;
   textLayer: HTMLDivElement | null;
   highlightLayer: HTMLDivElement;
+  elementLayer: HTMLDivElement | null;
   /** slide index this slot is currently rendering / has rendered, or -1 when free. */
   renderedSlide: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -199,14 +218,8 @@ interface SlideSlot {
    *  scales the text overlay by `newScale / renderedScale`; the debounced settle
    *  re-render then repaints at the new scale and updates this to match. */
   renderedScale: number;
-  /** worker-mode: a transient hold on a just-received ImageBitmap, set only
-   *  between receipt from the worker and its `transferFromImageBitmap` (which
-   *  consumes it, after which we null the field). Its purpose is the throw path:
-   *  if the transfer throws, `destroy()`/`_recycleSlot` can still find and
-   *  `.close()` the bitmap. Normally null once transfer completes. */
-  bitmap: ImageBitmap | null;
-  /** bitmaprenderer ctx (worker mode), grabbed once per canvas. */
-  bitmapCtx: ImageBitmapRenderingContext | null;
+  /** Shared single-canvas generation and worker-bitmap ownership primitive. */
+  dispatcher: StaticCanvasRenderDispatcher;
   /** Interactive media handle for the canvas currently mounted in this slot. */
   presentationHandle: PresentationHandle | null;
   /** Whether this slot currently owns or awaits an interactive media handle. */
@@ -222,14 +235,15 @@ interface SlideSlot {
 }
 
 export class PptxScrollViewer implements ZoomableViewer {
-  private _pres: PptxPresentation | null = null;
-  private readonly _injected: boolean;
+  private readonly _presentationOwner: TerminalResourceOwner<PptxPresentation>;
+  private get _pres(): PptxPresentation | null { return this._presentationOwner.current; }
+  private readonly _borrowed: boolean;
   private readonly _opts: PptxScrollViewerOptions;
   private readonly _container: HTMLElement;
   private readonly _wrapper: HTMLDivElement;
   private readonly _scrollHost: HTMLDivElement;
   private readonly _spacer: HTMLDivElement;
-  /** Resolved render mode. When an engine is injected the engine's own `mode`
+  /** Resolved render mode. When an engine is borrowed the engine's own `mode`
    *  is authoritative (design §11 — no silent mis-pathing / no probing); an
    *  explicitly conflicting `opts.mode` is rejected at construction. When self-
    *  loading, `opts.mode` decides and `load()` passes it to `PptxPresentation.load`. */
@@ -268,27 +282,17 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _lastRange: VisibleRange | null = null;
   private _lastTopIndex = -1;
   private _scrollListener: (() => void) | null = null;
+  private _selectionChangeListener: (() => void) | null = null;
+  private _selectionContextKey = 'null';
+  private _elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private _elementContext: PptxElementContext | null = null;
+  private _elementHitGeneration = 0;
+  private readonly _elementHitTolerance: number;
   /** Set by `destroy()`. Async render callbacks (main + worker) check it before
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
   private _destroyed = false;
-  /**
-   * Concurrent-load latch (generation token). Every self-loading `load()`
-   * increments this and captures the value; after its engine finishes loading it
-   * re-checks the live value and BAILS (destroying its own just-loaded engine) if
-   * a newer `load()` has since started. Without it, two overlapping
-   * `load(A)`/`load(B)` calls race the WASM parse / worker init, and whichever
-   * RESOLVES last wins the swap — even the stale `load(A)` resolving after
-   * `load(B)`; the loser's freshly created engine (never installed, or installed
-   * then overwritten) then leaks its worker + pinned WASM allocation. The latch
-   * composes with SC20: the check runs AFTER the new engine loads but BEFORE the
-   * field assignment, `previous?.destroy()`, and the recycle/relayout post-load
-   * work, so a superseded load never touches `this._pres` nor frees the current
-   * (newer) engine. Only the self-loading path uses it — the injected path throws
-   * up-front and never reaches here. `destroy()` also bumps it so a load in flight
-   * at teardown is treated as superseded and its engine cleaned up.
-   */
-  private _loadGen = 0;
   /** Worker mode: slide indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  slide whose first is still in flight — and lets us drop slides that scrolled
@@ -353,6 +357,25 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _findActive = false;
   private _findMeasureCtx: CanvasRenderingContext2D | null | undefined;
 
+  /**
+   * Create a Scroll Viewer that borrows an already-loaded presentation.
+   *
+   * The presentation's render mode is authoritative. The returned Viewer
+   * cannot load another source, and destroying it leaves the caller-owned
+   * presentation open. The initial virtual window is laid out during
+   * construction.
+   */
+  static fromPresentation(
+    container: HTMLElement,
+    presentation: PptxPresentation,
+    opts: Omit<PptxScrollViewerOptions, keyof LoadOptions> = {},
+  ): Omit<PptxScrollViewer, 'load'> {
+    return new PptxScrollViewer(container, {
+      ...opts,
+      [borrowedPresentationOption]: presentation,
+    } as InternalPptxScrollViewerOptions);
+  }
+
   constructor(container: HTMLElement, opts: PptxScrollViewerOptions = {}) {
     // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
     // used to the pager API (PptxViewer takes a canvas) from passing one — but
@@ -367,25 +390,22 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     this._container = container;
     this._opts = opts;
+    const elementHitTolerance = opts.elementHitTolerance ?? 6;
+    if (!Number.isFinite(elementHitTolerance) || elementHitTolerance < 0) {
+      throw new RangeError('elementHitTolerance must be a finite non-negative number.');
+    }
+    this._elementHitTolerance = elementHitTolerance;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
-    this._injected = !!opts.presentation;
-    if (this._injected) {
-      const engine = opts.presentation as PptxPresentation;
-      // Injected engine ⇒ its own mode is the fact (design §11). An EXPLICITLY
-      // conflicting opts.mode is a mis-configuration and is rejected here; an
-      // absent opts.mode is fine.
-      if (opts.mode !== undefined && opts.mode !== engine.mode) {
-        throw new Error(
-          `PptxScrollViewer: opts.mode='${opts.mode}' conflicts with the injected engine's mode='${engine.mode}'. ` +
-            'Omit opts.mode when injecting an engine — the engine owns its render mode.',
-        );
-      }
-      this._pres = engine;
-      this._mode = engine.mode;
+    const borrowedPresentation = (opts as InternalPptxScrollViewerOptions)[borrowedPresentationOption];
+    this._borrowed = borrowedPresentation !== undefined;
+    if (borrowedPresentation) {
+      this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer', borrowedPresentation, false);
+      this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, borrowedPresentation);
     } else {
-      this._mode = opts.mode ?? 'main';
+      this._presentationOwner = new TerminalResourceOwner('PptxScrollViewer');
+      this._mode = resolveCanvasViewerMode('PptxScrollViewer', opts.mode, undefined);
     }
 
     // container → wrapper → scrollHost → spacer  (design §6)
@@ -406,6 +426,21 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._scrollHost.appendChild(this._spacer);
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
+
+    if (opts.enableTextSelection && (opts.onSelectionContextChange || opts.enableElementSelection)) {
+      this._selectionChangeListener = () => this._emitSelectionContextChange();
+      this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
+    if (opts.enableElementSelection) {
+      this._elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
+      this._scrollHost.addEventListener('click', this._elementClickListener);
+    }
+    if (opts.onContextMenu) {
+      this._contextMenuListener = (event) => this._onContextMenu(event);
+      this._scrollHost.addEventListener('contextmenu', this._contextMenuListener);
+    }
 
     this._scrollListener = () => this._onScroll();
     this._scrollHost.addEventListener('scroll', this._scrollListener);
@@ -445,8 +480,8 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._resizeObserver.observe(this._container);
     }
 
-    if (this._injected) {
-      // An injected engine is already loaded, so lay out + mount the first
+    if (this._borrowed) {
+      // A borrowed engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
       this.relayout();
@@ -455,25 +490,27 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   /**
    * Load a PPTX from URL or ArrayBuffer and render the first window.
-   * UNSUPPORTED when an engine was injected via `opts.presentation` (throws) — the
-   * caller already owns the parsed engine.
+   * Unsupported on a Viewer created by {@link fromPresentation}; the caller
+   * already owns the parsed engine.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
-    if (this._injected) {
+    if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
+    if (this._borrowed) {
       throw new Error(
-        'PptxScrollViewer.load() is unsupported when an engine is injected via opts.presentation; the injected engine is already loaded.',
+        'PptxScrollViewer.load() is unsupported on a Viewer created by fromPresentation(); ' +
+          'the borrowed presentation is already loaded.',
       );
     }
-    // SC20 atomic swap: a self-loaded viewer OWNS its engine (destroy() tears it
-    // down when `!_injected`), so a re-load must not orphan the previous one.
+    // SC20 atomic swap: a self-loaded viewer OWNS its engine, so a re-load must
+    // not orphan the previous one.
     // Retain it locally and free it only after the new engine loads — a FAILED
     // re-load then keeps the current deck rendered rather than going blank. (The
-    // injected path returned above can never reach here, so this only ever frees
+    // borrowed path returned above can never reach here, so this only ever frees
     // an engine we created.)
-    const gen = ++this._loadGen;
-    const previous = this._pres;
+    let selectionInvalidated = false;
     try {
-      const pres = await PptxPresentation.load(source, {
+      const pres = await this._presentationOwner.replace(() => PptxPresentation.load(source, {
+        password: this._opts.password,
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -483,45 +520,38 @@ export class PptxScrollViewer implements ZoomableViewer {
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
         mode: this._mode,
+      }), (ownedPresentation) => {
+        // Invalidate before TerminalResourceOwner installs the candidate and
+        // destroys the prior worker, whose pending hit requests reject on close.
+        this._invalidateElementSelection(false);
+        selectionInvalidated = true;
+        this._find.invalidate();
+        this._findActive = false;
+        if (ownedPresentation) {
+          for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+          this._lastTopIndex = -1;
+        }
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap + its
-        // recycle/relayout work untouched: do NOT touch `this._pres` and do NOT
-        // destroy `previous` (irrelevant to the winner; possibly already stale).
-        pres.destroy();
-        return;
-      }
-      this._pres = pres;
-      previous?.destroy();
+      if (!pres) return;
+      if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
+      // A successful reload replaces the selection surface. Retire hit tests
+      // issued against the old engine and notify that its element focus ended.
       this._find.invalidate();
       this._findActive = false;
-      if (previous) {
-        // Re-loading over a prior deck: recycle every mounted slot (they hold the
-        // OLD deck's rendered canvases) and reset the top-index latch so the new
-        // deck's first window renders fresh. `_mountVisible` only RE-renders
-        // missing indices, so without this a still-mounted slide 0 would keep the
-        // previous deck's pixels.
-        for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
-        this._lastTopIndex = -1;
-      }
       // Lay out + mount the first window now that the engine exists (mirrors the
-      // injected-engine path in the constructor). relayout() is idempotent and
+      // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
-      this.relayout();
+      const initialRenders: Promise<void>[] = [];
+      this._relayout(initialRenders);
+      await Promise.all(initialRenders);
     } catch (err) {
-      // Superseded loads own no error reporting — the winning load (or destroy())
-      // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this._opts.onError) {
-        this._opts.onError(e);
-        return;
-      }
-      throw e;
+      if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
+      throw err instanceof Error ? err : new Error(String(err));
     }
+    // Notify only after the replacement has committed and relayout completed;
+    // consumer callback failures are not presentation/render failures.
+    if (selectionInvalidated && !this._destroyed) this._emitSelectionContextChange();
   }
 
   get slideCount(): number {
@@ -574,7 +604,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   /**
    * Recompute per-slide heights + the spacer and re-mount the visible window.
    *
-   * The viewer already calls this automatically after `load()`, an injected
+   * The viewer already calls this automatically after `load()`, a borrowed
    * engine, a container resize, and a zoom, so most integrations never need it.
    * It is public as a deliberate escape hatch: if the host mutates the layout in
    * a way the `ResizeObserver` cannot observe (e.g. a CSS change on an ancestor
@@ -584,6 +614,13 @@ export class PptxScrollViewer implements ZoomableViewer {
    * fit is deferred until width appears, design §11).
    */
   relayout(): void {
+    this._relayout();
+  }
+
+  /** Synchronous geometry/layout pass. When `initialRenders` is supplied by
+   * load(), newly-mounted slot Promises are collected for direct rejection
+   * instead of being routed through the background onError channel. */
+  private _relayout(initialRenders?: Promise<void>[]): void {
     if (!this._pres) return;
     // Establish the base fit scale on the first layout that has a positive
     // width. Zoom (T4) layers its own multiplier on top of this; here we only
@@ -618,7 +655,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     this._recomputeHeights();
     this._syncSpacer();
-    this._mountVisible();
+    this._mountVisible(initialRenders);
   }
 
   /** All slides are the same size, so heights = n × uniform. We still feed this
@@ -735,7 +772,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   }
 
   /** Mount/recycle slots for the current visible window. */
-  private _mountVisible(): void {
+  private _mountVisible(initialRenders?: Promise<void>[]): void {
     if (!this._pres || this._pres.slideCount === 0) return;
     const r = this._range();
     const mediaRange = this._opts.enableMediaPlayback ? this._mediaRange() : null;
@@ -753,7 +790,13 @@ export class PptxScrollViewer implements ZoomableViewer {
         const slot = this._acquireSlot();
         this._positionSlot(slot, i, r);
         this._slots.set(i, slot);
-        this._renderSlot(i, slot, !!mediaRange && this._rangeContains(mediaRange, i));
+        const render = this._renderSlot(
+          i,
+          slot,
+          !!mediaRange && this._rangeContains(mediaRange, i),
+          initialRenders === undefined,
+        );
+        if (initialRenders && render) initialRenders.push(render);
       } else {
         // Re-position (offsets shift after a spacer/height change).
         this._positionSlot(this._slots.get(i)!, i, r);
@@ -809,16 +852,20 @@ export class PptxScrollViewer implements ZoomableViewer {
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
       'overflow:hidden;pointer-events:none;';
     wrapper.appendChild(highlightLayer);
+    const elementLayer = createCanvasElementOutlineLayer(
+      wrapper,
+      this._opts.enableElementSelection === true,
+    );
     this._scrollHost.appendChild(wrapper);
     const slot: SlideSlot = {
       wrapper,
       canvas,
       textLayer,
       highlightLayer,
+      elementLayer,
       renderedSlide: -1,
       renderedScale: -1,
-      bitmap: null,
-      bitmapCtx: null,
+      dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
       presentationHandle: null,
       mediaInteractive: false,
       renderGeneration: 0,
@@ -837,10 +884,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.presentationHandle?.destroy();
     slot.presentationHandle = null;
     slot.mediaInteractive = false;
-    // Close any worker bitmap held by this slot (T3 sets slot.bitmap).
-    if (slot.bitmap) {
-      slot.bitmap.close();
-      slot.bitmap = null;
+    slot.dispatcher.destroy();
+    if (!this._destroyed) {
+      slot.dispatcher = new StaticCanvasRenderDispatcher(slot.canvas, this._mode === 'worker');
     }
     // Clear the per-slot text overlay so a slot sitting in the free pool holds no
     // stale spans. buildPptxTextLayer also clears on its next build, but an
@@ -856,6 +902,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     slot.highlightLayer.innerHTML = '';
     slot.highlightLayer.style.transform = '';
     slot.highlightLayer.style.transformOrigin = '';
+    renderCanvasElementOutline(slot.elementLayer, null);
     // `_previewSlot` pins an explicit CSS height while stretching the current
     // bitmap during a zoom burst. A slot can leave the visible range before the
     // debounced settle replaces that canvas, so do not carry the old-scale height
@@ -869,10 +916,12 @@ export class PptxScrollViewer implements ZoomableViewer {
   }
 
   private _positionSlot(slot: SlideSlot, i: number, r: VisibleRange): void {
+    slot.wrapper.dataset.slideIndex = String(i);
     slot.wrapper.style.top = `${r.offsets[i]}px`;
     const wpx = this._slideWidthPx();
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${this._slideHeightPx()}px`;
+    this._redrawElementOutlineForSlot(i, slot);
     // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
     // auto-centering, which cannot honour a left gutter). Centre the slide in the
     // scroll viewport, but never let its left edge cross the left gutter: when the
@@ -912,10 +961,15 @@ export class PptxScrollViewer implements ZoomableViewer {
    * with stale x/y/w/h (the pool reuses slot objects, so the identity check alone
    * can pass for an old-epoch resolution). We gate them on the captured epoch.
    */
-  private _renderSlot(i: number, slot: SlideSlot, mediaInteractive = false): void {
-    if (!this._pres) return;
+  private _renderSlot(
+    i: number,
+    slot: SlideSlot,
+    mediaInteractive = false,
+    reportErrors = true,
+  ): Promise<void> | null {
+    if (!this._pres) return null;
     // Slot-identity guard: this slot is already rendering / has rendered slide i.
-    if (slot.renderedSlide === i) return;
+    if (slot.renderedSlide === i) return null;
     slot.renderedSlide = i;
     const renderGeneration = ++slot.renderGeneration;
 
@@ -923,17 +977,27 @@ export class PptxScrollViewer implements ZoomableViewer {
     const widthPx = this._slideWidthPx();
     const epoch = this._renderEpoch;
     const scale = this._scale;
+    const dispatcher = slot.dispatcher;
+    const generation = dispatcher.begin();
 
     if (this._opts.enableMediaPlayback && mediaInteractive) {
       slot.mediaInteractive = true;
-      this._renderInteractiveSlot(i, slot, widthPx, dpr, scale, epoch);
-      return;
+      return this._renderInteractiveSlot(i, slot, widthPx, dpr, scale, epoch, reportErrors);
     }
     slot.mediaInteractive = false;
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale, renderGeneration);
-      return;
+      return this._renderSlotBitmap(
+        i,
+        slot,
+        widthPx,
+        dpr,
+        scale,
+        renderGeneration,
+        dispatcher,
+        generation,
+        reportErrors,
+      );
     }
 
     // Main mode: render straight onto the slot's canvas.
@@ -942,7 +1006,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const wantRuns = wantOverlay || this._findActive;
     const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
     const canvas = slot.canvas;
-    this._pres
+    return this._pres
       .renderSlide(canvas, i, {
         width: widthPx, // this slide's own px width → uniform px-per-EMU scale (§7)
         dpr,
@@ -955,6 +1019,7 @@ export class PptxScrollViewer implements ZoomableViewer {
         // The engine's per-canvas token already discards the superseded pixels.
         if (
           renderGeneration !== slot.renderGeneration ||
+          !dispatcher.isCurrent(generation) ||
           canvas !== slot.canvas ||
           epoch !== this._renderEpoch ||
           this._slots.get(i) !== slot ||
@@ -971,13 +1036,22 @@ export class PptxScrollViewer implements ZoomableViewer {
           // overlay 2× too large (overflowing the wrapper + inflating the scroll
           // area). Pass the CSS px directly — the uniform slide width/height at the
           // current scale (rounded).
-          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
+          buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler(), i);
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        const isCurrent =
+          renderGeneration === slot.renderGeneration &&
+          dispatcher.isCurrent(generation) &&
+          canvas === slot.canvas &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedSlide === i;
+        if (!isCurrent) return;
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
       });
   }
 
@@ -996,8 +1070,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     dpr: number,
     scale: number,
     epoch: number,
-  ): void {
-    if (!this._pres) return;
+    reportErrors = true,
+  ): Promise<void> {
+    if (!this._pres) return Promise.resolve();
     const generation = ++slot.presentationGeneration;
     slot.presentationHandle?.destroy();
     slot.presentationHandle = null;
@@ -1006,7 +1081,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const wantRuns = wantOverlay || this._findActive;
     const onTextRun = wantRuns ? (r: PptxTextRunInfo) => runs.push(r) : undefined;
 
-    this._pres
+    return this._pres
       .presentSlide(slot.canvas, i, {
         width: widthPx,
         dpr,
@@ -1035,13 +1110,16 @@ export class PptxScrollViewer implements ZoomableViewer {
             Math.round(widthPx),
             Math.round(this._slideHeightPx()),
             this._hyperlinkHandler(),
+            i,
           );
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        if (generation === slot.presentationGeneration) this._reportRenderError(err);
+        if (generation !== slot.presentationGeneration) return;
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
       });
   }
 
@@ -1121,6 +1199,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     dpr: number,
     scale: number,
     renderGeneration = ++slot.renderGeneration,
+    dispatcher = slot.dispatcher,
+    generation = dispatcher.begin(),
+    reportErrors = true,
   ): Promise<void> {
     if (this._slideInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this slide already scrolled out of the
@@ -1135,16 +1216,6 @@ export class PptxScrollViewer implements ZoomableViewer {
     // Whether this invocation actually painted its slot. When it did NOT (stale
     // epoch or moved identity), the `finally` may need to re-dispatch a live slot.
     let painted = false;
-    // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
-    // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
-    // first worker render (bitmapCtx survives recycle), so we never re-getContext
-    // a canvas that already has one. (getContext for a conflicting type returns
-    // null rather than throwing; caching the first non-null ctx avoids relying on
-    // that and skips redundant lookups.)
-    if (!slot.bitmapCtx) {
-      slot.bitmapCtx = canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
-    }
-    const bitmapCtx = slot.bitmapCtx;
     // IX6 — harvest the slide's run geometry alongside the bitmap so the
     // worker-mode selection overlay is built from the SAME data main mode uses.
     // The runs ride back beside the bitmap (one round-trip), collected only when
@@ -1165,6 +1236,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       // re-mounted onto a DIFFERENT slot. Either way: close + skip the paint.
       if (
         renderGeneration !== slot.renderGeneration ||
+        !dispatcher.isCurrent(generation) ||
         canvas !== slot.canvas ||
         epoch !== this._renderEpoch ||
         this._slots.get(i) !== slot ||
@@ -1173,24 +1245,10 @@ export class PptxScrollViewer implements ZoomableViewer {
         bmp.close();
         return;
       }
-      if (!bitmapCtx) {
-        bmp.close();
-        throw new Error('bitmaprenderer context not available');
-      }
-      // Close any prior bitmap, then hold the new one on the slot BEFORE the
-      // transfer. JS is single-threaded so nothing recycles between here and the
-      // transfer; the hold's real value is the throw path — if
-      // transferFromImageBitmap throws, `destroy()`/`_recycleSlot` can still find
-      // and close this bitmap. transferFromImageBitmap consumes the bitmap, so we
-      // null the field immediately after — leaving nothing to double-close.
-      if (slot.bitmap) slot.bitmap.close();
-      slot.bitmap = bmp;
-      canvas.width = bmp.width;
-      canvas.height = bmp.height;
-      canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
-      canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
-      bitmapCtx.transferFromImageBitmap(bmp);
-      slot.bitmap = null; // transfer consumed it
+      if (!dispatcher.commitBitmap(generation, bmp, {
+        cssWidth: Math.round(bmp.width / dpr),
+        cssHeight: Math.round(bmp.height / dpr),
+      })) return;
       // This bitmap now defines the scale the on-screen canvas lives at, so a
       // later zoom preview stretches from HERE (design §7 renderedScale).
       slot.renderedScale = scale;
@@ -1210,6 +1268,7 @@ export class PptxScrollViewer implements ZoomableViewer {
             Math.round(widthPx),
             Math.round(this._slideHeightPx()),
             this._hyperlinkHandler(),
+            i,
           );
         }
       }
@@ -1217,7 +1276,17 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
-      this._reportRenderError(err);
+      const isCurrent =
+        renderGeneration === slot.renderGeneration &&
+        dispatcher.isCurrent(generation) &&
+        canvas === slot.canvas &&
+        epoch === this._renderEpoch &&
+        this._slots.get(i) === slot &&
+        slot.renderedSlide === i;
+      if (isCurrent) {
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
+      }
     } finally {
       this._slideInFlight.delete(i);
       // Re-dispatch ONLY when this invocation went stale — a LIVE slot for slide
@@ -1246,7 +1315,8 @@ export class PptxScrollViewer implements ZoomableViewer {
         (
           live !== slot ||
           epoch !== this._renderEpoch ||
-          renderGeneration !== live.renderGeneration
+          renderGeneration !== live.renderGeneration ||
+          !dispatcher.isCurrent(generation)
         ) &&
         !this._slideInFlight.has(i) &&
         !this._destroyed &&
@@ -1321,7 +1391,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     // content under the pointer: content-y = scrollTop + anchorY (anchorY 0 ⇒ the
     // viewport top, the historical behaviour).
     const r0 = this._range();
-    const anchorContentY = this._scrollHost.scrollTop + anchorY;
+    const scrollTop0 = this._scrollHost.scrollTop;
+    const anchorContentY = scrollTop0 + anchorY;
     // Which slide does that content-y fall in? `computeVisibleRange` attributes a
     // point in the trailing gap to the slide ABOVE it, so clamp the fraction to
     // [0,1] to pin the slide rather than drift into the gap.
@@ -1363,7 +1434,14 @@ export class PptxScrollViewer implements ZoomableViewer {
     // must stay at `anchorY`, so newScrollTop = newContentY − anchorY.
     const maxTop = Math.max(0, r1.totalHeight - this._scrollHost.clientHeight);
     const newContentY = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
-    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, newContentY - anchorY));
+    // The leading desk padding is fixed viewport space: none of it scales. If the
+    // anchor is still inside that padding, keep the native scroll offset instead
+    // of snapping to slide 0's offset and hiding the margin after a programmatic
+    // zoom at scrollTop 0.
+    const reanchoredTop = anchorContentY < (r0.offsets[0] ?? 0)
+      ? scrollTop0
+      : newContentY - anchorY;
+    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, reanchoredTop));
 
     // Re-anchor horizontally for a gesture zoom. `padL` is a FIXED (non-scaling)
     // gutter, so it is subtracted from the ANCHOR only — the scroll offset stays
@@ -1602,6 +1680,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     const renderGeneration = ++slot.renderGeneration;
     spare.style.cssText = 'display:block;background:#fff;';
     this._applyPageShadow(spare);
+    const spareDispatcher = new StaticCanvasRenderDispatcher(spare, false);
+    const generation = spareDispatcher.begin();
     const runs: PptxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const wantRuns = wantOverlay || this._findActive;
@@ -1618,20 +1698,23 @@ export class PptxScrollViewer implements ZoomableViewer {
         // the spare (it is off-DOM, so GC reclaims it) and do NOT swap.
         if (
           renderGeneration !== slot.renderGeneration ||
+          !spareDispatcher.isCurrent(generation) ||
           epoch !== this._renderEpoch ||
           this._slots.get(i) !== slot ||
           slot.renderedSlide !== i
-        ) return;
+        ) {
+          spareDispatcher.destroy();
+          return;
+        }
         // Swap the freshly-painted spare in for the old (stretched-preview) canvas.
         // The old canvas was the only child that showed content; replacing it in
         // one DOM op means the screen goes from preview → crisp with no blank tick.
         const old = slot.canvas;
+        slot.dispatcher.destroy();
         slot.wrapper.insertBefore(spare, old);
         old.remove();
         slot.canvas = spare;
-        // The retired canvas held a 2d context; keep the pool clean by dropping any
-        // bitmaprenderer handle association (main-mode canvases never had one).
-        slot.bitmapCtx = null;
+        slot.dispatcher = spareDispatcher;
         slot.renderedScale = scale;
         // Rebuild the overlay at the full resolution and CLEAR the preview
         // transform (the crisp render no longer needs the scale()).
@@ -1641,14 +1724,21 @@ export class PptxScrollViewer implements ZoomableViewer {
           if (wantOverlay) {
             // buildPptxTextLayer takes NUMBERS: pass the CSS box (uniform slide
             // width/height at the current scale), NOT the retina backing store.
-            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler());
+            buildPptxTextLayer(slot.textLayer, runs, Math.round(widthPx), Math.round(this._slideHeightPx()), this._hyperlinkHandler(), i);
           }
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        if (
+          renderGeneration === slot.renderGeneration &&
+          spareDispatcher.isCurrent(generation) &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedSlide === i
+        ) this._reportRenderError(err);
+        spareDispatcher.destroy();
       });
   }
 
@@ -1698,10 +1788,11 @@ export class PptxScrollViewer implements ZoomableViewer {
 
         const oldCanvas = slot.canvas;
         const oldHandle = slot.presentationHandle;
+        slot.dispatcher.destroy();
         slot.wrapper.insertBefore(spare, oldCanvas);
         oldCanvas.remove();
         slot.canvas = spare;
-        slot.bitmapCtx = null;
+        slot.dispatcher = new StaticCanvasRenderDispatcher(spare, false);
         slot.presentationHandle = handle;
         slot.renderedScale = scale;
         oldHandle?.destroy();
@@ -1716,6 +1807,7 @@ export class PptxScrollViewer implements ZoomableViewer {
               Math.round(widthPx),
               Math.round(this._slideHeightPx()),
               this._hyperlinkHandler(),
+              i,
             );
           }
         }
@@ -2047,19 +2139,157 @@ export class PptxScrollViewer implements ZoomableViewer {
     return await this._pres.getResourceMetrics();
   }
 
+  /** Return the current mounted browser text selection with PPTX source locators. */
+  getSelectionContext(options: PptxSelectionContextOptions = {}): PptxSelectionContext | null {
+    if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
+    const text = this._opts.enableTextSelection
+      ? readPptxTextSelectionContext(
+          this._wrapper,
+          this._wrapper.ownerDocument?.getSelection?.() ?? null,
+          options,
+        )
+      : null;
+    return text ?? (this._elementContext
+      ? limitPptxElementContext(
+          this._elementContext,
+          options.maxTextCharacters,
+        )
+      : null);
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    if (context?.kind === 'text') {
+      this._elementHitGeneration++;
+      this._elementContext = null;
+      this._redrawElementOutlines();
+    }
+    const key = JSON.stringify(context);
+    if (key === this._selectionContextKey) return;
+    this._selectionContextKey = key;
+    this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementContext(context: PptxElementContext | null): void {
+    this._elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutlines();
+    this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementSelection(notify = true): void {
+    this._elementHitGeneration++;
+    this._elementContext = null;
+    this._redrawElementOutlines();
+    if (notify) this._emitSelectionContextChange();
+  }
+
+  private _redrawElementOutlines(): void {
+    for (const [slide, slot] of this._slots) this._redrawElementOutlineForSlot(slide, slot);
+  }
+
+  private _redrawElementOutlineForSlot(slideIndex: number, slot: SlideSlot): void {
+    const context = this._elementContext;
+    const presentation = this._pres;
+    if (!context || !presentation || context.slideIndex !== slideIndex) {
+      renderCanvasElementOutline(slot.elementLayer, null);
+      return;
+    }
+    renderCanvasElementOutline(slot.elementLayer, {
+      x: context.bounds.x / presentation.slideWidth,
+      y: context.bounds.y / presentation.slideHeight,
+      width: context.bounds.width / presentation.slideWidth,
+      height: context.bounds.height / presentation.slideHeight,
+      rotation: context.bounds.rotation,
+    });
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this._destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<PptxSelectionContext | null> | undefined;
+    this._opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<PptxSelectionContext | null> {
+    const presentation = this._pres;
+    if (this._destroyed || !presentation) return null;
+    if (this._opts.enableTextSelection && readPptxTextSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument?.getSelection?.() ?? null,
+    )) {
+      this._emitSelectionContextChange();
+      return this._destroyed ? null : this.getSelectionContext();
+    }
+    if (!this._opts.enableElementSelection) return this.getSelectionContext();
+    const target = event.target as Node | null;
+    const entry = [...this._slots].find(([, slot]) => target !== null && slot.wrapper.contains(target));
+    if (!entry) {
+      this._invalidateElementSelection();
+      return null;
+    }
+    const [slideIndex, slot] = entry;
+    const rect = slot.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementSelection();
+      return null;
+    }
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementSelection();
+      return null;
+    }
+    const generation = ++this._elementHitGeneration;
+    const point = {
+      x: localX / rect.width * presentation.slideWidth,
+      y: localY / rect.height * presentation.slideHeight,
+    };
+    let context: PptxElementContext | null;
+    try {
+      context = await presentation.getElementContextAt(slideIndex, point, {
+        tolerance: this._elementHitTolerance / rect.width * presentation.slideWidth,
+        maxTextCharacters: MAX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (this._destroyed || generation !== this._elementHitGeneration ||
+        presentation !== this._pres) return null;
+      throw error;
+    }
+    if (this._destroyed || generation !== this._elementHitGeneration || presentation !== this._pres) return null;
+    this._setElementContext(context);
+    return this._destroyed ? null : this.getSelectionContext();
+  }
+
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
-   * engine) destroy the engine. An injected engine is left intact — the caller
+   * engine) destroy the engine. A borrowed engine is left intact — the caller
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {
+    if (this._destroyed) return;
     this._destroyed = true;
-    // Bump the load generation so a self-loading load() still in flight is treated
-    // as superseded and its engine is cleaned up rather than installed onto a
-    // torn-down viewer.
-    this._loadGen++;
     this._find.invalidate();
     this._findActive = false;
+    if (this._selectionChangeListener) {
+      this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
+      this._selectionChangeListener = null;
+    }
+    this._elementHitGeneration++;
+    if (this._elementClickListener) {
+      this._scrollHost.removeEventListener('click', this._elementClickListener);
+      this._elementClickListener = null;
+    }
+    if (this._contextMenuListener) {
+      this._scrollHost.removeEventListener('contextmenu', this._contextMenuListener);
+      this._contextMenuListener = null;
+    }
+    this._elementContext = null;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;
@@ -2080,10 +2310,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
-    if (!this._injected) {
-      this._pres?.destroy();
-    }
-    this._pres = null;
+    this._presentationOwner.close();
     this._wrapper.remove();
   }
 }

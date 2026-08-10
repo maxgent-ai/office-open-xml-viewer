@@ -12,6 +12,10 @@ export type LiveController = {
   activate?: () => void;
 };
 
+type BorrowedPaginatedViewer =
+  | Omit<PptxScrollViewer, 'load'>
+  | Omit<DocxScrollViewer, 'load'>;
+
 const MAX_SAMPLE_WIDTH = 880;
 
 function statusLine(text: string): HTMLDivElement {
@@ -40,7 +44,7 @@ function mountPaginated(
   root.append(host, status);
 
   let destroyed = false;
-  let viewer: PptxScrollViewer | DocxScrollViewer | null = null;
+  let viewer: BorrowedPaginatedViewer | null = null;
   let engine: PptxPresentation | DocxDocument | null = null;
   let maxScale = Number.POSITIVE_INFINITY;
   let resizeObserver: ResizeObserver | null = null;
@@ -67,15 +71,14 @@ function mountPaginated(
   };
 
   if (kind === 'pptx') {
-    void PptxPresentation.load(url, { useGoogleFonts: true }).then((presentation) => {
+    PptxPresentation.load(url, { useGoogleFonts: true }).then((presentation) => {
       if (destroyed) {
         presentation.destroy();
         return;
       }
       engine = presentation;
       maxScale = MAX_SAMPLE_WIDTH / (presentation.slideWidth / EMU_PER_PX);
-      viewer = new PptxScrollViewer(host, {
-        presentation,
+      viewer = PptxScrollViewer.fromPresentation(host, presentation, {
         gap: 26,
         overscan: presentation.slideCount,
         enableTextSelection: true,
@@ -89,7 +92,7 @@ function mountPaginated(
       if (!destroyed) status.textContent = message(error);
     });
   } else {
-    void DocxDocument.load(url, { useGoogleFonts: true }).then((document) => {
+    DocxDocument.load(url, { useGoogleFonts: true }).then((document) => {
       if (destroyed) {
         document.destroy();
         return;
@@ -100,8 +103,7 @@ function mountPaginated(
         widestPage = Math.max(widestPage, document.pageSize(index).widthPt * PT_TO_PX);
       }
       maxScale = widestPage > 0 ? MAX_SAMPLE_WIDTH / widestPage : Number.POSITIVE_INFINITY;
-      viewer = new DocxScrollViewer(host, {
-        document,
+      viewer = DocxScrollViewer.fromDocument(host, document, {
         gap: 26,
         overscan: document.pageCount,
         enableTextSelection: true,
@@ -149,7 +151,7 @@ export function mountXlsx(root: HTMLElement, url: string): LiveController {
     showZoomSlider: true,
     onError: (error: Error) => host.setAttribute('data-error', error.message),
   });
-  void viewer.load(url).catch(() => { /* surfaced through onError */ });
+  viewer.load(url).catch((error) => host.setAttribute('data-error', message(error)));
 
   return {
     destroy: () => {

@@ -53,26 +53,22 @@ function buildRejecting(opts: XlsxViewerOptions = {}) {
 }
 
 /**
- * PD14: a failed sheet render must follow the same contract as the scroll viewer
- * — invoke `onError` if provided, else `console.error` (never silent), and never
- * surface as an unhandled promise rejection. Before the fix `renderCurrentSheet`
- * had no try/catch and was called `void`-style from scroll/resize handlers, so a
- * render rejection became an unhandled rejection.
+ * Directly awaited rendering rejects. Event-driven callers attach the Viewer
+ * error router at their call site, so a single failure is never delivered by
+ * both a Promise and `onError`.
  */
 describe('XlsxViewer render error contract (PD14)', () => {
-  it('routes a render failure to onError and resolves (no rejection)', async () => {
+  it('rejects a directly awaited render without also calling onError', async () => {
     const onError = vi.fn();
     const { render } = buildRejecting({ onError });
-    await expect(render()).resolves.toBeUndefined();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0]).toBeInstanceOf(Error);
-    expect((onError.mock.calls[0][0] as Error).message).toContain('boom');
+    await expect(render()).rejects.toThrow('render boom');
+    expect(onError).not.toHaveBeenCalled();
   });
 
-  it('falls back to console.error when no onError is provided (never silent)', async () => {
+  it('does not console-log an error already delivered by rejection', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { render } = buildRejecting();
-    await expect(render()).resolves.toBeUndefined();
-    expect(spy).toHaveBeenCalledTimes(1);
+    await expect(render()).rejects.toThrow('render boom');
+    expect(spy).not.toHaveBeenCalled();
   });
 });

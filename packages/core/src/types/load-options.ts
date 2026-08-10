@@ -13,6 +13,12 @@ export interface OoxmlResourceLimits {
   maxArchiveEntryBytes?: OoxmlResourceLimit;
   /** Maximum actual inflated bytes across distinct entries in the session. */
   maxTotalInflatedBytes?: OoxmlResourceLimit;
+  /**
+   * Maximum number of entries admitted from the archive central directory.
+   * `null` disables this configurable limit only; the internal implementation
+   * hard ceiling remains active.
+   */
+  maxArchiveEntries?: OoxmlResourceLimit;
 }
 
 /**

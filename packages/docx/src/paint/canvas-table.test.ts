@@ -96,6 +96,64 @@ function tableLayout(): TableLayout {
 }
 
 describe('paintTableLayout', () => {
+  it('paints a compound outer border as closed rails with joined corners', async () => {
+    const operations: unknown[] = [];
+    const ctx = {
+      globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1,
+      font: '', textAlign: 'left' as CanvasTextAlign,
+      textBaseline: 'alphabetic' as CanvasTextBaseline,
+      direction: 'ltr' as CanvasDirection, letterSpacing: '0px',
+      fontKerning: 'auto' as CanvasFontKerning,
+      save() {}, restore() {}, beginPath() {}, rect() {}, clip() {},
+      translate() {}, rotate() {}, scale() {}, transform() {}, strokeRect() {},
+      setLineDash() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, drawImage() {},
+      fillText() {},
+      fillRect(x: number, y: number, width: number, height: number) {
+        operations.push(['fillRect', x, y, width, height]);
+      },
+    } as unknown as PaintCanvas2D;
+    const source = tableLayout();
+    const common = {
+      color: '#000000', widthPt: 3, authoredStyle: 'thinThickSmallGap',
+      style: 'compound' as const, dashPatternPt: [],
+    };
+    const node = {
+      ...source,
+      rows: source.rows.map((row) => ({
+        ...row,
+        cells: row.cells.map((cell) => ({ ...cell, background: undefined, blocks: [] })),
+      })),
+      borders: [
+        { ...common, edge: 'top' as const, from: { xPt: 10, yPt: 20 }, to: { xPt: 90, yPt: 20 } },
+        { ...common, edge: 'right' as const, from: { xPt: 90, yPt: 20 }, to: { xPt: 90, yPt: 36 } },
+        { ...common, edge: 'bottom' as const, from: { xPt: 10, yPt: 36 }, to: { xPt: 90, yPt: 36 } },
+        { ...common, edge: 'left' as const, from: { xPt: 10, yPt: 20 }, to: { xPt: 10, yPt: 36 } },
+      ],
+      compoundBorderFrames: [{
+        bounds: { xPt: 10, yPt: 20, widthPt: 80, heightPt: 16 },
+        border: common,
+        segmentIndexes: [0, 1, 2, 3],
+      }],
+    } as TableLayout;
+    const { paintTableLayout } = await import('./canvas-table.js');
+
+    paintTableLayout(node, { ctx, scale: 1, dpr: 4, resources });
+
+    const fills = operations.filter((operation) =>
+      Array.isArray(operation) && operation[0] === 'fillRect') as number[][];
+    expect(fills).toHaveLength(8);
+    // The first rail's top and left rectangles share the same outer corner;
+    // independent side painting used to stop both rectangles at the centerline.
+    expect(fills[0]?.slice(1, 3)).toEqual(fills[2]?.slice(1, 3));
+    expect((fills[0]?.[1] ?? 0) + (fills[0]?.[3] ?? 0))
+      .toBe((fills[1]?.[1] ?? 0) + (fills[1]?.[3] ?? 0));
+    // ST_Border compound tokens name their rails from the cell interior toward
+    // the exterior. Word therefore paints thinThickSmallGap with the thick rail
+    // outside the table frame and the thin rail inside it.
+    expect(fills[0]?.[4]).toBeGreaterThan(fills[4]?.[4] ?? 0);
+    expect(fills[2]?.[3]).toBeGreaterThan(fills[6]?.[3] ?? 0);
+  });
+
   it.each([
     { dpr: 1, expectedWidthPt: 1 },
     { dpr: 2, expectedWidthPt: 0.5 },

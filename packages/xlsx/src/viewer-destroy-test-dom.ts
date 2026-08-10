@@ -15,6 +15,7 @@ import { vi } from 'vitest';
  */
 export interface FakeEl {
   tag: string;
+  ownerDocument: FakeDocument | null;
   textContent: string;
   title: string;
   // <input>-only fields the zoom slider sets
@@ -56,6 +57,7 @@ export interface FakeEl {
   remove(): void;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
   setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
   getAttribute(name: string): string | null;
   hasAttribute(name: string): boolean;
   contains(other: FakeEl | null): boolean;
@@ -93,10 +95,11 @@ function queryDeep(root: FakeEl, sel: string): FakeEl | null {
   return null;
 }
 
-export function makeEl(tag: string): FakeEl {
+export function makeEl(tag: string, ownerDocument: FakeDocument | null = null): FakeEl {
   const style: Record<string, string> = {};
   const el: FakeEl = {
     tag,
+    ownerDocument,
     textContent: '',
     title: '',
     type: '',
@@ -183,6 +186,9 @@ export function makeEl(tag: string): FakeEl {
     setAttribute(name: string, value: string) {
       this._attrs.set(name, value);
     },
+    removeAttribute(name: string) {
+      this._attrs.delete(name);
+    },
     getAttribute(name: string) {
       return this._attrs.has(name) ? (this._attrs.get(name) as string) : null;
     },
@@ -230,6 +236,21 @@ export function makeEl(tag: string): FakeEl {
       for (const fn of this._listeners.get(type) ?? []) fn(event);
     },
   };
+  // Mirror the DOM: clearing textContent removes all descendants. Overlay hosts
+  // rely on this when switching between cell and element selection frames.
+  let text = '';
+  Object.defineProperty(el, 'textContent', {
+    get() { return text; },
+    set(value: string) {
+      text = value;
+      if (value === '') {
+        for (const child of el.children) child.parentElement = null;
+        el.children.length = 0;
+      }
+    },
+    enumerable: true,
+    configurable: true,
+  });
   Object.defineProperty(el, 'parentNode', {
     get() {
       return el.parentElement;
@@ -288,7 +309,16 @@ export function makeEl(tag: string): FakeEl {
 /** A recording `document.head` that supports appendChild + querySelector. */
 export interface FakeDocument {
   head: FakeEl;
+  defaultView: {
+    devicePixelRatio: number;
+    ResizeObserver: new (callback: () => void) => {
+      observe(): void;
+      disconnect(): void;
+      unobserve(): void;
+    };
+  };
   createElement(tag: string): FakeEl;
+  createElementNS(namespace: string, tag: string): FakeEl;
   addEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   removeEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   dispatchEvent(type: string, event?: unknown): void;
@@ -299,12 +329,20 @@ export interface FakeDocument {
 /** Install a recording document + window + ResizeObserver into globals.
  *  Returns the fake document so a test can query head / dispatch keydown.
  *  Call `vi.unstubAllGlobals()` in afterEach. */
-export function installDom(): FakeDocument {
-  const head = makeEl('head');
+export function makeDocument(devicePixelRatio = 1): FakeDocument {
   const docListeners = new Map<string, Array<(e: unknown) => void>>();
-  const doc: FakeDocument = {
-    head,
-    createElement: (t: string) => makeEl(t),
+  const ResizeObserver = class {
+    constructor(_callback: () => void) {}
+    observe(): void {}
+    disconnect(): void {}
+    unobserve(): void {}
+  };
+  let doc: FakeDocument;
+  doc = {
+    head: null as unknown as FakeEl,
+    defaultView: { devicePixelRatio, ResizeObserver },
+    createElement: (t: string) => makeEl(t, doc),
+    createElementNS: (_namespace: string, t: string) => makeEl(t, doc),
     addEventListener(type: string, fn: (e: unknown) => void) {
       const arr = docListeners.get(type) ?? [];
       arr.push(fn);
@@ -321,22 +359,25 @@ export function installDom(): FakeDocument {
       return docListeners.get(type)?.length ?? 0;
     },
   };
+  doc.head = makeEl('head', doc);
+  return doc;
+}
+
+export function installDom(): FakeDocument {
+  const doc = makeDocument();
   vi.stubGlobal('document', doc);
-  vi.stubGlobal('window', { devicePixelRatio: 1 });
-  vi.stubGlobal(
-    'ResizeObserver',
-    class {
-      observe(): void {}
-      disconnect(): void {}
-      unobserve(): void {}
-    },
-  );
+  vi.stubGlobal('window', doc.defaultView);
+  vi.stubGlobal('ResizeObserver', doc.defaultView.ResizeObserver);
   return doc;
 }
 
 /** A container FakeEl with nonzero client size so width defaults resolve. */
-export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
-  const c = makeEl('div');
+export function makeContainer(
+  clientWidth = 800,
+  clientHeight = 600,
+  ownerDocument: FakeDocument | null = null,
+): FakeEl {
+  const c = makeEl('div', ownerDocument);
   c.clientWidth = clientWidth;
   c.clientHeight = clientHeight;
   return c;

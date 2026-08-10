@@ -22,6 +22,40 @@
 use crate::color::{parse_color_node, ThemeResolver, TintMode};
 use roxmltree::Node;
 
+/// ECMA-376 §20.1.8.30 `a:fillRect` (CT_RelativeRect) destination insets.
+/// Values are signed fractions; negative values extend beyond the fill box.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FillRect {
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub l: f64,
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub t: f64,
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub r: f64,
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub b: f64,
+}
+
+/// ECMA-376 §20.1.8.58 `a:tile` placement facts shared by every DrawingML host.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TileInfo {
+    pub tx: i64,
+    pub ty: i64,
+    pub sx: f64,
+    pub sy: f64,
+    pub flip: String,
+    /// Optional CT_TileInfoProperties registration point. The schema declares
+    /// no default; hosts may apply their own compatibility policy when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algn: Option<String>,
+}
+
+fn is_zero(value: &f64) -> bool {
+    value.abs() < 1e-9
+}
+
 /// One `<a:gs>` gradient stop: a position in `[0, 1]` and its resolved hex
 /// color (6-char opaque, or 8-char RRGGBBAA when an alpha transform applies).
 /// The serde shape (`{"position":..,"color":".."}`) matches the pptx parser's
@@ -77,6 +111,53 @@ fn attr(node: Node<'_, '_>, local: &str) -> Option<String> {
 fn child<'a, 'i>(node: Node<'a, 'i>, local: &str) -> Option<Node<'a, 'i>> {
     node.children()
         .find(|n| n.is_element() && n.tag_name().name() == local)
+}
+
+/// Parse `<a:stretch><a:fillRect>` into signed fractional destination insets.
+/// Missing edges are zero; an all-zero rectangle is equivalent to absence.
+pub fn parse_fill_rect(stretch: Node<'_, '_>) -> Option<FillRect> {
+    let fill_rect = child(stretch, "fillRect")?;
+    let read = |name: &str| {
+        attr(fill_rect, name)
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    let rect = FillRect {
+        l: read("l"),
+        t: read("t"),
+        r: read("r"),
+        b: read("b"),
+    };
+    if is_zero(&rect.l) && is_zero(&rect.t) && is_zero(&rect.r) && is_zero(&rect.b) {
+        None
+    } else {
+        Some(rect)
+    }
+}
+
+/// Parse `<a:tile>` preserving optional host policy: zero offsets, 100% scale,
+/// and no mirroring are schema defaults, while `algn` has no normative default.
+pub fn parse_tile(tile: Node<'_, '_>) -> TileInfo {
+    let coordinate = |name: &str| {
+        attr(tile, name)
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
+    let scale = |name: &str| {
+        attr(tile, name)
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 100_000.0)
+            .unwrap_or(1.0)
+    };
+    TileInfo {
+        tx: coordinate("tx"),
+        ty: coordinate("ty"),
+        sx: scale("sx"),
+        sy: scale("sy"),
+        flip: attr(tile, "flip").unwrap_or_else(|| "none".to_owned()),
+        algn: attr(tile, "algn"),
+    }
 }
 
 /// Parse a located `<a:gradFill>` node (ECMA-376 §20.1.8.33). Reads the
@@ -176,6 +257,36 @@ mod tests {
 
     fn doc(xml: &str) -> Document<'_> {
         Document::parse(xml).unwrap()
+    }
+
+    #[test]
+    fn blip_placement_parsers_preserve_signed_insets_and_tile_defaults() {
+        let stretch_xml =
+            format!(r#"<a:stretch xmlns:a="{NS}"><a:fillRect l="10000" r="-7574"/></a:stretch>"#,);
+        let stretch = doc(&stretch_xml);
+        assert_eq!(
+            parse_fill_rect(stretch.root_element()),
+            Some(FillRect {
+                l: 0.1,
+                t: 0.0,
+                r: -0.07574,
+                b: 0.0
+            }),
+        );
+
+        let tile_xml = format!(r#"<a:tile xmlns:a="{NS}"/>"#);
+        let tile = doc(&tile_xml);
+        assert_eq!(
+            parse_tile(tile.root_element()),
+            TileInfo {
+                tx: 0,
+                ty: 0,
+                sx: 1.0,
+                sy: 1.0,
+                flip: "none".to_owned(),
+                algn: None,
+            },
+        );
     }
 
     /// gradFill: stops parsed + sorted, linear angle from `<a:lin ang>`.

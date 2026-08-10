@@ -53,7 +53,7 @@ const { Canvas, loadImage, FontLibrary } = skia;
 // before invoking the CLI, e.g. from a wrapper script.)
 void FontLibrary;
 
-const { parsePptx, parseDocx, renderSlideNode, installImageBitmapShim } =
+const { openPptxPresentation, openDocxDocument } =
   await import('../src/index.ts').catch(() => import('../src/index.js'));
 
 const factory = {
@@ -61,28 +61,43 @@ const factory = {
   loadImage: (buf) => loadImage(buf),
 };
 
-installImageBitmapShim(factory);
-
 const slideIdx = Number.parseInt(values.slide, 10);
 const pageIdx = Number.parseInt(values.page, 10);
 const width = Number.parseInt(values.width, 10);
 
 if (filePath.toLowerCase().endsWith('.pptx')) {
-  const presentation = parsePptx(buffer);
-  const slideWidth = presentation.slideWidth;
-  const slideHeight = presentation.slideHeight;
-  const dpr = 2;
-  const cssH = Math.round(slideHeight * (width / slideWidth));
-  const canvas = factory.createCanvas(width * dpr, cssH * dpr);
-  await renderSlideNode(canvas, presentation, slideIdx, { width, dpr, factory });
-  const png = await canvas.toBuffer('png');
-  writeFileSync(outPath, png);
-  console.log(`Wrote ${outPath} (slide ${slideIdx + 1} / ${presentation.slides.length})`);
+  const session = await openPptxPresentation(buffer);
+  try {
+    if (slideIdx < 0 || slideIdx >= session.slideCount) {
+      throw new RangeError(`Slide index ${slideIdx} out of range`);
+    }
+    let rendered = false;
+    for await (const slide of session.slides()) {
+      if (slide.index !== slideIdx) continue;
+      const dpr = 2;
+      const cssH = Math.round(session.slideHeight * (width / session.slideWidth));
+      const canvas = factory.createCanvas(width * dpr, cssH * dpr);
+      await session.renderSlide(canvas, slide, { width, dpr, factory });
+      const png = await canvas.toBuffer('png');
+      writeFileSync(outPath, png);
+      rendered = true;
+      break;
+    }
+    if (!rendered) throw new Error(`Slide ${slideIdx} was not decoded`);
+    console.log(`Wrote ${outPath} (slide ${slideIdx + 1} / ${session.slideCount})`);
+  } finally {
+    await session.close();
+  }
 } else if (filePath.toLowerCase().endsWith('.docx')) {
-  void pageIdx;
-  void parseDocx;
-  console.error('DOCX Node rendering is not yet implemented — only PPTX is supported by the v0 thumbnail CLI.');
-  process.exit(2);
+  const session = await openDocxDocument(buffer, { factory });
+  try {
+    const canvas = await session.renderPage(pageIdx, { width, dpr: 2 });
+    const png = await canvas.toBuffer('png');
+    writeFileSync(outPath, png);
+    console.log(`Wrote ${outPath} (page ${pageIdx + 1} / ${session.pageCount})`);
+  } finally {
+    await session.close();
+  }
 } else {
   console.error(`Unsupported extension. Expected .pptx or .docx; got ${filePath}`);
   process.exit(2);

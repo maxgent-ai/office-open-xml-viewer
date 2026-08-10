@@ -59,6 +59,7 @@ export function getWebviewHtml(
   extensionUri: vscode.Uri,
   fileType: 'docx' | 'xlsx' | 'pptx',
   useGoogleFonts = false,
+  selectionSession = 0,
 ): string {
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
@@ -245,6 +246,7 @@ export function getWebviewHtml(
   </div>
   <script nonce="${nonce}">
     window.__OOXML_FILE_TYPE__ = ${JSON.stringify(fileType)};
+    window.__OOXML_SELECTION_SESSION__ = ${JSON.stringify(selectionSession)};
   </script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

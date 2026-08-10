@@ -7,8 +7,8 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-const toolRequire = createRequire(new URL('../packages/docx/package.json', import.meta.url));
-const ts = toolRequire('typescript');
+const toolRequire = createRequire(new URL('../package.json', import.meta.url));
+const ts = toolRequire('typescript-compiler-api');
 
 function parseArgs(argv) {
   const result = {
@@ -211,7 +211,19 @@ export function normalizeDeclaration(source, fileName) {
       if (ts.isIdentifier(node) && collisionAliases.has(node.text)) {
         return ts.factory.createIdentifier(collisionAliases.get(node.text));
       }
-      if (ts.isParenthesizedTypeNode(node)) return ts.visitNode(node.type, visit);
+      if (ts.isParenthesizedTypeNode(node)) return visit(node.type);
+      if (ts.isUnionTypeNode(node)) {
+        return ts.factory.createUnionTypeNode(node.types.flatMap((type) => {
+          const visited = visit(type);
+          return ts.isUnionTypeNode(visited) ? [...visited.types] : [visited];
+        }));
+      }
+      if (ts.isIntersectionTypeNode(node)) {
+        return ts.factory.createIntersectionTypeNode(node.types.flatMap((type) => {
+          const visited = visit(type);
+          return ts.isIntersectionTypeNode(visited) ? [...visited.types] : [visited];
+        }));
+      }
       if (ts.isStringLiteral(node)) return ts.factory.createStringLiteral(node.text, true);
       const visited = ts.visitEachChild(node, visit, context);
       if (ts.isClassDeclaration(visited)) {

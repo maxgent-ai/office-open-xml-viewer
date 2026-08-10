@@ -86,7 +86,7 @@ describe.skipIf(!skia)('installOffscreenCanvasShim', () => {
     octx.fillRect(0, 0, 50, 50);
 
     const dest = factory.createCanvas(50, 50);
-    const dctx = dest.getContext('2d');
+    const dctx = dest.getContext('2d') as unknown as CanvasRenderingContext2D;
     dctx.drawImage(oc as unknown as CanvasImageSource, 0, 0);
     const px = dctx.getImageData(25, 25, 1, 1).data;
     expect(Array.from(px)).toEqual([255, 0, 0, 255]);

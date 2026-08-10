@@ -158,7 +158,7 @@ describe('canonical body producer', () => {
       openBodyLayoutSession: () => ({
         hasPaginationFields: false,
         measureParagraph: ({ input }) => ({
-          layout: layouts[input.source.path[0]!]!, blockExtentPt: 60, lineEndBoundaries: [],
+          layout: layouts[input.source.path[0]!]!, blockExtentPt: 60, fragmentation: { kind: 'indivisible' },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -231,7 +231,7 @@ describe('canonical body producer', () => {
               spacing: { beforePt: 0, afterPt: 10 },
             },
             blockExtentPt: 20,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -282,7 +282,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraphWithEndnotes('body', input.source, 20, ['end-1', 'end-2']),
           blockExtentPt: 20,
-          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+          fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -335,7 +335,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraphWithFootnote('body', input.source, 20, 'end-1', 'endnote'),
           blockExtentPt: 20,
-          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+          fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
         }),
         measureTable: () => { throw new Error('unused'); },
         layoutNotes: () => {
@@ -388,7 +388,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraphWithFootnote('body', input.source, 20, 'end-1', 'endnote'),
           blockExtentPt: 20,
-          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+          fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
         }),
         measureTable: () => { throw new Error('unused'); },
         layoutNotes: () => { throw failure; },
@@ -439,7 +439,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraphWithFootnote('vertical-body', input.source, 20, 'vertical-note'),
           blockExtentPt: 20,
-          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+          fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -498,7 +498,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...layout.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 20,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -603,7 +603,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraph(`p${input.source.path[0]}`, input.source, 20),
           blockExtentPt: 20,
-          lineEndBoundaries: [],
+          fragmentation: { kind: 'indivisible' },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -692,7 +692,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...layout.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 20,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -984,7 +984,9 @@ describe('canonical body producer', () => {
           return {
             layout,
             blockExtentPt: 10,
-            lineEndBoundaries: index === 0 ? [{ segIndex: 0, charOffset: 1 }] : [],
+            fragmentation: index === 0
+              ? { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] }
+              : { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -1042,7 +1044,7 @@ describe('canonical body producer', () => {
           return {
             layout: paragraphWithFootnote(`note-${index}`, input.source, 10, `fn-${index}`),
             blockExtentPt: 10,
-            lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+            fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -1105,7 +1107,7 @@ describe('canonical body producer', () => {
             return {
               layout: { ...layout, ordinaryFlow: false },
               blockExtentPt: 0,
-              lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+              fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
               placement: {
                 coordinateSpace: 'logical-body' as const,
                 xPt: 10,
@@ -1119,7 +1121,7 @@ describe('canonical body producer', () => {
           return {
             layout: paragraph(`p-${index}`, input.source, heightPt),
             blockExtentPt: heightPt,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -1173,7 +1175,7 @@ describe('canonical body producer', () => {
             return {
               layout: { ...layout, ordinaryFlow: false },
               blockExtentPt: 0,
-              lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+              fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
               placement: {
                 coordinateSpace: 'logical-body' as const,
                 xPt: 10,
@@ -1186,7 +1188,7 @@ describe('canonical body producer', () => {
           return {
             layout: paragraph('after', input.source, 10),
             blockExtentPt: 10,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -1249,7 +1251,7 @@ describe('canonical body producer', () => {
             return {
               layout: paragraph('prior', input.source, 75),
               blockExtentPt: 75,
-              lineEndBoundaries: [],
+              fragmentation: { kind: 'indivisible' },
             };
           }
           acquiredAt.push({ pageIndex: location.pageIndex, columnIndex: location.columnIndex });
@@ -1258,7 +1260,7 @@ describe('canonical body producer', () => {
           return {
             layout: { ...layout, ordinaryFlow: false },
             blockExtentPt: 0,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
             placement: {
               coordinateSpace: 'logical-body' as const,
               xPt: 10,
@@ -1364,7 +1366,7 @@ describe('canonical body producer', () => {
                 inkBounds: { ...retained.inkBounds, widthPt: 80 },
               },
               blockExtentPt: 80,
-              lineEndBoundaries: [],
+              fragmentation: { kind: 'indivisible' },
             };
           }
           acquiredAt.push({ pageIndex: location.pageIndex, columnIndex: location.columnIndex });
@@ -1377,7 +1379,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...retained.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 0,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
             placement: {
               coordinateSpace: 'logical-body' as const,
               xPt: location.cursorPt.xPt,
@@ -1463,7 +1465,7 @@ describe('canonical body producer', () => {
                 inkBounds: { ...retained.inkBounds, widthPt: 80 },
               },
               blockExtentPt: 60,
-              lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+              fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
             };
           }
           acquiredAt.push({ pageIndex: location.pageIndex, columnIndex: location.columnIndex });
@@ -1476,7 +1478,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...retained.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 0,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
             placement: {
               coordinateSpace: 'logical-body' as const,
               xPt: location.cursorPt.xPt,
@@ -1551,7 +1553,7 @@ describe('canonical body producer', () => {
                 inkBounds: { ...retained.inkBounds, widthPt: 80 },
               },
               blockExtentPt: 75,
-              lineEndBoundaries: [],
+              fragmentation: { kind: 'indivisible' },
             };
           }
           acquiredAt.push({ pageIndex: location.pageIndex, columnIndex: location.columnIndex });
@@ -1563,7 +1565,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...retained.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 10,
-            lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+            fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -1641,7 +1643,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...retained.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 75,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: ({ input, location }) => {
@@ -1705,7 +1707,7 @@ describe('canonical body producer', () => {
             return {
               layout: paragraph('prior', input.source, 75),
               blockExtentPt: 75,
-              lineEndBoundaries: [],
+              fragmentation: { kind: 'indivisible' },
             };
           }
           const ownLayout = index === 1
@@ -1714,7 +1716,7 @@ describe('canonical body producer', () => {
           return {
             layout: { ...ownLayout, ordinaryFlow: false },
             blockExtentPt: 0,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
             placement: {
               coordinateSpace: 'logical-body' as const,
               xPt: 10,
@@ -1768,7 +1770,7 @@ describe('canonical body producer', () => {
           return {
             layout: { ...layout, ordinaryFlow: false },
             blockExtentPt: 0,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
             placement: {
               coordinateSpace: 'logical-body' as const,
               xPt: 10,
@@ -1816,7 +1818,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraphWithFootnote('oversized-note', input.source, 10, 'too-tall'),
           blockExtentPt: 10,
-          lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }],
+          fragmentation: { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -1898,7 +1900,9 @@ describe('canonical body producer', () => {
           return {
             layout: retained,
             blockExtentPt: retained.advancePt,
-            lineEndBoundaries: index === 2 ? [{ segIndex: 0, charOffset: 1 }] : [],
+            fragmentation: index === 2
+              ? { kind: 'splittable', lineEndBoundaries: [{ segIndex: 0, charOffset: 1 }] }
+              : { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -1955,7 +1959,7 @@ describe('canonical body producer', () => {
           return {
             layout: paragraph(`p${index}`, input.source, extent),
             blockExtentPt: extent,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -2010,7 +2014,7 @@ describe('canonical body producer', () => {
             return {
               layout: paragraph('lead', input.source, 30),
               blockExtentPt: 30,
-              lineEndBoundaries: [],
+              fragmentation: { kind: 'indivisible' },
             };
           }
           const layout = paragraphWithFootnote(
@@ -2027,7 +2031,7 @@ describe('canonical body producer', () => {
               inkBounds: { ...layout.inkBounds, widthPt: 80 },
             },
             blockExtentPt: 0,
-            lineEndBoundaries: [],
+            fragmentation: { kind: 'indivisible' },
             placement: {
               coordinateSpace: 'logical-body' as const,
               xPt: 10,
@@ -2125,7 +2129,7 @@ describe('canonical body producer', () => {
         hasPaginationFields: false,
         measureParagraph: ({ input }) => ({
           layout: paragraph(`p${input.source.path[0]}`, input.source, heights[input.source.path[0]!]!),
-          blockExtentPt: heights[input.source.path[0]!]!, lineEndBoundaries: [],
+          blockExtentPt: heights[input.source.path[0]!]!, fragmentation: { kind: 'indivisible' },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -2179,7 +2183,7 @@ describe('canonical body producer', () => {
         measureParagraph: ({ input }) => ({
           layout: paragraph('follower', input.source, 10),
           blockExtentPt: 10,
-          lineEndBoundaries: [],
+          fragmentation: { kind: 'indivisible' },
         }),
         measureTable: ({ input }) => ({
           layout: table('upright', input.source, 30), blockExtentPt: 20,
@@ -2373,7 +2377,7 @@ describe('canonical body producer', () => {
         hasPaginationFields: false,
         measureParagraph: ({ input }) => ({
           layout: paragraph(`p${input.source.path[0]}`, input.source, heights[input.source.path[0]!]!),
-          blockExtentPt: heights[input.source.path[0]!]!, lineEndBoundaries: [],
+          blockExtentPt: heights[input.source.path[0]!]!, fragmentation: { kind: 'indivisible' },
         }),
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
@@ -2436,7 +2440,7 @@ describe('canonical body producer', () => {
                   paragraphMark: { hidden: false, bounds: { ...layout.inkBounds, widthPt: 0 } },
                 }
               : layout,
-            blockExtentPt: heights[index]!, lineEndBoundaries: [],
+            blockExtentPt: heights[index]!, fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -2499,7 +2503,7 @@ describe('canonical body producer', () => {
               flowBounds: { ...layout.flowBounds, widthPt: 80 },
               inkBounds: { ...layout.inkBounds, widthPt: 80 },
             },
-            blockExtentPt: 20, lineEndBoundaries: [],
+            blockExtentPt: 20, fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -2584,7 +2588,7 @@ describe('canonical body producer', () => {
                   inkBounds: { ...layout.inkBounds, widthPt: 80 },
                 },
                 blockExtentPt: 1,
-                lineEndBoundaries: [],
+                fragmentation: { kind: 'indivisible' },
               };
             },
             measureTable: () => { throw new Error('unused'); },
@@ -2680,7 +2684,7 @@ describe('canonical body producer', () => {
           events.push(`measure:${input.source.path[0]}`);
           return {
             layout: paragraph(`p${input.source.path[0]}`, input.source, 20),
-            blockExtentPt: 20, lineEndBoundaries: [],
+            blockExtentPt: 20, fragmentation: { kind: 'indivisible' },
           };
         },
         measureTable: () => { throw new Error('unused'); },
@@ -2775,7 +2779,7 @@ describe('canonical body producer', () => {
                   }] : [],
                 },
                 blockExtentPt: 20,
-                lineEndBoundaries: [],
+                fragmentation: { kind: 'indivisible' },
               };
             }
             if (index === 2) {
@@ -2802,10 +2806,10 @@ describe('canonical body producer', () => {
               return {
                 layout: { ...sized, drawings: [drawing] },
                 blockExtentPt: 20,
-                lineEndBoundaries: [],
+                fragmentation: { kind: 'indivisible' },
               };
             }
-            return { layout: sized, blockExtentPt: 20, lineEndBoundaries: [] };
+            return { layout: sized, blockExtentPt: 20, fragmentation: { kind: 'indivisible' } };
           },
           measureTable: () => { throw new Error('unused'); },
           measureStoryExtent: () => 0,

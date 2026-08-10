@@ -47,6 +47,7 @@ function makeSheet(hyperlinks: Hyperlink[]): Worksheet {
 }
 
 interface Priv {
+  hostWindow: { open?: typeof window.open };
   currentWorksheet: Worksheet | null;
   scrollHost: {
     scrollTop: number;
@@ -145,9 +146,7 @@ describe('XlsxViewer IX1 default hyperlink handler (no callback)', () => {
     const ws = makeSheet([{ col: 1, row: 1, url: 'https://example.com/', location: null }]);
     const { priv } = mountViewer(ws); // no onHyperlinkClick → default handler
 
-    // openExternalHyperlink resolves `window.open`; installDom stubs a minimal
-    // window without `open`, so provide one for this assertion.
-    vi.stubGlobal('window', { devicePixelRatio: 1, open: openSpy });
+    priv.hostWindow.open = openSpy;
 
     clickAt(priv, CELL_A1_X, CELL_A1_Y);
     expect(openSpy).toHaveBeenCalledTimes(1);
@@ -158,7 +157,7 @@ describe('XlsxViewer IX1 default hyperlink handler (no callback)', () => {
     const openSpy = vi.fn();
     const ws = makeSheet([{ col: 1, row: 1, url: 'javascript:alert(1)', location: null }]);
     const { priv } = mountViewer(ws); // default handler
-    vi.stubGlobal('window', { devicePixelRatio: 1, open: openSpy });
+    priv.hostWindow.open = openSpy;
 
     clickAt(priv, CELL_A1_X, CELL_A1_Y);
     expect(openSpy).not.toHaveBeenCalled();

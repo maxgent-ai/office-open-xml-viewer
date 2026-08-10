@@ -165,7 +165,8 @@ function framedParagraphWithFollowingSquareAnchor(): DocParagraph {
 function context() {
   return {
     lineGrid: { active: false, pitchPt: null },
-    characterGrid: { active: false, deltaPt: 0 },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
     physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
     lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
     baseRtl: false, isJustified: false, stretchLastLine: false,

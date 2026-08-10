@@ -167,6 +167,8 @@ export interface Slide {
   partName?: string;
   background: Fill | null;
   elements: SlideElement[];
+  /** Index-aligned rendered provenance; intentionally carries no editor tree position. */
+  elementSources?: SlideElementSource[];
   /**
    * Speaker-notes pane text from `ppt/notesSlides/notesSlideN.xml`
    * (ECMA-376 §13.3.5 — Notes Slide). The full notes-body text as a single
@@ -196,6 +198,12 @@ export interface Slide {
    * slide. The renderer paints a visible error box instead of slide content.
    */
   parseError?: string;
+}
+
+export type SlideElementOrigin = 'master' | 'layout' | 'slide';
+
+export interface SlideElementSource {
+  origin: SlideElementOrigin;
 }
 
 /**

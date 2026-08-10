@@ -93,12 +93,12 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
   'continuous column-count section breaks (sample-12/13)',
   () => {
     let restore: Array<() => void> = [];
-    const paginate = (n: number) => {
+    const paginate = async (n: number) => {
       restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
-        const { parseDocx } = docxMod!;
+        const { materializeDocxDocument } = docxMod!;
         const { createLayoutServices, layoutDocument } = rendererMod!;
-        const doc = parseDocx(readFileSync(samplePath(n)));
+        const doc = await materializeDocxDocument(readFileSync(samplePath(n)));
         const layoutServices = createLayoutServices(doc);
         return layoutDocument(doc, layoutServices, { currentDateMs: 0 });
       } finally {
@@ -109,8 +109,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // Tier 1 (column-region top tracking): the second column of a continuous
     // mid-page multi-column section starts at the region top, not the page top —
     // so the overprint is gone and sample-12 flows across its 3 Word pages.
-    it('sample-12 paginates to 3 pages (Word ground truth)', (context) => {
-      const pages = paginate(12);
+    it('sample-12 paginates to 3 pages (Word ground truth)', async (context) => {
+      const pages = await paginate(12);
       if (!isExpectedPrivateFixture(pages, ['Figure 1 This is a Sample Figure'])) {
         context.skip('the installed local sample-12 is not the continuous-column corpus');
         return;
@@ -142,8 +142,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // (paragraphMarkEmPx), dropping below only for a full-width band — so the
     // caption and CONCLUSION belong on page 2 (0-indexed page 1), matching the
     // Word-exported PDF (sample-12.pdf p.2).
-    it('sample-12 keeps the figure caption + CONCLUSION on page 2 (#676 regression)', (context) => {
-      const pages = paginate(12);
+    it('sample-12 keeps the figure caption + CONCLUSION on page 2 (#676 regression)', async (context) => {
+      const pages = await paginate(12);
       if (!isExpectedPrivateFixture(pages, [
         'Figure 1 This is a Sample Figure',
         'The other first headings can be Research',
@@ -161,8 +161,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // nextPage). Restored after the sample-5 cover overprint was fixed at its
     // real root — a PageBreak after the "Cover Pages" building block (§17.5.2) —
     // instead of forcing every nextPage→continuous boundary to break a page.
-    it('sample-13 paginates to 5 pages (Word ground truth)', (context) => {
-      const pages = paginate(13);
+    it('sample-13 paginates to 5 pages (Word ground truth)', async (context) => {
+      const pages = await paginate(13);
       if (!isExpectedPrivateFixture(pages, ['Journal homepage:'])) {
         context.skip('the installed local sample-13 is not the journal corpus');
         return;
@@ -177,8 +177,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !haveSamples)(
     // parser emits a PageBreak after the cover content so the cover stands alone:
     // 7 pages. Were the cover detection to fail, the continuous body would flow
     // up onto page 1 and the document would collapse to 6 pages.
-    it('sample-5 cover page stands alone — 7 pages (Word ground truth)', (context) => {
-      const pages = paginate(5);
+    it('sample-5 cover page stands alone — 7 pages (Word ground truth)', async (context) => {
+      const pages = await paginate(5);
       if (!isExpectedPrivateFixture(pages, ['夢十夜'])) {
         context.skip('the installed local sample-5 is not the cover-page corpus');
         return;

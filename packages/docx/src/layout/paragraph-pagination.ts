@@ -22,6 +22,14 @@ export interface ParagraphFragmentSelection {
   readonly admittedBlockExtentPt: number;
 }
 
+export type ParagraphFragmentation =
+  | Readonly<{ kind: 'indivisible' }>
+  | Readonly<{
+      kind: 'splittable';
+      /** Source cursor after every retained visual line, including the final line. */
+      lineEndBoundaries: readonly LineBoundary[];
+    }>;
+
 function compareLineBoundaries(left: LineBoundary, right: LineBoundary): number {
   return left.segIndex - right.segIndex || left.charOffset - right.charOffset;
 }
@@ -29,7 +37,7 @@ function compareLineBoundaries(left: LineBoundary, right: LineBoundary): number 
 export function selectParagraphFragment(
   acquired: ParagraphLayout,
   cursor: ParagraphFragmentCursor,
-  lineEndBoundaries: readonly LineBoundary[],
+  fragmentation: ParagraphFragmentation,
   availableBlockExtentPt: number,
   freshFlowRegionBlockExtentPt: number,
   canRelocate: boolean,
@@ -50,8 +58,14 @@ export function selectParagraphFragment(
   if (![availableBlockExtentPt, freshFlowRegionBlockExtentPt].every(
     (value) => Number.isFinite(value) && value >= 0,
   )) throw new RangeError('Paragraph fragment extents must be finite and non-negative');
-  if (lineEndBoundaries.length !== acquired.lines.length) {
-    throw new RangeError('Paragraph source boundaries must align with retained lines');
+  if (
+    fragmentation.kind === 'splittable'
+    && fragmentation.lineEndBoundaries.length !== acquired.lines.length
+  ) {
+    throw new RangeError('Splittable paragraph source boundaries must align with retained lines');
+  }
+  if (fragmentation.kind === 'indivisible' && cursor.boundary !== null) {
+    throw new RangeError('Indivisible paragraph cannot carry a continuation boundary');
   }
   const authoredSpaceAfterPt = policy.authoredSpaceAfterPt ?? 0;
   if (!Number.isFinite(authoredSpaceAfterPt) || authoredSpaceAfterPt < 0) {
@@ -89,6 +103,26 @@ export function selectParagraphFragment(
       availableBlockExtentPt,
     });
   };
+  if (fragmentation.kind === 'indivisible') {
+    const completeReserve = reserveFor(acquired);
+    const completeExtentPt = admissionExtent(acquired, true);
+    if (canRelocate && (
+      completeExtentPt + completeReserve > availableBlockExtentPt
+      || !reserveFits(completeReserve)
+    ) && completeExtentPt + completeReserve <= freshFlowRegionBlockExtentPt) {
+      return {
+        fragment: null, nextCursor: cursor,
+        requiresFreshFlowRegion: true, additionalReservePt: 0, admittedBlockExtentPt: 0,
+      };
+    }
+    return {
+      fragment: acquired,
+      nextCursor: null,
+      requiresFreshFlowRegion: false,
+      additionalReservePt: completeReserve,
+      admittedBlockExtentPt: Math.min(acquired.advancePt, availableBlockExtentPt),
+    };
+  }
   if (total === 0) {
     const reserve = reserveFor(acquired);
     const completeExtentPt = admissionExtent(acquired, true);
@@ -158,7 +192,7 @@ export function selectParagraphFragment(
     end -= 1;
   }
   const fragment = slice(end);
-  const nextBoundary = end < total ? lineEndBoundaries[end - 1]! : null;
+  const nextBoundary = end < total ? fragmentation.lineEndBoundaries[end - 1]! : null;
   if (
     nextBoundary !== null
     && cursor.boundary !== null

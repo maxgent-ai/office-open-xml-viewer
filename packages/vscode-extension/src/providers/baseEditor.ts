@@ -1,6 +1,11 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../webviewHtml';
 import { shouldUseGoogleFonts } from '../config';
+import {
+  type SelectionContextHandle,
+  SelectionContextRegistry,
+  selectionDocumentIdentity,
+} from '../selectionContextRegistry';
 
 /** Live webview panel + everything needed to rebuild its HTML, tracked so the
  *  HTML can be regenerated when the effective Google Fonts flag changes
@@ -9,6 +14,9 @@ interface OpenView {
   panel: vscode.WebviewPanel;
   extensionUri: vscode.Uri;
   fileType: 'docx' | 'xlsx' | 'pptx';
+  selection: SelectionContextHandle;
+  selectionSession: number;
+  initializedSession: number | null;
 }
 
 /** Registry of every open OOXML webview across all three editor providers, so a
@@ -39,25 +47,33 @@ export async function showFindInActiveWebview(): Promise<void> {
 
 /** Set the webview HTML for a panel using the current effective flag. */
 function renderWebview(view: OpenView): void {
+  view.selectionSession++;
+  view.initializedSession = null;
+  view.selection.update(null);
+  view.selection.updateView(null);
   view.panel.webview.html = getWebviewHtml(
     view.panel.webview,
     view.extensionUri,
     view.fileType,
     shouldUseGoogleFonts(),
+    view.selectionSession,
   );
 }
 
 /**
  * Shared implementation for the docx / xlsx / pptx readonly custom editors. The
  * three formats differ only by their `viewType` and `fileType` tag; everything
- * else (CSP-gated HTML, byte hand-off, copy bridge, Google-Fonts wiring) is common.
+ * else (CSP-gated HTML, byte hand-off, Google-Fonts wiring) is common.
  */
 export abstract class BaseEditorProvider
   implements vscode.CustomReadonlyEditorProvider
 {
   protected abstract readonly fileType: 'docx' | 'xlsx' | 'pptx';
 
-  constructor(protected readonly context: vscode.ExtensionContext) {}
+  constructor(
+    protected readonly context: vscode.ExtensionContext,
+    private readonly selectionContexts: SelectionContextRegistry,
+  ) {}
 
   async openCustomDocument(uri: vscode.Uri): Promise<vscode.CustomDocument> {
     return { uri, dispose: () => undefined };
@@ -75,14 +91,22 @@ export abstract class BaseEditorProvider
       ],
     };
 
+    const selection = this.selectionContexts.track(
+      webviewPanel,
+      selectionDocumentIdentity(this.fileType, document.uri),
+    );
     const view: OpenView = {
       panel: webviewPanel,
       extensionUri: this.context.extensionUri,
       fileType: this.fileType,
+      selection,
+      selectionSession: 0,
+      initializedSession: null,
     };
     openViews.add(view);
     webviewPanel.onDidDispose(() => {
       openViews.delete(view);
+      selection.dispose();
     });
 
     renderWebview(view);
@@ -91,14 +115,31 @@ export abstract class BaseEditorProvider
 
     webviewPanel.webview.onDidReceiveMessage(async (msg) => {
       if (msg.type === 'webview-ready') {
-        await webviewPanel.webview.postMessage({
+        if (msg.selectionSession !== view.selectionSession) return;
+        if (view.initializedSession === view.selectionSession) return;
+        view.initializedSession = view.selectionSession;
+        const posted = await webviewPanel.webview.postMessage({
           type: 'ooxml-init',
           fileType: this.fileType,
           url: docUrl,
           useGoogleFonts: shouldUseGoogleFonts(),
+          selectionSession: view.selectionSession,
         });
-      } else if (msg.type === 'copy') {
-        vscode.env.clipboard.writeText(msg.text);
+        if (!posted && view.initializedSession === view.selectionSession) {
+          view.initializedSession = null;
+        }
+      } else if (msg.type === 'selection-context') {
+        if (
+          msg.selectionSession !== view.selectionSession ||
+          msg.fileType !== this.fileType
+        ) return;
+        selection.update(msg.context ?? null);
+      } else if (msg.type === 'viewer-location') {
+        if (
+          msg.selectionSession !== view.selectionSession ||
+          msg.fileType !== this.fileType
+        ) return;
+        selection.updateView(msg.location ?? null);
       }
     });
   }

@@ -48,7 +48,7 @@ function textSeg(text: string): LayoutTextSeg {
 function lay(text: string, width: number): LayoutLine[] {
   return layoutLines(
     makeLinearCtx(), [textSeg(text)], width, 0, 1, [], undefined, {}, 0,
-    DEFAULT_KINSOKU_RULES, 0, 36, width, false,
+    DEFAULT_KINSOKU_RULES, undefined, 36, width, false,
   );
 }
 const lineTexts = (lines: LayoutLine[]): string[] =>
@@ -118,7 +118,7 @@ describe('SEA↔non-SEA no-space transitions in docx layoutLines (#960)', () => 
     // (§17.3.1.16 cross-run 追い出し), exactly as the CJK branch does.
     const lines = layoutLines(
       makeLinearCtx(), [textSeg('abcd'), textSeg('。ภาษาไทย')], 25, 0, 1, [], undefined, {}, 0,
-      DEFAULT_KINSOKU_RULES, 0, 36, 25, false,
+      DEFAULT_KINSOKU_RULES, undefined, 36, 25, false,
     );
     const texts = lineTexts(lines);
     expect(texts.join('')).toBe('abcd。ภาษาไทย');

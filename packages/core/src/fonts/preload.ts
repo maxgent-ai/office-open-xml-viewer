@@ -63,8 +63,8 @@ export function withFontCeiling<T>(p: Promise<T>): Promise<T | void> {
  *  the same url JOINs the first fetch instead of re-downloading, and the join
  *  cannot resolve before the fetch settles (first-paint determinism). The actual
  *  `FontFace` objects are dedup + refcounted separately per call in the shared
- *  {@link ./font-registry.ts} (so two documents using the same web font share
- *  one FontFace, and it leaves the set only when both release it). The stored
+ *  {@link ./font-registry.ts} (so holders in one FontFaceSet share one face;
+ *  another document set receives its own face). The stored
  *  promise ALWAYS resolves: a failed fetch records the failed families + deletes
  *  the entry (so a later call retries) inside the producing call, so a cache-hit
  *  awaiter never throws. */
@@ -124,8 +124,8 @@ export function activeFontSet(): FontFaceSet | null {
 /** Stable signature for one Google-Fonts `@font-face`, keyed to the CSS url it
  *  came from + its identity (family + all CSS descriptors). `gfonts:` namespaces
  *  it away from embedded-font signatures in the shared registry. Two documents
- *  requesting the same web font compute the SAME signature and so share one
- *  refcounted FontFace; distinct subsets (latin vs latin-ext, different weights)
+ *  requesting the same web font compute the SAME signature and, within one
+ *  FontFaceSet, share one refcounted FontFace; distinct subsets
  *  key distinctly. */
 function googleFaceSignature(url: string, f: ParsedFontFace): string {
   const d = f.descriptors;
@@ -146,8 +146,9 @@ function googleFaceSignature(url: string, f: ParsedFontFace): string {
 export async function preloadGoogleFonts(
   fontNames: Iterable<string | null | undefined>,
   map: Record<string, FontPreloadEntry>,
+  targetFontSet: FontFaceSet | null = activeFontSet(),
 ): Promise<FontFace[]> {
-  const fonts = activeFontSet();
+  const fonts = targetFontSet;
   if (!fonts || typeof FontFace === 'undefined' || typeof fetch === 'undefined') return [];
 
   const seen = new Set<string>();
@@ -186,8 +187,8 @@ export async function preloadGoogleFonts(
 
   // 1) Fetch each stylesheet once per JS context (network dedup via cssFetches)
   //    and PARSE its `@font-face` rules. The rules are shared data; the FontFace
-  //    objects are created + refcounted per call in step 2 so two open documents
-  //    share one face and it leaves the set only when both release it.
+  //    objects are created + refcounted per call in step 2 so holders targeting
+  //    the same set share one face and it leaves only after all release it.
   const parsedGroups = await withFontCeiling(
     Promise.all(
       [...cssUrls].map(async (url): Promise<{ url: string; rules: ParsedFontFace[] }> => {
@@ -274,7 +275,7 @@ export async function preloadGoogleFonts(
  * preloaded (the array returned by {@link preloadGoogleFonts}). Refcounted +
  * dedup-safe via the shared {@link ./font-registry.ts}: each face is removed
  * from its FontFaceSet only when the LAST holder releases it, so a web font used
- * by two open documents survives until both are destroyed. Double-release safe
+ * by two holders in the same document survives until both are destroyed. Double-release safe
  * (a face passed twice, or a re-release after full release, is a no-op) and safe
  * in a context without a FontFaceSet. Twin of `unregisterEmbeddedFonts`; called
  * from each viewer's `destroy()` to fix the SPA leak where every opened document

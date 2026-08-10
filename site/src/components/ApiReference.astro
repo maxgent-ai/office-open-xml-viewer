@@ -6,6 +6,17 @@ interface Props {
 }
 const { format } = Astro.props;
 const classes = apiReference[format];
+const isEventHandler = (name: string) => name.startsWith('on');
+const groupedClasses = classes.map((apiClass) => ({
+  ...apiClass,
+  properties: (apiClass.options ?? []).filter((option) => !isEventHandler(option.name)),
+  eventHandlers: (apiClass.options ?? []).filter((option) => isEventHandler(option.name)),
+}));
+const borrowedEngine = {
+  docx: { className: 'DocxDocument', factory: 'fromDocument()' },
+  pptx: { className: 'PptxPresentation', factory: 'fromPresentation()' },
+  xlsx: { className: 'XlsxWorkbook', factory: 'fromWorkbook()' },
+}[format];
 ---
 <section class="api" data-reveal>
   <p class="api-badge">API reference</p>
@@ -14,6 +25,50 @@ const classes = apiReference[format];
     Every public option and method, straight from the source. Types omitted for brevity are exported
     from the package — your editor will autocomplete the rest.
   </p>
+
+  <div class="api-ownership">
+    <h4>Choose one loading mode</h4>
+    <p>
+      <strong>Normal case:</strong> construct the Viewer, then call <code>viewer.load(source)</code>.
+      The Viewer owns the parsed engine, supports replacement loads, and destroys it during teardown.
+    </p>
+    <p>
+      <strong>Shared-engine case:</strong> load <code>{borrowedEngine.className}</code> once and create
+      each view with <code>{borrowedEngine.factory}</code>. This is mutually exclusive with Viewer loading:
+      <code>load()</code> is unavailable, and the caller must destroy the borrowed engine after every
+      view has been destroyed.
+    </p>
+    <p>
+      Loading ownership and execution mode are separate choices. Both loading modes support both
+      execution modes:
+    </p>
+    <div class="api-mode-table-wrap">
+      <table class="api-mode-table">
+        <thead>
+          <tr><th>Loading ownership</th><th><code>mode: 'main'</code></th><th><code>mode: 'worker'</code></th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Viewer-owned</th>
+            <td>Pass <code>mode: 'main'</code> to the Viewer, then call <code>load(source)</code>.</td>
+            <td>Pass <code>mode: 'worker'</code> to the Viewer, then call <code>load(source)</code>.</td>
+          </tr>
+          <tr>
+            <th>Shared engine</th>
+            <td><code>{borrowedEngine.className}.load(source, {'{'} mode: 'main' {'}'})</code>, then <code>{borrowedEngine.factory}</code>.</td>
+            <td><code>{borrowedEngine.className}.load(source, {'{'} mode: 'worker' {'}'})</code>, then <code>{borrowedEngine.factory}</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      On the shared-engine path, the engine's mode is authoritative: <code>{borrowedEngine.factory}</code>
+      deliberately does not accept a mode and cannot switch an already-loaded engine. Here,
+      <code>main</code> means parsing in a Worker and rendering on the main thread; <code>worker</code>
+      means both parsing and rendering in a Worker. Worker rendering requires Worker and
+      OffscreenCanvas support and may have format-specific feature limitations.
+    </p>
+  </div>
 
   <div class="api-errors">
     <h4>Error handling</h4>
@@ -24,33 +79,74 @@ const classes = apiReference[format];
     <a class="api-detail-link" href="/errors">Open the error reference →</a>
   </div>
 
-  {classes.map((c) => (
+  <div class="api-selection">
+    <h4>Selection context for AI and external tools</h4>
+    <p>
+      Viewer selection remains read-only UI state. <code>getSelectionContext()</code> turns the
+      current focus into a detached, resource-bounded snapshot; every format can notify you through
+      <code>onSelectionContextChange</code> when that snapshot may have changed.
+    </p>
+    <a class="api-detail-link" href="/selection-context">Open the selection &amp; AI guide →</a>
+  </div>
+
+  {groupedClasses.map((c) => (
     <div class="api-class">
       <h4 class="api-class-name">{c.name}</h4>
       {c.note && <p class="api-note">{c.note}</p>}
       <pre class="api-ctor"><code>{c.ctor}</code></pre>
 
-      {c.options && c.options.length > 0 && (
+      {c.properties.length + c.eventHandlers.length > 0 && (
         <>
           <p class="api-sub">Options</p>
           <div class="api-table-wrap">
-            <table class="api-table">
-              <thead><tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
-              <tbody>
-                {c.options.map((o) => (
-                  <tr>
-                    <td><code>{o.name}</code></td>
-                    <td><code class="api-type">{o.type}</code></td>
-                    <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
-                    <td class="api-description">
-                      <InlineApiDescription item={o} />
-                      {o.detailsHref && (
-                        <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
-                      )}
-                    </td>
+            <table class="api-table api-options-table">
+              <colgroup>
+                <col class="api-option-col" />
+                <col class="api-type-col" />
+                <col class="api-default-col" />
+                <col class="api-description-col" />
+              </colgroup>
+              <thead><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+              {c.properties.length > 0 && (
+                <tbody class="api-option-group">
+                  <tr class="api-group-row">
+                    <th scope="rowgroup" colspan="4">Properties</th>
                   </tr>
-                ))}
-              </tbody>
+                  {c.properties.map((o) => (
+                    <tr>
+                      <td><code>{o.name}</code></td>
+                      <td><code class="api-type">{o.type}</code></td>
+                      <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
+                      <td class="api-description">
+                        <InlineApiDescription item={o} />
+                        {o.detailsHref && (
+                          <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
+              {c.eventHandlers.length > 0 && (
+                <tbody class="api-option-group">
+                  <tr class="api-group-row">
+                    <th scope="rowgroup" colspan="4">Event handlers</th>
+                  </tr>
+                  {c.eventHandlers.map((o) => (
+                    <tr>
+                      <td><code>{o.name}</code></td>
+                      <td><code class="api-type">{o.type}</code></td>
+                      <td>{o.def ? <code>{o.def}</code> : <span class="api-dash">—</span>}</td>
+                      <td class="api-description">
+                        <InlineApiDescription item={o} />
+                        {o.detailsHref && (
+                          <> <a class="api-detail-link" href={o.detailsHref}>{o.detailsLabel ?? 'Details'} →</a></>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
             </table>
           </div>
         </>
@@ -58,7 +154,11 @@ const classes = apiReference[format];
 
       <p class="api-sub">Methods</p>
       <div class="api-table-wrap">
-        <table class="api-table">
+        <table class="api-table api-methods-table">
+          <colgroup>
+            <col class="api-signature-col" />
+            <col class="api-method-description-col" />
+          </colgroup>
           <tbody>
             {c.methods.map((m) => (
               <tr>
@@ -84,9 +184,22 @@ const classes = apiReference[format];
   .api-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
   .api-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 8px; }
 
-  .api-errors { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
-  .api-errors h4 { margin: 0; font-size: 19px; }
-  .api-errors > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
+  .api-ownership { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .api-ownership h4 { margin: 0; font-size: 19px; }
+  .api-ownership p { max-width: 92ch; margin: 10px 0 0; color: var(--text-dim); font-size: 14.5px; }
+  .api-ownership code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
+  .api-mode-table-wrap { margin-top: 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .api-mode-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 13.5px; }
+  .api-mode-table th, .api-mode-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
+  .api-mode-table thead th { border-top: 0; background: var(--code-bg); color: var(--text); font-weight: 700; }
+  .api-mode-table tbody th { width: 150px; color: var(--text); white-space: nowrap; }
+  .api-mode-table td { color: var(--text-dim); }
+  .api-mode-table th + th, .api-mode-table th + td, .api-mode-table td + td { border-left: 1px solid var(--border); }
+
+  .api-errors, .api-selection { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .api-errors h4, .api-selection h4 { margin: 0; font-size: 19px; }
+  .api-errors > p, .api-selection > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
+  .api-selection code { font-family: var(--mono); font-size: .9em; color: var(--text); }
   .api-detail-link { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 
   .api-class { margin-top: 30px; }
@@ -104,15 +217,36 @@ const classes = apiReference[format];
   }
   .api-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
   .api-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .api-options-table { table-layout: fixed; min-width: 760px; }
+  .api-option-col { width: 18%; }
+  .api-type-col { width: 22%; }
+  .api-default-col { width: 15%; }
+  .api-description-col { width: 45%; }
+  .api-methods-table { table-layout: fixed; min-width: 680px; }
+  .api-signature-col { width: 40%; }
+  .api-method-description-col { width: 60%; }
   .api-table th {
     text-align: left; font-weight: 600; color: var(--text-dim); font-size: 12px;
     text-transform: uppercase; letter-spacing: 0.04em;
     padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-elev);
   }
+  .api-group-row th {
+    padding-block: 8px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--code-bg);
+    color: var(--text);
+    font-size: 11px;
+    letter-spacing: .08em;
+  }
   .api-table td { padding: 10px 14px; border-top: 1px solid var(--border); color: var(--text-dim); vertical-align: top; }
   .api-table tbody tr:first-child td { border-top: none; }
   .api-table code { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; }
-  .api-table .api-type { color: var(--accent-2); white-space: normal; }
-  .api-sig code { color: var(--accent); white-space: normal; }
+  .api-options-table td:nth-child(-n + 3) code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .api-table .api-type { color: var(--accent-2); }
+  .api-sig code { color: var(--accent); white-space: normal; overflow-wrap: anywhere; }
   .api-dash { color: var(--text-faint); }
 </style>

@@ -9,9 +9,10 @@ import { OoxmlResourceLimitError } from '@silurus/ooxml-core';
 import * as xlsxWasm from '../../xlsx/src/wasm/xlsx_parser.js';
 import { generateSyntheticXlsx } from '../scripts/generate-synthetic-xlsx.mjs';
 import {
+  materializeXlsxWorkbook,
+  materializeXlsxWorkbookIndex,
+  materializeXlsxWorksheet,
   openXlsxWorkbook,
-  parseXlsx,
-  parseSheet,
   type OpenXlsxWorkbookOptions,
   type XlsxWorksheetRowChunk,
 } from './xlsx.ts';
@@ -42,8 +43,54 @@ afterAll(async () => {
 });
 
 describe('Node bounded XLSX worksheet row iterator', () => {
+  it('keeps a recursively frozen workbook index readable after close', async () => {
+    const session = await openXlsxWorkbook(bytes);
+    const index = session.workbookIndex;
+    expect(Object.isFrozen(index)).toBe(true);
+    expect(Object.isFrozen(index.workbook.sheets)).toBe(true);
+    expect(Object.isFrozen(index.styles.cellXfs)).toBe(true);
+    await session.close();
+    expect(session.workbookIndex).toBe(index);
+    expect(session.workbookIndex.workbook.sheets[0]?.name).toBe('Synthetic');
+  });
+
+  it('fans a worksheet trap out to sibling sessions and recovers for the next open', async () => {
+    const openCursor = vi.spyOn(archivePrototype(), 'open_sheet_cursor')
+      .mockImplementationOnce(() => { throw new RangeError('synthetic trap'); });
+    const first = await openXlsxWorkbook(bytes);
+    const sibling = await openXlsxWorkbook(bytes);
+    try {
+      await expect(first.worksheetRows(0).next())
+        .rejects.toMatchObject({ name: 'WasmTrapError', code: 'parser-crashed' });
+      await expect(sibling.worksheetRows(0).next())
+        .rejects.toMatchObject({ name: 'WasmTrapError', code: 'parser-crashed' });
+      await first.close();
+      await sibling.close();
+    } finally {
+      openCursor.mockRestore();
+    }
+
+    const recovered = await openXlsxWorkbook(bytes);
+    await expect(recovered.worksheetRows(0).next())
+      .resolves.toMatchObject({ done: false, value: { kind: 'rows' } });
+    await recovered.close();
+  });
+
+  it('materializes detached index, worksheet, and complete workbook results', async () => {
+    const index = await materializeXlsxWorkbookIndex(bytes);
+    const worksheet = await materializeXlsxWorksheet(bytes, 0);
+    const complete = await materializeXlsxWorkbook(bytes);
+
+    expect(index.workbook.sheets.map((sheet) => sheet.name)).toEqual(['Synthetic']);
+    expect(Object.isFrozen(index)).toBe(false);
+    expect(worksheet.rows).toHaveLength(2049);
+    expect(complete.workbookIndex).toEqual(index);
+    expect(complete.worksheets).toEqual([worksheet]);
+    expect(Object.isFrozen(complete.workbookIndex)).toBe(false);
+  });
+
   it('matches the synchronous compatibility parse across multiple pulls', async () => {
-    const expected = parseSheet(bytes, 0, 'Synthetic');
+    const expected = await materializeXlsxWorksheet(bytes, 0);
     const rows: Row[] = [];
     let terminal: Worksheet | undefined;
     let pulls = 0;
@@ -272,7 +319,7 @@ describe('Node bounded XLSX worksheet row iterator', () => {
   });
 
   it('matches compatibility placeholder semantics for a malformed worksheet tail', async () => {
-    const expected = parseSheet(corruptBytes, 0, 'Synthetic');
+    const expected = await materializeXlsxWorksheet(corruptBytes, 0);
     const provisionalRows: Row[] = [];
     let terminal: Worksheet | undefined;
     for await (const chunk of streamWorksheetRows(corruptBytes, 0)) {
@@ -288,17 +335,12 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     expect(terminal).toEqual(expected);
   });
 
-  it('never routes a full iterator drain through the materializing parse_sheet export', async () => {
-    const parseSheetExport = vi.spyOn(xlsxWasm, 'parse_sheet');
-    try {
-      for await (const _chunk of streamWorksheetRows(bytes, 0)) { /* drain */ }
-      expect(parseSheetExport).not.toHaveBeenCalled();
-    } finally {
-      parseSheetExport.mockRestore();
-    }
+  it('never exposes or routes through the removed materializing parse_sheet export', async () => {
+    expect('parse_sheet' in xlsxWasm).toBe(false);
+    for await (const _chunk of streamWorksheetRows(bytes, 0)) { /* drain */ }
   });
 
-  it('drains more than 250,000 cells without adding a Node-global cell cap', async () => {
+  it('keeps streaming above the retained cell cap but rejects Node materialization', async () => {
     const output = join(directory, 'over-retained-model-cap.xlsx');
     await generateSyntheticXlsx(output, { rows: 7_813, columns: 32 });
     const large = await readFile(output);
@@ -311,15 +353,28 @@ describe('Node bounded XLSX worksheet row iterator', () => {
     }
     expect(rows).toBe(7_813);
     expect(cells).toBe(250_016);
+    await expect(materializeXlsxWorksheet(large, 0)).rejects.toMatchObject({
+      name: 'OoxmlResourceLimitError',
+      code: 'ooxml-resource-limit',
+      details: {
+        violation: expect.objectContaining({
+          resource: 'worksheet-model',
+          metric: 'cells',
+          limit: 250_000,
+        }),
+      },
+    });
   }, 30_000);
 
-  it('keeps the existing synchronous workbook API materialized and unchanged', () => {
-    expect(parseXlsx(bytes).workbook.sheets.map((sheet) => sheet.name)).toEqual(['Synthetic']);
+  it('materializes the workbook index asynchronously', async () => {
+    expect((await materializeXlsxWorkbookIndex(bytes)).workbook.sheets.map((sheet) => sheet.name))
+      .toEqual(['Synthetic']);
   });
 });
 
 type ArchivePrototype = {
   free(): void;
+  open_sheet_cursor(sheetIndex: number, name: string): void;
   acknowledge_sheet_cursor_terminal(): void;
   cancel_sheet_cursor(): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;

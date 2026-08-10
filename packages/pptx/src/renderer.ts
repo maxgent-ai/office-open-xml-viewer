@@ -37,6 +37,7 @@ import {
   renderPresetShape,
   hasPreset,
   buildPresetGeometryPath,
+  buildPresetGeometryFillPath,
   getConnectorAnchors,
   getCustGeomEndpoints,
   drawArrowHead,
@@ -139,6 +140,10 @@ export interface RenderContext {
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface PptxTextRunInfo {
+  /** Paint-order element index in the rendered slide snapshot. */
+  elementIndex?: number;
+  /** Provenance of that rendered element. */
+  origin?: import('./types.js').SlideElementOrigin;
   /**
    * Source shape's DrawingML `cNvPr@id`. The identifier is stable and unique
    * within its slide. Absent for parser-synthesized shapes that have no cNvPr.
@@ -1345,6 +1350,7 @@ async function renderBackground(
   canvasW: number,
   canvasH: number,
   scale: number,
+  superseded: () => boolean,
   fetchImage?: (path: string, mime: string) => Promise<Blob>,
 ) {
   // ECMA-376 §20.1.8.14 — image (blipFill) background. Paint an opaque white
@@ -1372,6 +1378,7 @@ async function renderBackground(
           heightPt: canvasH / scale / PT_TO_EMU,
         },
       );
+      if (superseded()) return;
       // A null bitmap (unsupported metafile, e.g. true EMF) → keep the white
       // base painted above as the fallback, exactly like a decode failure.
       if (!bitmap) return;
@@ -1516,7 +1523,10 @@ function paintTiledBackground(
   if (!pattern) return;
 
   // Phase: register the grid against the alignment anchor, then add tx/ty.
-  const { ax, ay } = tileAnchorOffset(tile.algn, canvasW, canvasH, tileW, tileH);
+  // PowerPoint registers an omitted algn at the top-left. CT_TileInfoProperties
+  // itself declares no schema default, so keep this host observation here rather
+  // than normalizing it in the shared OOXML parser.
+  const { ax, ay } = tileAnchorOffset(tile.algn ?? 'tl', canvasW, canvasH, tileW, tileH);
   const px = ax + emuToPx(tile.tx, scale);
   const py = ay + emuToPx(tile.ty, scale);
   // `setTransform` exists where DOMMatrix is available (browser + skia-canvas).
@@ -3416,7 +3426,19 @@ export function renderTextBody(
   const colHeightCapacity = Math.max(0, effectiveBh - tPad - bPad);
   // When `bh === 0` (caller relies on auto-height) the capacity is unbounded
   // and content always fits, so a multi-col directive collapses to single col.
-  const fitsInOneCol = bh === 0 || totalHeight <= colHeightCapacity + 0.5;
+  // `spcAft` is spacing AFTER a paragraph. On the final line there is no
+  // following content, so that trailing gap cannot by itself fill the column
+  // and force otherwise-fitting text into the next overflow container
+  // (ECMA-376 §21.1.2.1.1 bodyPr@numCol). Keep it for drawing/anchoring, but
+  // exclude it from the one-column overflow decision. A common boundary case
+  // is a heading plus three short bullets whose final 3pt spcAft alone crosses
+  // a rounded-rectangle text-rect capacity.
+  const lastEntry = allLines[allLines.length - 1];
+  const trailingSpaceAfter = lastEntry
+    ? Math.max(0, lastEntry.linePx - lastEntry.lineHeight)
+    : 0;
+  const occupiedHeight = totalHeight - trailingSpaceAfter;
+  const fitsInOneCol = bh === 0 || occupiedHeight <= colHeightCapacity + 0.5;
   const useMultiCol = numCol > 1 && !fitsInOneCol;
   const linesPerCol = useMultiCol ? Math.ceil(allLines.length / numCol) : allLines.length;
   let colIdx = 0;
@@ -4293,6 +4315,7 @@ async function renderPicture(
   ctx: CanvasRenderingContext2D,
   el: PictureElement,
   scale: number,
+  superseded: () => boolean,
   fetchImage?: (path: string, mime: string) => Promise<Blob>,
 ) {
   // No byte source → nothing to draw (the lazy pipeline always supplies one in
@@ -4362,7 +4385,7 @@ async function renderPicture(
     // Skip a picture whose blip is an unsupported metafile (null bitmap), the
     // same way an SVG-decode failure that also fails its raster fallback would
     // throw out of this try — here we simply return without painting.
-    if (!bitmap) return;
+    if (!bitmap || superseded()) return;
     ctx.save();
     if (el.alpha != null) ctx.globalAlpha *= el.alpha;
     const x = emuToPx(el.x, scale);
@@ -4408,7 +4431,7 @@ async function renderPicture(
         // Driven by the shared preset-geometry engine (roundRect, ellipse, and
         // the other 184 presets), with the avLst adjust handles; the engine
         // substitutes each preset's declared default for any omitted guide.
-        const ok = buildPresetGeometryPath(
+        const ok = buildPresetGeometryFillPath(
           target,
           el.prstGeom,
           cx,
@@ -4756,6 +4779,7 @@ async function renderMedia(
   ctx: CanvasRenderingContext2D,
   el: MediaElement,
   scale: number,
+  superseded: () => boolean,
   fetchMedia?: (path: string) => Promise<Blob>,
   skipControls?: boolean,
   bitmapOwner?: PosterFetchImage,
@@ -4776,6 +4800,8 @@ async function renderMedia(
       // fall through to plain fill
     }
   }
+
+  if (superseded()) return;
 
   // Do not retain a saved canvas state across the asynchronous poster decode:
   // a newer render may reuse the same context while the promise is pending.
@@ -5263,12 +5289,12 @@ export function applyDimOverlay(
 }
 
 /**
- * Internal render options: the shared {@link RenderOptions} plus the opt-in
- * `math` engine. `math` is internal plumbing — the headless {@link
- * PptxPresentation} injects it once at load and threads it here on each draw,
- * so the public `RenderSlideOptions` deliberately does not expose it.
+ * Raw {@link renderSlide} options: shared paint controls plus the optional math
+ * engine and hidden-slide dim overlay. Viewer constructors normally inject the
+ * math engine once through their load options; direct render callers can pass
+ * the same public engine here.
  */
-type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
+export type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
 
 /**
  * Per-canvas monotonic render token for the {@link renderSlide} cancellation
@@ -5278,6 +5304,14 @@ type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOption
  * held weakly, so a discarded canvas is collected normally.
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
+
+/** Invalidate an in-flight main-thread render before restoring or reusing its
+ * caller-owned target. The renderer observes the same token after every await. */
+export function invalidatePptxRenderTarget(
+  target: HTMLCanvasElement | OffscreenCanvas,
+): void {
+  renderTokens.set(target, (renderTokens.get(target) ?? 0) + 1);
+}
 
 /**
  * RB7: paint a placeholder for a slide whose part failed to parse. A neutral
@@ -5465,7 +5499,15 @@ async function renderSlideLeased(
     smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor),
   };
 
-  await renderBackground(ctx, slide.background, canvasW, canvasH, scale, opts.fetchImage);
+  await renderBackground(
+    ctx,
+    slide.background,
+    canvasW,
+    canvasH,
+    scale,
+    superseded,
+    opts.fetchImage,
+  );
   if (superseded()) return canvas;
 
   // Pre-rasterize any equations so the synchronous text layout can place them.
@@ -5553,18 +5595,33 @@ async function renderSlideLeased(
     }
   }
 
-  for (const el of slide.elements) {
+  for (const [elementIndex, el] of slide.elements.entries()) {
     // A newer render of this canvas started while we awaited an image/equation —
     // stop so we don't paint this (now stale) slide over the newer one.
     if (superseded()) return canvas;
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun, opts.fetchImage);
+      const elementTextRun: TextRunCallback | undefined = onTextRun
+        ? (run) => onTextRun({
+            ...run,
+            elementIndex,
+            origin: slide.elementSources?.[elementIndex]?.origin ?? 'slide',
+          })
+        : undefined;
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, elementTextRun, opts.fetchImage);
     } else if (el.type === 'picture') {
-      await renderPicture(ctx, el, scale, opts.fetchImage);
+      await renderPicture(ctx, el, scale, superseded, opts.fetchImage);
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale, slideNumber, rc);
     } else if (el.type === 'media') {
-      await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls, opts.fetchImage);
+      await renderMedia(
+        ctx,
+        el,
+        scale,
+        superseded,
+        opts.fetchMedia,
+        opts.skipMediaControls,
+        opts.fetchImage,
+      );
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
       // so PT_TO_EMU * scale gives pixels-per-point at the current display size.

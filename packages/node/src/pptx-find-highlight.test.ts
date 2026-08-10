@@ -91,7 +91,7 @@ describe.skipIf(!skia || !pptxMod || !rendererMod || !findMod || !highlightMod |
     async function collectSlides(): Promise<Run[][]> {
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
-        const { parsePptx } = pptxMod as { parsePptx: (b: Uint8Array) => { slides: unknown[]; slideWidth: number; slideHeight: number; defaultTextColor?: string; majorFont?: unknown; minorFont?: unknown; hlinkColor?: unknown } };
+        const { materializePptxPresentation } = pptxMod as { materializePptxPresentation: (b: Uint8Array) => Promise<{ slides: unknown[]; slideWidth: number; slideHeight: number; defaultTextColor?: string; majorFont?: unknown; minorFont?: unknown; hlinkColor?: unknown }> };
         const { renderSlide } = rendererMod as {
           renderSlide: (
             canvas: unknown,
@@ -102,7 +102,7 @@ describe.skipIf(!skia || !pptxMod || !rendererMod || !findMod || !highlightMod |
             onTextRun?: (r: Run) => void,
           ) => Promise<unknown>;
         };
-        const pres = parsePptx(readFileSync(DEMO));
+        const pres = await materializePptxPresentation(readFileSync(DEMO));
         const out: Run[][] = [];
         for (let s = 0; s < pres.slides.length; s++) {
           const canvas = new Canvas(960, 540);

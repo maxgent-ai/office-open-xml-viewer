@@ -21,6 +21,7 @@ function deferred<T>() {
 const resourcePolicy = {
   maxArchiveEntryBytes: null,
   maxTotalInflatedBytes: null,
+  maxArchiveEntries: null,
 } as const;
 class FakePptxArchive {
   constructor(_bytes: Uint8Array, _max?: bigint) {}

@@ -22,9 +22,9 @@ function throwingEngine(): FakePptxEngine {
 }
 
 /**
- * PD14: PptxViewer already routed render failures to `onError`; this pins that,
- * and that it now also `console.error`s when no `onError` is given (never
- * silent), so all three single-canvas viewers share one contract.
+ * Awaitable initial rendering rejects `load()`. Later Viewer-managed navigation
+ * keeps the async callback/console fallback because callers commonly invoke it
+ * from an event without retaining its Promise.
  */
 describe('PptxViewer render error contract (PD14)', () => {
   function mount() {
@@ -32,18 +32,17 @@ describe('PptxViewer render error contract (PD14)', () => {
     return { canvas: makeEl('canvas') };
   }
 
-  it('routes a render failure to onError during load() and resolves', async () => {
+  it('rejects an initial render failure without also calling onError', async () => {
     const { canvas } = mount();
     vi.spyOn(PptxPresentation, 'load').mockResolvedValue(throwingEngine().asPres());
     const onError = vi.fn();
     const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, { onError });
-    await expect(v.load('x.pptx')).resolves.toBeUndefined();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect((onError.mock.calls[0][0] as Error).message).toContain('boom');
+    await expect(v.load('x.pptx')).rejects.toThrow('render boom');
+    expect(onError).not.toHaveBeenCalled();
     v.destroy();
   });
 
-  it('routes a render failure to onError during goToSlide() (no rejection)', async () => {
+  it('rejects a navigation render failure without also calling onError', async () => {
     const { canvas } = mount();
     const good = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     vi.spyOn(PptxPresentation, 'load').mockResolvedValue(good.asPres());
@@ -55,19 +54,18 @@ describe('PptxViewer render error contract (PD14)', () => {
     (good as unknown as { renderSlide: () => Promise<void> }).renderSlide = () => {
       throw new Error('nav boom');
     };
-    await expect(v.nextSlide()).resolves.toBeUndefined();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect((onError.mock.calls[0][0] as Error).message).toContain('nav boom');
+    await expect(v.nextSlide()).rejects.toThrow('nav boom');
+    expect(onError).not.toHaveBeenCalled();
     v.destroy();
   });
 
-  it('falls back to console.error when no onError is provided (never silent)', async () => {
+  it('does not console-log an initial error already delivered by load rejection', async () => {
     const { canvas } = mount();
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(PptxPresentation, 'load').mockResolvedValue(throwingEngine().asPres());
     const v = new PptxViewer(canvas as unknown as HTMLCanvasElement);
-    await expect(v.load('x.pptx')).resolves.toBeUndefined();
-    expect(spy).toHaveBeenCalledTimes(1);
+    await expect(v.load('x.pptx')).rejects.toThrow('render boom');
+    expect(spy).not.toHaveBeenCalled();
     v.destroy();
   });
 });

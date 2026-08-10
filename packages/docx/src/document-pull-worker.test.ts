@@ -3,6 +3,7 @@ import type {
   PullSessionIdentity,
 } from '@silurus/ooxml-core/worker';
 import {
+  materializeDocumentPullLayoutSession,
   materializeDocumentPullSession,
   materializeDocumentPullOwnedModelsSession,
 } from './document-pull-client.js';
@@ -143,6 +144,37 @@ describe('DOCX document pull integration', () => {
     } finally {
       clone.mockRestore();
     }
+  });
+
+  it('builds the Node layout source without constructing a compatibility graph', async () => {
+    const archive = new FakeArchive([
+      { kind: 'body', body: [{ type: 'pageBreak' }] },
+      { kind: 'body', body: [{ type: 'columnBreak' }] },
+      {
+        kind: 'complete',
+        document: {
+          body: [],
+          section: {},
+          headers: { default: null, first: null, even: null },
+          footers: { default: null, first: null, even: null },
+        },
+      },
+    ]);
+    const worker = new DocumentPullWorker(() => archive);
+    worker.open(identity);
+
+    const source = await materializeDocumentPullLayoutSession(
+      createLocalDocumentPullTransport(worker),
+      identity,
+    );
+
+    expect(source.blocks.body.map((element) => element.type))
+      .toEqual(['pageBreak', 'columnBreak']);
+    expect(source.bodyLayoutInput.sequence).toEqual([
+      expect.objectContaining({ kind: 'authored-break', break: 'page' }),
+      expect.objectContaining({ kind: 'authored-break', break: 'column' }),
+    ]);
+    expect(Object.isFrozen(source.blocks.body[0])).toBe(true);
   });
 
   it('cancels producer ownership when consumer validation rejects a unit', async () => {

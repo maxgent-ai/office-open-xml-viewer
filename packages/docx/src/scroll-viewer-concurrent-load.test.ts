@@ -19,10 +19,10 @@ const SIZE = [{ widthPt: 100, heightPt: 200 }];
  * (load() throws up-front there), so this only covers the self-loading path.
  */
 describe('DocxScrollViewer.load() — concurrent-load latch', () => {
-  function build() {
+  function build(onError?: (error: Error) => void) {
     installDom();
     const container = makeContainer(200, 400);
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10, onError });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
@@ -90,5 +90,45 @@ describe('DocxScrollViewer.load() — concurrent-load latch', () => {
 
     v.destroy();
     expect(b.destroyed).toBe(true);
+  });
+
+  it('does not report an old slot render rejected while a successful reload recycles it', async () => {
+    const onError = vi.fn();
+    const { v } = build(onError);
+    const old = new FakeDocxEngine(4, SIZE);
+    const next = new FakeDocxEngine(4, SIZE);
+    vi.spyOn(DocxDocument, 'load')
+      .mockResolvedValueOnce(old.asDoc())
+      .mockResolvedValueOnce(next.asDoc());
+
+    await v.load('old.docx');
+    const internals = v as unknown as {
+      _slots: Map<number, { renderedPage: number }>;
+      _renderSlot(index: number, slot: { renderedPage: number }): void;
+    };
+    const [entry] = internals._slots.entries();
+    expect(entry).toBeDefined();
+    const [index, slot] = entry as [number, { renderedPage: number }];
+    (old as unknown as { deferred: boolean }).deferred = true;
+    slot.renderedPage = -1;
+    internals._renderSlot(index, slot);
+    const staleCall = old.renderCalls.at(-1);
+
+    await v.load('next.docx');
+    staleCall?.reject(new Error('old worker terminated'));
+    await Promise.resolve();
+
+    expect(old.destroyed).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    v.destroy();
+  });
+
+  it('rejects load after destroy without acquiring a document', async () => {
+    const { v } = build();
+    const load = vi.spyOn(DocxDocument, 'load');
+    v.destroy();
+
+    await expect(v.load('late.docx')).rejects.toThrow('DocxScrollViewer is destroyed');
+    expect(load).not.toHaveBeenCalled();
   });
 });

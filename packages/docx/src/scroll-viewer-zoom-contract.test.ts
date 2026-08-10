@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
-import { installDom, makeContainer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -25,7 +25,7 @@ function setup(opts: Record<string, unknown> = {}, host = { w: 200, h: 400 }) {
   installDom();
   const container = makeContainer(host.w, host.h);
   const engine = new FakeDocxEngine(5, [PAGE]);
-  const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+  const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
     document: engine.asDoc(),
     gap: 10,
     paddingTop: 0,
@@ -55,7 +55,7 @@ describe('DocxScrollViewer IX9 zoom contract', () => {
   it('getScale() is 1 before a scale is established (no width yet)', () => {
     installDom();
     const engine = new FakeDocxEngine(3, [PAGE]);
-    const v = new DocxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
       document: engine.asDoc(),
     });
     expect(v.getScale()).toBe(1);
@@ -127,7 +127,7 @@ describe('DocxScrollViewer IX9 zoom contract', () => {
     const container = makeContainer(0, 0); // zero-width ⇒ fit deferred, nothing established
     const engine = new FakeDocxEngine(5, [PAGE]);
     const onScaleChange = vi.fn();
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
       paddingTop: 0,
@@ -158,7 +158,7 @@ describe('DocxScrollViewer IX9 zoom contract', () => {
   it('a pre-establishment setScale latch is clamped to [zoomMin, zoomMax] (IX9 F1)', () => {
     installDom();
     const engine = new FakeDocxEngine(5, [PAGE]);
-    const v = new DocxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
+    const v = makeBorrowedDocxScrollViewer(makeContainer(0, 0) as unknown as HTMLElement, {
       document: engine.asDoc(),
       zoomMin: 0.5,
       zoomMax: 3,

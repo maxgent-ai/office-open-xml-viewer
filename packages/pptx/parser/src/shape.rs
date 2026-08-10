@@ -403,6 +403,7 @@ pub(crate) fn parse_shape(
         inherited_italic,
         inherited_caps,
         inherited_anchor,
+        inherited_text_insets,
         inherited_alignment,
         inherited_ea_ln_brk,
         inherited_space_before,
@@ -415,6 +416,7 @@ pub(crate) fn parse_shape(
             lph.lookup_italic(&ph_type),
             lph.lookup_caps(&ph_type),
             lph.lookup_anchor(&ph_type),
+            lph.lookup_text_insets(&ph_type, ph_idx),
             lph.lookup_alignment(&ph_type, ph_idx),
             lph.lookup_ea_ln_brk(&ph_type),
             lph.lookup_space_before(&ph_type),
@@ -422,7 +424,9 @@ pub(crate) fn parse_shape(
             lph.lookup_line_spacing(&ph_type, ph_idx),
         )
     } else {
-        (None, None, None, None, None, None, None, None, None, None)
+        (
+            None, None, None, None, None, None, None, None, None, None, None,
+        )
     };
     let inherited_level_font_sizes: LevelFontSizes = if ph_node.is_some() {
         lph.lookup_level_font_sizes(&ph_type, ph_idx)
@@ -471,6 +475,7 @@ pub(crate) fn parse_shape(
             inherited_italic,
             inherited_caps.clone(),
             inherited_anchor,
+            inherited_text_insets,
             inherited_alignment,
             inherited_ea_ln_brk,
             inherited_space_before,
@@ -1406,6 +1411,7 @@ pub(crate) fn parse_table_cell(
             None,
             None,
             anchor,
+            None, // inherited_text_insets
             None, // inherited_alignment
             None, // inherited_ea_ln_brk
             None, // inherited_space_before

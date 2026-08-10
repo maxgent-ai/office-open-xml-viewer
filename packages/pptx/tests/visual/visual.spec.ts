@@ -1,7 +1,12 @@
-import { test } from '@playwright/test';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { test, expect } from '@playwright/test';
+import { mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
+import {
+  captureOrComparePrivateItem,
+  preparePrivateCorpus,
+  verifyPrivateItemManifest,
+} from '../../../../tests/visual/private-corpus.mjs';
 
 // ── Test targets ──────────────────────────────────────────────────────────────
 // Add entries here to include additional PPTX files.
@@ -11,10 +16,15 @@ import pixelmatch from 'pixelmatch';
 const PPTX_FILES: { name: string; slideCount: number }[] = [
   { name: 'private/sample-1', slideCount: 5 },
   { name: 'private/sample-2', slideCount: 17 },
-  { name: 'private/sample-3', slideCount: 17 },
-  { name: 'private/sample-4', slideCount: 15 },
-  { name: 'private/sample-5', slideCount: 3 },
-  { name: 'private/sample-6', slideCount: 3 },
+  { name: 'private/sample-3', slideCount: 21 },
+  { name: 'private/sample-4', slideCount: 6 },
+  { name: 'private/sample-5', slideCount: 16 },
+  { name: 'private/sample-6', slideCount: 13 },
+  { name: 'private/sample-7', slideCount: 2 },
+  { name: 'private/sample-8', slideCount: 1 },
+  { name: 'private/sample-9', slideCount: 2 },
+  { name: 'private/sample-10', slideCount: 5 },
+  { name: 'private/sample-11', slideCount: 3 },
   { name: 'demo/sample-1', slideCount: 9 },
 ];
 
@@ -121,6 +131,9 @@ test.describe('visual regression', () => {
         const targetRoot = RUN_MODE === 'regression' ? 'baseline' : 'references';
         const refPath = `tests/visual/${targetRoot}/${name}/slide-${slideNum}.png`;
         if (!existsSync(refPath)) {
+          if (RUN_MODE === 'regression') {
+            throw new Error(`missing regression baseline: ${refPath}`);
+          }
           test.skip(true, `no ${targetRoot} image for ${name} slide ${slideNum}`);
         }
         const refBuf = readFileSync(refPath);
@@ -130,6 +143,12 @@ test.describe('visual regression', () => {
         const { width: refW, height: refH } = refPng;
 
         if (actualPng.width !== refW || actualPng.height !== refH) {
+          if (RUN_MODE === 'regression') {
+            throw new Error(
+              `${name} slide ${slideNum}: regression dimensions changed from ` +
+              `${refW}×${refH} to ${actualPng.width}×${actualPng.height}`,
+            );
+          }
           console.error(
             `  ${name} slide ${slideNum}: size mismatch ` +
             `actual=${actualPng.width}×${actualPng.height} ` +
@@ -137,14 +156,24 @@ test.describe('visual regression', () => {
           );
         }
 
-        const w = Math.min(actualPng.width, refW);
-        const h = Math.min(actualPng.height, refH);
+        const w = Math.max(actualPng.width, refW);
+        const h = Math.max(actualPng.height, refH);
+
+        const pad = (png: ReturnType<typeof PNG.sync.read>, tw: number, th: number) => {
+          if (png.width === tw && png.height === th) return png;
+          const out = new PNG({ width: tw, height: th });
+          out.data.fill(255);
+          PNG.bitblt(png, out, 0, 0, png.width, png.height, 0, 0);
+          return out;
+        };
+        const refPadded = pad(refPng, w, h);
+        const actualPadded = pad(actualPng, w, h);
 
         // ── Pixel comparison ───────────────────────────────────────────────
         const diff = new PNG({ width: w, height: h });
         const diffPixels = pixelmatch(
-          refPng.data,
-          actualPng.data,
+          refPadded.data,
+          actualPadded.data,
           diff.data,
           w, h,
           { threshold: PIXEL_THRESHOLD, includeAA: true }
@@ -192,5 +221,68 @@ test.describe('visual regression', () => {
         }
       });
     }
+  }
+});
+
+const PPTX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
+  ? readdirSync('public/private')
+      .filter((file) => file.endsWith('.pptx') && !file.startsWith('~$'))
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+  : [];
+
+if (process.env.VRT_PRIVATE_CORPUS === '1') {
+  preparePrivateCorpus({ format: 'pptx', files: PPTX_PRIVATE_CORPUS, snapshot: SNAPSHOT });
+}
+
+test.describe('private corpus self regression', () => {
+  for (const file of PPTX_PRIVATE_CORPUS) {
+    test(file, async ({ page }) => {
+      test.setTimeout(600_000);
+      const stem = file.slice(0, -'.pptx'.length);
+      const openSlide = async (slideIndex: number) => {
+        await page.goto(
+          `/tests/visual/fixture.html?pptx=${encodeURIComponent(`private/${stem}`)}`
+          + `&slide=${slideIndex}`,
+        );
+        await page.waitForFunction(
+          () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+          { timeout: 120_000 },
+        );
+        const status = await page.evaluate(() => document.body.dataset.status);
+        if (status === 'error') {
+          const message = await page.evaluate(() => document.body.dataset.errorMessage ?? '');
+          throw new Error(`${stem} slide ${slideIndex + 1}: ${message}`);
+        }
+        await page.waitForTimeout(200);
+      };
+
+      await openSlide(0);
+      const slideCount = Number(await page.evaluate(() => document.body.dataset.slideCount));
+      expect(slideCount, `${stem} must report its complete slide count`).toBeGreaterThan(0);
+      const differences: string[] = [];
+      for (let slideIndex = 0; slideIndex < slideCount; slideIndex++) {
+        if (slideIndex > 0) {
+          await page.evaluate(async (index) => {
+            const render = (globalThis as unknown as {
+              renderPptxVrtSlide(slideIndex: number): Promise<void>;
+            }).renderPptxVrtSlide;
+            await render(index);
+          }, slideIndex);
+          await page.waitForTimeout(200);
+        }
+        const dataUrl = await page.evaluate(() =>
+          (document.querySelector('canvas') as HTMLCanvasElement | null)?.toDataURL('image/png'));
+        if (!dataUrl) throw new Error(`${stem} slide ${slideIndex + 1}: no canvas`);
+        const actual = Buffer.from(dataUrl.split(',')[1], 'base64');
+        const difference = captureOrComparePrivateItem({
+          stem, itemKind: 'slide', itemIndex: slideIndex, actual, snapshot: SNAPSHOT,
+        });
+        if (difference) differences.push(difference);
+      }
+      verifyPrivateItemManifest({
+        format: 'pptx', stem, itemKind: 'slide', itemCount: slideCount, snapshot: SNAPSHOT,
+      });
+      expect(differences, differences.join('\n')).toEqual([]);
+    });
   }
 });

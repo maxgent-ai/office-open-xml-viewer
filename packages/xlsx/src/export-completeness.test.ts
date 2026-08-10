@@ -11,7 +11,9 @@ describe('xlsx public API export completeness', () => {
   // a cold/loaded machine (the compile is CPU-bound, not flaky logic). Give it
   // ample headroom so the API-freeze guard is deterministic.
   it('exports every in-package type reachable from index.ts', { timeout: 30000 }, () => {
-    const missing = findMissingExportsFromUrl(import.meta.url);
+    const missing = findMissingExportsFromUrl(import.meta.url, './index.ts', {
+      srcDirRelativeToMeta: '../../',
+    });
     expect(missing, formatMissing(missing)).toEqual([]);
   });
 });

@@ -378,6 +378,7 @@ pub(crate) fn parse_text_body(
     inherited_italic: Option<bool>,
     inherited_caps: Option<String>,
     inherited_anchor: Option<String>,
+    inherited_text_insets: Option<[Option<i64>; 4]>,
     inherited_alignment: Option<String>,
     inherited_ea_ln_brk: Option<bool>,
     inherited_space_before: Option<i64>,
@@ -422,16 +423,25 @@ pub(crate) fn parse_text_body(
     // (auto_fit default below); a normAutofit also captures PowerPoint's stored
     // fontScale / lnSpcReduction (ECMA-376 §21.1.2.1.3, 62500 → 0.625).
     let spec = ooxml_common::text::BodyPrDefaults::spec();
+    let inherited_text_insets = inherited_text_insets.unwrap_or([None; 4]);
     let body_pr_defaults = ooxml_common::text::BodyPrDefaults {
         anchor: inherited_anchor
             .or_else(|| theme_default_str("anchor"))
             .unwrap_or(spec.anchor),
         wrap: theme_default_str("wrap").unwrap_or(spec.wrap),
         vert: theme_default_str("vert").unwrap_or(spec.vert),
-        l_ins: theme_default_i64("lIns").unwrap_or(spec.l_ins),
-        t_ins: theme_default_i64("tIns").unwrap_or(spec.t_ins),
-        r_ins: theme_default_i64("rIns").unwrap_or(spec.r_ins),
-        b_ins: theme_default_i64("bIns").unwrap_or(spec.b_ins),
+        l_ins: inherited_text_insets[0]
+            .or_else(|| theme_default_i64("lIns"))
+            .unwrap_or(spec.l_ins),
+        t_ins: inherited_text_insets[1]
+            .or_else(|| theme_default_i64("tIns"))
+            .unwrap_or(spec.t_ins),
+        r_ins: inherited_text_insets[2]
+            .or_else(|| theme_default_i64("rIns"))
+            .unwrap_or(spec.r_ins),
+        b_ins: inherited_text_insets[3]
+            .or_else(|| theme_default_i64("bIns"))
+            .unwrap_or(spec.b_ins),
         auto_fit: theme_auto_fit().unwrap_or(spec.auto_fit),
     };
     let body = match body_pr {

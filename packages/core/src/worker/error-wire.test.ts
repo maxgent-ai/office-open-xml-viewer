@@ -157,7 +157,9 @@ describe('worker error wire', () => {
     expect(() => structuredClone(wire)).not.toThrow();
   });
 
-  it('represents an archive-wide metric without a dummy part', () => {
+  it.each([false, true])(
+    'represents a configurable=%s archive entry-count metric without a dummy part',
+    (configurable) => {
     const error = new OoxmlResourceLimitError('too many entries', {
       stage: 'container',
       violation: {
@@ -167,14 +169,15 @@ describe('worker error wire', () => {
         metric: 'entry-count',
         limit: 20_000,
         observed: 20_001,
-        configurable: false,
+        configurable,
         usage: { ...USAGE, archiveEntryCount: 20_001 },
       },
     });
     const restored = deserializeWorkerError(serializeWorkerError(error));
     expect(restored).toBeInstanceOf(OoxmlResourceLimitError);
     expect((restored as OoxmlResourceLimitError).details.violation).not.toHaveProperty('part');
-  });
+    },
+  );
 
   it('preserves the hard central-directory metadata limit', () => {
     const error = new OoxmlResourceLimitError('central directory is too large', {

@@ -53,6 +53,18 @@ interface Priv {
   currentWorksheet: Worksheet | null;
   canvasArea: { clientWidth: number; clientHeight: number; getBoundingClientRect(): DOMRect };
   scrollHost: FakeScrollHost;
+  navPrev: { parentElement: { style: { width: string } } | null };
+  tabBar: { style: { flexDirection: string } };
+  tabStrip: {
+    style: { marginLeft: string; marginRight: string };
+    scrollLeft: number;
+    clientWidth: number;
+    scrollWidth: number;
+  };
+  tabList: { style: { flexDirection: string; minWidth: string; width: string } };
+  tabs: Array<{ offsetLeft: number; offsetWidth: number }>;
+  updateFooterDirection(): void;
+  scrollTabs(direction: -1 | 1): void;
   _pendingZoomAnchor: { x: number; y: number } | null;
 }
 
@@ -135,6 +147,63 @@ describe('XlsxViewer IX9 zoom contract', () => {
     expect(v.getScale()).toBe(2);
     v.setScale(0.01);
     expect(v.getScale()).toBe(0.5);
+  });
+
+  it('keeps the footer tab-navigation width fixed at its 100% size', () => {
+    installDom();
+    const { v, priv } = mount(makeSheet(), { cellScale: 2 });
+
+    // The footer is viewer chrome, not sheet content. Its two navigation
+    // buttons therefore keep the row-header width at 100%, even when the
+    // workbook is initially opened or subsequently rendered at another zoom.
+    expect(priv.navPrev.parentElement?.style.width).toBe(`${HEADER_W}px`);
+    v.setScale(0.5);
+    expect(priv.navPrev.parentElement?.style.width).toBe(`${HEADER_W}px`);
+  });
+
+  it('mirrors footer control order for an RTL worksheet', () => {
+    installDom();
+    const rtlSheet = { ...makeSheet(), rightToLeft: true };
+    const { priv } = mount(rtlSheet);
+
+    priv.updateFooterDirection();
+
+    expect(priv.tabBar.style.flexDirection).toBe('row-reverse');
+    expect(priv.tabStrip.style.marginLeft).toBe('0');
+    expect(priv.tabStrip.style.marginRight).toBe('1px');
+    expect(priv.tabList.style.flexDirection).toBe('row-reverse');
+    expect(priv.tabList.style.minWidth).toBe('100%');
+    expect(priv.tabList.style.width).toBe('max-content');
+
+    priv.currentWorksheet = makeSheet();
+    priv.updateFooterDirection();
+
+    expect(priv.tabBar.style.flexDirection).toBe('row');
+    expect(priv.tabStrip.style.marginLeft).toBe('1px');
+    expect(priv.tabStrip.style.marginRight).toBe('0');
+    expect(priv.tabList.style.flexDirection).toBe('row');
+  });
+
+  it('scrolls to the nearest clipped tab by geometry regardless of visual order', () => {
+    installDom();
+    const { priv } = mount(makeSheet());
+    priv.tabStrip.clientWidth = 100;
+    priv.tabStrip.scrollWidth = 200;
+    // Visual RTL order: the first logical tab has the greatest offset.
+    priv.tabs = [
+      { offsetLeft: 150, offsetWidth: 50 },
+      { offsetLeft: 100, offsetWidth: 50 },
+      { offsetLeft: 50, offsetWidth: 50 },
+      { offsetLeft: 0, offsetWidth: 50 },
+    ];
+
+    priv.tabStrip.scrollLeft = 0;
+    priv.scrollTabs(1);
+    expect(priv.tabStrip.scrollLeft).toBe(50);
+
+    priv.tabStrip.scrollLeft = 100;
+    priv.scrollTabs(-1);
+    expect(priv.tabStrip.scrollLeft).toBe(50);
   });
 
   it('zoomIn / zoomOut walk the shared ladder', () => {

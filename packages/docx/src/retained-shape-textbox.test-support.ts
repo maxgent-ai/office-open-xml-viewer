@@ -16,7 +16,7 @@ import type { DocxDocumentModel, ShapeRun } from './types.js';
 export type ShapeAcquisitionTestState =
   Omit<Partial<BodyAcquisitionState>, 'layoutSettings' | 'sectionLayout'>
   & {
-    layoutSettings?: Pick<DocumentLayoutSettings, 'mathDefJc'>;
+    layoutSettings?: Pick<DocumentLayoutSettings, 'mathDefJc' | 'normalStyleFontSizePt'>;
     sectionLayout?: Pick<SectionLayoutContext, 'grid'>;
   };
 
@@ -65,13 +65,24 @@ export function acquireShapeTextBoxForTest(
   const grid = state?.sectionLayout?.grid;
   const lineGridActive = grid?.linePitchPt != null && grid.linePitchPt > 0
     && (grid.kind === 'lines' || grid.kind === 'linesAndChars' || grid.kind === 'snapToChars');
-  const characterGridActive = grid?.charSpacePt != null
-    && (grid.kind === 'linesAndChars' || grid.kind === 'snapToChars');
+  const characterGridActive = grid?.kind === 'linesAndChars' || grid?.kind === 'snapToChars';
   const context: ParagraphLayoutContext = {
     lineGrid: { active: lineGridActive, pitchPt: lineGridActive ? grid?.linePitchPt ?? null : null },
     characterGrid: {
       active: characterGridActive,
+      kind: characterGridActive
+        ? grid!.kind as 'linesAndChars' | 'snapToChars'
+        : null,
+      pitchPt: characterGridActive
+        ? (state?.layoutSettings?.normalStyleFontSizePt ?? 10) + (grid?.charSpacePt ?? 0)
+        : null,
       deltaPt: characterGridActive ? grid.charSpacePt ?? 0 : 0,
+    },
+    rightIndentGrid: {
+      pitchPt: characterGridActive
+        ? (state?.layoutSettings?.normalStyleFontSizePt ?? 10) + (grid?.charSpacePt ?? 0)
+        : null,
+      paragraphAllowsAdjustment: true,
     },
     physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
     lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,

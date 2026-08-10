@@ -4,6 +4,8 @@ import { utf8Bytes } from '@silurus/ooxml-core/internal/resource-measurement';
 import type { Row, Worksheet } from './types.js';
 import {
   XLSX_MAX_CACHED_CELLS,
+  XLSX_MAX_CACHED_JSON_BYTES,
+  XLSX_MAX_CACHED_OWNED_UTF8_BYTES,
   XLSX_MAX_CACHED_ROWS,
   XLSX_MAX_MATERIALIZED_CELLS,
   XLSX_MAX_MATERIALIZED_JSON_BYTES,
@@ -12,8 +14,10 @@ import {
   assertWorksheetCacheUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
   measureWorksheet,
+  addWorksheetCacheUsage,
 } from './worksheet-resource-limits.js';
 
 const row = (value: Row['cells'][number]['value'], formula?: string): Row => ({
@@ -81,6 +85,16 @@ describe('worksheet retained resource measurements', () => {
     } as Worksheet;
     const expected = new TextEncoder().encode(JSON.stringify(worksheet)).byteLength;
     expect(measureWorksheet(worksheet).jsonBytes).toBe(expected);
+    expect(completeWorksheetUsage(worksheet, {
+      rows: 7,
+      cells: 9,
+      ownedUtf8Bytes: 11,
+    })).toEqual({
+      rows: 7,
+      cells: 9,
+      ownedUtf8Bytes: 11,
+      jsonBytes: expected,
+    });
     expect(() => assertWorksheetJsonBytes(XLSX_MAX_MATERIALIZED_JSON_BYTES, 'x', 'worksheet/0'))
       .not.toThrow();
     expect(() => assertWorksheetJsonBytes(XLSX_MAX_MATERIALIZED_JSON_BYTES + 1, 'x', 'worksheet/0'))
@@ -102,13 +116,41 @@ describe('worksheet retained resource measurements', () => {
 
   it('checks workbook cache row and cell totals independently at exact/+1', () => {
     expect(() => assertWorksheetCacheUsage(
-      { rows: XLSX_MAX_CACHED_ROWS, cells: XLSX_MAX_CACHED_CELLS }, 'x', 'worksheet/0',
+      {
+        rows: XLSX_MAX_CACHED_ROWS,
+        cells: XLSX_MAX_CACHED_CELLS,
+        ownedUtf8Bytes: XLSX_MAX_CACHED_OWNED_UTF8_BYTES,
+        jsonBytes: XLSX_MAX_CACHED_JSON_BYTES,
+      }, 'x', 'worksheet/0',
     )).not.toThrow();
     expect(() => assertWorksheetCacheUsage(
-      { rows: XLSX_MAX_CACHED_ROWS + 1, cells: 0 }, 'x', 'worksheet/0',
+      { rows: XLSX_MAX_CACHED_ROWS + 1, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 }, 'x', 'worksheet/0',
     )).toThrow(OoxmlResourceLimitError);
     expect(() => assertWorksheetCacheUsage(
-      { rows: 0, cells: XLSX_MAX_CACHED_CELLS + 1 }, 'x', 'worksheet/0',
+      { rows: 0, cells: XLSX_MAX_CACHED_CELLS + 1, ownedUtf8Bytes: 0, jsonBytes: 0 }, 'x', 'worksheet/0',
     )).toThrow(OoxmlResourceLimitError);
+    expect(() => assertWorksheetCacheUsage(
+      { rows: 0, cells: 0, ownedUtf8Bytes: XLSX_MAX_CACHED_OWNED_UTF8_BYTES + 1, jsonBytes: 0 },
+      'x',
+      'worksheet/0',
+    )).toThrow(OoxmlResourceLimitError);
+    expect(() => assertWorksheetCacheUsage(
+      { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: XLSX_MAX_CACHED_JSON_BYTES + 1 },
+      'x',
+      'worksheet/0',
+    )).toThrow(OoxmlResourceLimitError);
+  });
+
+  it('replaces all four cached worksheet metrics without double charging', () => {
+    const current = { rows: 10, cells: 20, ownedUtf8Bytes: 30, jsonBytes: 40 };
+    const previous = { rows: 3, cells: 5, ownedUtf8Bytes: 7, jsonBytes: 11 };
+    const replacement = { rows: 4, cells: 6, ownedUtf8Bytes: 8, jsonBytes: 12 };
+
+    expect(addWorksheetCacheUsage(current, replacement, previous)).toEqual({
+      rows: 11,
+      cells: 21,
+      ownedUtf8Bytes: 31,
+      jsonBytes: 41,
+    });
   });
 });

@@ -3,6 +3,23 @@ import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
 import type { RenderPageOptions } from './types';
 import type { WireRenderPageOptions } from './worker-protocol';
+import type { DocxElementContext, DocxPagePoint } from './selection-context';
+import type { DocxElementContextOptions } from './element-context';
+import { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
+
+/** Test-only adapter for mechanics cases that need a preloaded engine. Public
+ * callers use `DocxScrollViewer.fromDocument()` directly. */
+export function makeBorrowedDocxScrollViewer(
+  container: HTMLElement,
+  options: DocxScrollViewerOptions & { document: DocxDocument },
+): DocxScrollViewer {
+  const { document, ...viewerOptions } = options;
+  return (DocxScrollViewer.fromDocument as (
+    target: HTMLElement,
+    engine: DocxDocument,
+    opts: DocxScrollViewerOptions,
+  ) => DocxScrollViewer)(container, document, viewerOptions);
+}
 
 /** A recording fake DOM element. Extends the `FakeEl` pattern from
  *  text-layer.test.ts with the surface DocxScrollViewer touches: scrollTop,
@@ -49,6 +66,7 @@ export interface FakeEl {
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
+  contains(node: unknown): boolean;
   addEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   removeEventListener(type: string, fn: (e: unknown) => void): void;
   getContext(kind: string): unknown;
@@ -133,6 +151,10 @@ export function makeEl(tag: string): FakeEl {
       if (i >= 0) this.children.splice(i, 0, n);
       else this.children.push(n);
       return n;
+    },
+    contains(node: unknown): boolean {
+      if (node === this) return true;
+      return this.children.some((child) => child.contains(node));
     },
     addEventListener(type: string, fn: (e: unknown) => void) {
       const arr = this._listeners.get(type) ?? [];
@@ -269,6 +291,7 @@ export interface RenderCall {
   /** The per-call `width` (px) the viewer passed — asserted by T3 to confirm
    *  each page gets its OWN px width (uniform px-per-pt scale, §7). */
   width?: number;
+  currentDate?: Date | number;
   /** The canvas element the viewer handed to `renderPage` (main mode). The
    *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
    *  a test confirm the on-screen canvas was NOT the render target until swap. */
@@ -286,6 +309,12 @@ export class FakeDocxEngine {
   renderCalls: RenderCall[] = [];
   bitmapCalls: RenderCall[] = [];
   createdBitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
+  elementContext: DocxElementContext | null = null;
+  elementContextCalls: Array<{
+    pageIndex: number;
+    point: DocxPagePoint;
+    options: DocxElementContextOptions;
+  }> = [];
   /** Runs fed to the `onTextRun` callback of `renderPage` (main) /
    *  `renderPageToBitmap` (worker) and returned by `collectPageRuns`, so a test
    *  can drive the viewer's per-slot text overlay (buildDocxTextLayer) and find
@@ -346,7 +375,14 @@ export class FakeDocxEngine {
     // per-slot overlay (mirrors the real renderer emitting run geometry).
     for (const r of this.feedTextRuns ?? []) opts?.onTextRun?.(r);
     return new Promise<void>((resolve, reject) => {
-      const call: RenderCall = { page, width: opts?.width, canvas, resolve: () => resolve(), reject };
+      const call: RenderCall = {
+        page,
+        width: opts?.width,
+        currentDate: opts?.currentDate,
+        canvas,
+        resolve: () => resolve(),
+        reject,
+      };
       this.renderCalls.push(call);
       if (!this.deferred) resolve();
     });
@@ -366,6 +402,7 @@ export class FakeDocxEngine {
       const call: RenderCall = {
         page,
         width: opts?.width,
+        currentDate: opts?.currentDate,
         resolve: () => resolve(bmp as unknown as ImageBitmap),
         reject,
       };
@@ -377,6 +414,14 @@ export class FakeDocxEngine {
    *  `DocxDocument.collectPageRuns`). Returns the fed runs regardless of mode. */
   collectPageRuns(_page: number, _opts?: WireRenderPageOptions): Promise<DocxTextRunInfo[]> {
     return Promise.resolve([...(this.feedTextRuns ?? [])]);
+  }
+  getElementContextAt(
+    pageIndex: number,
+    point: DocxPagePoint,
+    options: DocxElementContextOptions = {},
+  ): Promise<DocxElementContext | null> {
+    this.elementContextCalls.push({ pageIndex, point, options });
+    return Promise.resolve(this.elementContext ? structuredClone(this.elementContext) : null);
   }
   /** The per-call `width` (px) recorded for every renderPage call, in call order.
    *  T3 asserts each mounted page received its OWN px width. */

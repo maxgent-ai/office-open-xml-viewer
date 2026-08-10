@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { selectParagraphFragment } from './paragraph-pagination.js';
 import type { LineLayout, ParagraphLayout } from './types.js';
 
+const splittable = (lineEndBoundaries: readonly { segIndex: number; charOffset: number }[]) => ({
+  kind: 'splittable' as const,
+  lineEndBoundaries,
+});
+
 const paragraph = (): ParagraphLayout => ({
   kind: 'paragraph', id: 'p', source: { story: 'body', storyInstance: 'body', path: [0] },
   flowDomainId: 'body', ordinaryFlow: true,
@@ -84,10 +89,45 @@ const verticalEdgeParagraph = (
 });
 
 describe('paragraph page-local reserve selection', () => {
+  it('does not require a source boundary for a single retained marker-only line', () => {
+    const retained = {
+      ...paragraph(),
+      flowBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 10 },
+      inkBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 10 },
+      advancePt: 10,
+      lines: paragraph().lines.slice(0, 1),
+    };
+
+    const selected = selectParagraphFragment(
+      retained,
+      { boundary: null },
+      { kind: 'indivisible' },
+      20,
+      40,
+      true,
+      { keepLines: false, widowControl: false },
+    );
+
+    expect(selected.fragment?.lines).toHaveLength(1);
+    expect(selected.nextCursor).toBeNull();
+  });
+
+  it('fails closed when a splittable retained paragraph lacks a continuation boundary', () => {
+    expect(() => selectParagraphFragment(
+      paragraph(),
+      { boundary: null },
+      splittable([{ segIndex: 0, charOffset: 1 }]),
+      20,
+      40,
+      true,
+      { keepLines: false, widowControl: false },
+    )).toThrow(/align with retained lines/i);
+  });
+
   it('admits a vertical-rl final visible baseline when only the retained line box crosses the block end', () => {
     const selected = selectParagraphFragment(
       verticalEdgeParagraph('vertical-rl', 17.5),
-      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
     );
@@ -108,7 +148,7 @@ describe('paragraph page-local reserve selection', () => {
   ] as const)('relocates a %s', (_label, writingMode, baselinePt, resourceEndPt) => {
     const selected = selectParagraphFragment(
       verticalEdgeParagraph(writingMode, baselinePt, resourceEndPt),
-      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode },
     );
@@ -123,7 +163,7 @@ describe('paragraph page-local reserve selection', () => {
   it('relocates a vertical final line whose selected-face ink crosses the edge', () => {
     const selected = selectParagraphFragment(
       verticalEdgeParagraph('vertical-rl', 17.5, undefined, 0, 3, true),
-      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
     );
@@ -138,7 +178,7 @@ describe('paragraph page-local reserve selection', () => {
   it('fails closed when transformed final-line ink metrics are unavailable', () => {
     const selected = selectParagraphFragment(
       verticalEdgeParagraph('vertical-rl', 17.5, undefined, 0, undefined, true),
-      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
     );
@@ -170,7 +210,7 @@ describe('paragraph page-local reserve selection', () => {
 
     const selected = selectParagraphFragment(
       withStroke,
-      { boundary: null }, [{ segIndex: 0, charOffset: 1 }],
+      { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),
       20, 40, true,
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
     );
@@ -184,7 +224,7 @@ describe('paragraph page-local reserve selection', () => {
 
   it('admits final visible content when only authored spaceAfter crosses the region edge', () => {
     const selected = selectParagraphFragment(
-      twoLineParagraph(10), { boundary: null }, twoLineBoundaries,
+      twoLineParagraph(10), { boundary: null }, splittable(twoLineBoundaries),
       20, 40, true,
       { keepLines: false, widowControl: true, authoredSpaceAfterPt: 10 },
     );
@@ -200,7 +240,7 @@ describe('paragraph page-local reserve selection', () => {
 
   it('relocates when final visible content itself crosses the region edge', () => {
     const selected = selectParagraphFragment(
-      twoLineParagraph(10), { boundary: null }, twoLineBoundaries,
+      twoLineParagraph(10), { boundary: null }, splittable(twoLineBoundaries),
       19, 40, true,
       { keepLines: false, widowControl: true, authoredSpaceAfterPt: 10 },
     );
@@ -214,7 +254,7 @@ describe('paragraph page-local reserve selection', () => {
 
   it('keeps retained trailing border extent in the final-fragment fit decision', () => {
     const selected = selectParagraphFragment(
-      twoLineParagraph(5, 12), { boundary: null }, twoLineBoundaries,
+      twoLineParagraph(5, 12), { boundary: null }, splittable(twoLineBoundaries),
       25, 40, true,
       { keepLines: false, widowControl: true, authoredSpaceAfterPt: 5 },
     );
@@ -228,7 +268,7 @@ describe('paragraph page-local reserve selection', () => {
 
   it('keeps page-local reserve in the final-fragment fit decision', () => {
     const selected = selectParagraphFragment(
-      twoLineParagraph(10), { boundary: null }, twoLineBoundaries,
+      twoLineParagraph(10), { boundary: null }, splittable(twoLineBoundaries),
       20, 40, true,
       { keepLines: false, widowControl: true, authoredSpaceAfterPt: 10 },
       () => 1,
@@ -243,11 +283,11 @@ describe('paragraph page-local reserve selection', () => {
 
   it('re-evaluates widow removal until the fragment satisfies orphan control', () => {
     const selected = selectParagraphFragment(
-      paragraph(), { boundary: null }, [
+      paragraph(), { boundary: null }, splittable([
         { segIndex: 0, charOffset: 1 },
         { segIndex: 0, charOffset: 2 },
         { segIndex: 0, charOffset: 3 },
-      ], 20, 40, true, { keepLines: false, widowControl: true },
+      ]), 20, 40, true, { keepLines: false, widowControl: true },
     );
 
     expect(selected).toMatchObject({
@@ -259,11 +299,11 @@ describe('paragraph page-local reserve selection', () => {
 
   it('admits only the fresh-region extent when an indivisible first line must make progress', () => {
     const selected = selectParagraphFragment(
-      paragraph(), { boundary: null }, [
+      paragraph(), { boundary: null }, splittable([
         { segIndex: 0, charOffset: 1 },
         { segIndex: 0, charOffset: 2 },
         { segIndex: 0, charOffset: 3 },
-      ], 5, 5, false, { keepLines: false, widowControl: false },
+      ]), 5, 5, false, { keepLines: false, widowControl: false },
     );
 
     expect(selected.fragment?.advancePt).toBe(10);
@@ -272,11 +312,11 @@ describe('paragraph page-local reserve selection', () => {
 
   it('selects against the reserve owned by each candidate slice', () => {
     const selected = selectParagraphFragment(
-      paragraph(), { boundary: null }, [
+      paragraph(), { boundary: null }, splittable([
         { segIndex: 0, charOffset: 1 },
         { segIndex: 0, charOffset: 2 },
         { segIndex: 0, charOffset: 3 },
-      ], 25, 40, false, { keepLines: false, widowControl: false },
+      ]), 25, 40, false, { keepLines: false, widowControl: false },
       (fragment) => fragment.lines.length >= 2 ? 10 : 0,
     );
 
@@ -286,11 +326,11 @@ describe('paragraph page-local reserve selection', () => {
 
   it('keeps a note-bearing slice out of a page whose global reserve cannot grow', () => {
     const selected = selectParagraphFragment(
-      paragraph(), { boundary: null }, [
+      paragraph(), { boundary: null }, splittable([
         { segIndex: 0, charOffset: 1 },
         { segIndex: 0, charOffset: 2 },
         { segIndex: 0, charOffset: 3 },
-      ], 40, 40, false, { keepLines: false, widowControl: false },
+      ]), 40, 40, false, { keepLines: false, widowControl: false },
       (fragment) => fragment.lines.length >= 2 ? 10 : 0,
       undefined,
       (reservePt) => reservePt <= 5,
@@ -302,11 +342,11 @@ describe('paragraph page-local reserve selection', () => {
 
   it('carries the uniform ruby advance into the exact next source cursor', () => {
     const selected = selectParagraphFragment(
-      paragraph(), { boundary: null }, [
+      paragraph(), { boundary: null }, splittable([
         { segIndex: 0, charOffset: 1 },
         { segIndex: 0, charOffset: 2 },
         { segIndex: 0, charOffset: 3 },
-      ], 15, 40, false, { keepLines: false, widowControl: false },
+      ]), 15, 40, false, { keepLines: false, widowControl: false },
       undefined,
       30,
     );

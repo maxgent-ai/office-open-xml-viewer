@@ -6,15 +6,28 @@ import LiveShowcase from '../components/LiveShowcase.astro';
 import Pitch from '../components/Pitch.astro';
 import Capabilities from '../components/Capabilities.astro';
 import { latestAnnouncements, formatAnnouncementDate } from '../lib/announcements';
+import { canonicalPageUrl, siteMetadata } from '../lib/seo';
 const base = import.meta.env.BASE_URL;
+const websiteStructuredData = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: siteMetadata.name,
+  alternateName: siteMetadata.alternateName,
+  url: canonicalPageUrl('/'),
+});
 ---
-<Base>
+<Base
+  title={siteMetadata.title}
+  description={siteMetadata.description}
+  canonicalPath="/"
+>
   <Nav />
+  <script type="application/ld+json" set:html={websiteStructuredData}></script>
 
   <header class="hero" id="top">
     <div class="wrap hero-frame">
       <div class="hero-overline">
-        <span>Open-source OOXML rendering</span>
+        <span>Open-source JavaScript Office file viewer</span>
         <span>Rust / WebAssembly / Canvas 2D</span>
       </div>
 
@@ -23,14 +36,14 @@ const base = import.meta.env.BASE_URL;
           <p class="eyebrow">Rust · WebAssembly · Canvas 2D</p>
           <h1>Office documents,<br />rendered in the<br /><em>browser.</em></h1>
           <p class="hero-lead">
-            <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
-            <strong>.pptx</strong> with a Rust/WASM engine and renders them to Canvas. Parsing
-            and rendering run in the browser; no server-side document conversion, native
-            application or iframe is required.
+            <code>@silurus/ooxml</code> is an open-source JavaScript Office file viewer library
+            for <strong>.docx</strong>, <strong>.xlsx</strong> and <strong>.pptx</strong>. Its
+            Rust/WASM engine parses and renders each file to Canvas in the browser; no server-side
+            document conversion, native application or iframe is required.
           </p>
           <div class="hero-cta">
             <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
-            <a class="hero-text-link" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
+            <a class="hero-text-link" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub &#x2197;&#xFE0E;</a>
           </div>
         </div>
 
@@ -86,7 +99,7 @@ const base = import.meta.env.BASE_URL;
     <div class="wrap" data-reveal>
       <div class="news-head">
         <div><p class="eyebrow">Announcements</p><h2 class="section-title">Release and migration notices.</h2></div>
-        <a href="/announcements">View all notices ↗</a>
+        <a href="/announcements">View all notices &#x2197;&#xFE0E;</a>
       </div>
       <div class="news-grid">
         {latestAnnouncements.map((item) => (
@@ -94,7 +107,7 @@ const base = import.meta.env.BASE_URL;
             <span class="news-meta"><time datetime={item.date}>{formatAnnouncementDate(item.date)}</time>{item.version && <b>{item.version}</b>}</span>
             <strong>{item.title}</strong>
             <span class="news-summary">{item.summary}</span>
-            <span class="news-arrow">Read notice ↗</span>
+            <span class="news-arrow">Read notice &#x2197;&#xFE0E;</span>
           </a>
         ))}
       </div>
@@ -104,7 +117,7 @@ const base = import.meta.env.BASE_URL;
   <footer class="footer">
     <div class="wrap footer-inner">
       <div class="footer-brand"><BrandIcon /><div><strong>@silurus/ooxml</strong><span>Browser-based OOXML viewer · Rust/WASM + Canvas</span></div></div>
-      <div class="footer-links"><a href="/announcements">Announcements</a><a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a><a href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">VS Code</a><a href="/storybook/">Storybook</a></div>
+      <div class="footer-links"><a href="/announcements">Announcements</a><a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a><a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a><a href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">VS Code</a></div>
     </div>
     <div class="wrap footer-fine">MIT licensed · ECMA-376 / ISO-29500 informed · No document upload required.</div>
   </footer>
@@ -168,7 +181,7 @@ const base = import.meta.env.BASE_URL;
   }
   @media (max-width: 680px) {
     .hero-overline span:first-child { grid-column: 1 / 8; }.hero-overline span:last-child { grid-column: 8 / 13; text-align: right; }
-    .hero-grid { min-height: auto; padding-bottom: 46px; }.hero-copy { grid-column: 1 / 13; }.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; }
+    .hero-grid { min-height: auto; padding-bottom: 46px; }.hero-copy { grid-column: 1 / 13; }.hero-art { grid-column: 1 / 13; min-height: 280px; margin-top: 16px; opacity: 1; }
     .hero-icon { width: min(62%, 260px); }
     .hero h1 { font-size: clamp(42px, 12vw, 60px); }.hero-lead, .hero-cta { margin-left: 0; padding-left: 0; }
     .format-rail a { grid-column: span 6; border-bottom: 1px solid var(--hero-line); }.format-rail a:nth-child(2) { border-right: 0; }

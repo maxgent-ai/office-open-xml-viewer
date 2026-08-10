@@ -81,9 +81,10 @@ export interface TileInfo {
   flip: string;
   /**
    * Anchor corner the tile grid registers against:
-   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`). Default `'tl'`.
+   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`). The schema has no default; a host may
+   * apply a compatibility fallback when omitted.
    */
-  algn: string;
+  algn?: string;
 }
 
 /**
@@ -187,7 +188,7 @@ export interface Stroke {
   /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
   dashStyle?: string;
   /** Canvas line cap normalized from DrawingML/VML (`flat` → `butt`). */
-  lineCap?: CanvasLineCap;
+  lineCap?: 'butt' | 'round' | 'square';
   /** Arrow head at the start of the line */
   headEnd?: ArrowEnd;
   /** Arrow head at the end of the line */

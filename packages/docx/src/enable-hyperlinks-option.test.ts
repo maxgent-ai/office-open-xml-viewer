@@ -6,6 +6,7 @@ import {
   installDom,
   makeEl,
   makeContainer,
+  makeBorrowedDocxScrollViewer,
   FakeDocxEngine,
   type FakeEl,
 } from './scroll-viewer-test-dom.js';
@@ -158,7 +159,7 @@ async function setupScroll(
     mode,
   );
   engine.feedTextRuns = [linkRun(hyperlink)];
-  const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+  const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
     document: engine.asDoc(),
     gap: 10,
     overscan: 1,

@@ -37,4 +37,10 @@ describe('resource-governance announcement', () => {
     ]));
     expect(articlePage).toContain('<Code code={example.code} lang="ts" themes={codeThemes}');
   });
+
+  it('keeps code examples inside the article column on mobile', () => {
+    expect(articlePage).toContain('aside, .article-body { min-width: 0; overflow-wrap: anywhere; }');
+    expect(articlePage).toContain('grid-template-columns: minmax(0, 1fr);');
+    expect(articlePage).toContain('overflow-x: auto;');
+  });
 });

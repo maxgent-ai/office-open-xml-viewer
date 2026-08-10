@@ -100,9 +100,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
     async function collectAllPages(): Promise<Run[][]> {
       const restore = [installOffscreenCanvasShim(factory), installImageBitmapShim(factory)];
       try {
-        const { parseDocx } = docxMod!;
+        const { materializeDocxDocument } = docxMod!;
         const { createLayoutServices, layoutDocument, renderDocumentToCanvas } = rendererMod!;
-        const doc = parseDocx(readFileSync(DEMO));
+        const doc = await materializeDocxDocument(readFileSync(DEMO));
         const layoutServices = createLayoutServices(doc);
         // layoutDocument consumes the normalized internal epoch value, while
         // renderDocumentToCanvas accepts the public Date|number override plus

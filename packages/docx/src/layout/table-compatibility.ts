@@ -91,6 +91,18 @@ export const WORD_AUTHORED_AUTO_ROW_HEIGHT_FLOOR = defineCompatibilityRule({
   description: 'Preserve the established legacy-model behavior that an auto row with an authored height value uses that value as a lower bound.',
 });
 
+export const WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-collapsed-border-row-track-footprint',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'collapsed-border-row-track-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For automatic and at-least table rows with collapsed cell boundaries, Word includes half of the winning top and bottom rule widths in each row track. Exact rows retain their authored complete height, and cell spacing keeps independent edges out of the collapsed footprint.',
+});
+
 export const WORD_EFFECTIVE_FLOATING_TABLE_POSITIONING = defineCompatibilityRule({
   id: 'word-effective-floating-table-positioning',
   evidence: {
@@ -171,6 +183,15 @@ export function wordExactRowFloorPt(
     + Math.max(0, ...bottomCellMarginsPt);
 }
 
+/** Compatibility projection governed by
+ * {@link WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT}. */
+export function wordCollapsedBorderRowTrackFootprintPt(
+  topBoundaryWidthPt: number,
+  bottomBoundaryWidthPt: number,
+): number {
+  return (Math.max(0, topBoundaryWidthPt) + Math.max(0, bottomBoundaryWidthPt)) / 2;
+}
+
 export function wordAuthoredBorderParticipates(
   authoredStyle: string | null | undefined,
 ): boolean {
@@ -202,10 +223,19 @@ export function wordExactRowVerticalClipBounds(
   cellFlowBounds: LayoutRect,
   containingFlowBounds: LayoutRect,
 ): LayoutRect {
+  // The exact trHeight constraint is block-axis-only. Keep the containing
+  // flow's inline spill area, but extend it to any signed §17.4.50 tblInd
+  // placement owned by this cell so a table shifted into the leading margin
+  // is not clipped back to the ordinary text band.
+  const xPt = Math.min(cellFlowBounds.xPt, containingFlowBounds.xPt);
+  const rightPt = Math.max(
+    cellFlowBounds.xPt + cellFlowBounds.widthPt,
+    containingFlowBounds.xPt + containingFlowBounds.widthPt,
+  );
   return Object.freeze({
-    xPt: containingFlowBounds.xPt,
+    xPt,
     yPt: cellFlowBounds.yPt,
-    widthPt: containingFlowBounds.widthPt,
+    widthPt: rightPt - xPt,
     heightPt: cellFlowBounds.heightPt,
   });
 }

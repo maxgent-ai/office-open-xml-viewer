@@ -17,10 +17,15 @@ interface FakeEl {
   title: string;
   style: Record<string, string> & { cssText: string };
   children: FakeEl[];
-  listeners: Record<string, Array<() => void>>;
+  listeners: Record<string, Array<(event: FakeClickEvent) => void>>;
   appendChild(c: FakeEl): void;
-  addEventListener(type: string, cb: () => void): void;
-  click(): void;
+  addEventListener(type: string, cb: (event: FakeClickEvent) => void): void;
+  click(): FakeClickEvent;
+}
+
+interface FakeClickEvent {
+  defaultPrevented: boolean;
+  preventDefault(): void;
 }
 
 function makeEl(tag: string): FakeEl {
@@ -49,12 +54,17 @@ function makeEl(tag: string): FakeEl {
     appendChild(c: FakeEl) {
       this.children.push(c);
     },
-    addEventListener(type: string, cb: () => void) {
+    addEventListener(type: string, cb: (event: FakeClickEvent) => void) {
       (this.listeners[type] ??= []).push(cb);
     },
     // Fire every registered click listener, mimicking a user click.
     click() {
-      for (const cb of this.listeners['click'] ?? []) cb();
+      const event: FakeClickEvent = {
+        defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; },
+      };
+      for (const cb of this.listeners['click'] ?? []) cb(event);
+      return event;
     },
   };
   return el;
@@ -106,7 +116,8 @@ describe('buildDocxTextLayer — IX1 clickable hyperlinks', () => {
 
     // Clicking it invokes the handler with the exact external target.
     expect(onHyperlinkClick).not.toHaveBeenCalled();
-    linkSpan.click();
+    const event = linkSpan.click();
+    expect(event.defaultPrevented).toBe(true);
     expect(onHyperlinkClick).toHaveBeenCalledTimes(1);
     expect(onHyperlinkClick).toHaveBeenCalledWith(EXTERNAL);
 

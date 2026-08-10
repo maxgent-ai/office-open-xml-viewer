@@ -96,9 +96,53 @@ describe('WorksheetPullWorker', () => {
     expect(accepted).toHaveBeenCalledWith(
       0,
       expect.objectContaining({ rows: [expect.objectContaining({ index: 1 })] }),
+      expect.objectContaining({ rows: 1, cells: 0, jsonBytes: expect.any(Number) }),
       expect.objectContaining({ operationInflatedBytes: 4 }),
     );
     expect(ordinaryOperation).toHaveBeenCalledOnce();
+  });
+
+  it('drops provisional rows and their usage when the terminal model has a parse error', async () => {
+    const payloads = [
+      new TextEncoder().encode(JSON.stringify({
+        kind: 'rows',
+        rows: [{ index: 1, height: null, cells: [] }],
+      })),
+      new TextEncoder().encode(JSON.stringify({
+        kind: 'finished',
+        worksheet: {
+          name: 'Sheet1', rows: [], colWidths: {}, rowHeights: {}, defaultColWidth: 8.43,
+          defaultRowHeight: 15, mergeCells: [], freezeRows: 0, freezeCols: 0,
+          conditionalFormats: [], images: [], charts: [], parseError: 'malformed tail',
+        },
+      })),
+    ];
+    let pullIndex = 0;
+    const archive = {
+      open_sheet_cursor: vi.fn(),
+      pull_sheet_cursor: vi.fn(() => payloads[pullIndex++]),
+      sheet_cursor_pull_finished: vi.fn(() => pullIndex === payloads.length),
+      sheet_cursor_resource_usage: vi.fn(() => usageBytes),
+      acknowledge_sheet_cursor_terminal: vi.fn(),
+      cancel_sheet_cursor: vi.fn(),
+      close_sheet_cursor: vi.fn(),
+    };
+    const accepted = vi.fn();
+    const worker = new WorksheetPullWorker(() => archive, accepted);
+    const post = () => undefined;
+
+    await openWorker(worker);
+    await worker.dispatch(command(1, { kind: 'pull', sequence: 0, byteCredit: 64 * 1024 * 1024 }), post);
+    await worker.dispatch(command(2, { kind: 'ack', sequence: 0 }), post);
+    await worker.dispatch(command(3, { kind: 'pull', sequence: 1, byteCredit: 64 * 1024 * 1024 }), post);
+    await worker.dispatch(command(4, { kind: 'ack', sequence: 1 }), post);
+
+    expect(accepted).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({ rows: [], parseError: 'malformed tail' }),
+      expect.objectContaining({ rows: 0, cells: 0, ownedUtf8Bytes: 0 }),
+      expect.any(Object),
+    );
   });
 
   it('does not decode or retain row payloads in the slim transfer-only worker', async () => {

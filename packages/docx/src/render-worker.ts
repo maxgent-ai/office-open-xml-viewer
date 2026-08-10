@@ -45,6 +45,7 @@ import {
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { materializeDocumentPullOwnedModelsSession } from './document-pull-client.js';
 import {
@@ -95,7 +96,7 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
     const loaded = host.archive;
     if (!loaded) throw new Error('No docx loaded');
     const bytes = host.run(() => loaded.extract_image(path));
-    return new Blob([new Uint8Array(bytes).slice()], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   });
 }
 
@@ -150,13 +151,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       // workers (issue #781).
       dropDecodedBitmapCache(getImage);
       dropSvgImageCache(getImage);
-      const [maxEntry, maxTotal] = resourcePolicyForWasm(req.resourcePolicy);
+      const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);
       const bytes = new Uint8Array(req.data);
       // Construction and every later cursor call run under `host.run`. Render
       // mode drains the same pull/ACK state machine locally, so it avoids both a
       // monolithic Rust model JSON value and an unnecessary Worker transfer.
       host.run(() => {
-        const archive = new DocxArchive(bytes, maxEntry, maxTotal);
+        const archive = new DocxArchive(bytes, maxEntry, maxTotal, maxEntries);
         host.setArchive(archive);
       });
       documentGeneration += 1;
@@ -217,7 +218,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         embeddedFaces = await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
           if (!loaded) throw new Error('No docx loaded');
-          return new Uint8Array(host.run(() => loaded.extract_image(p))).slice();
+          return host.run(() => loaded.extract_image(p));
         });
       }
       const localMetrics = await loadDocxLocalFontMetrics(model);
@@ -282,6 +283,17 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       post({ type: 'runsCollected', id, runs });
       return;
     }
+    if (req.type === 'hitTestElement') {
+      if (!doc) throw new Error('Document not loaded');
+      const context = hitTestSelectedDocxElementContext(
+        doc.layoutServices,
+        req.pageIndex,
+        req.point,
+        { ...req.opts, defaultCurrentDateMs: doc.defaultCurrentDateMs },
+      );
+      post({ type: 'elementHit', id, context });
+      return;
+    }
     if (req.type === 'extractImage') {
       // Worker render mode decodes images in-worker via the getImage closure;
       // this arm exists only for protocol parity with worker.ts. Raw bytes are
@@ -289,8 +301,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       // transfer).
       const archive = host.archive;
       if (!archive) throw new Error('No docx loaded');
-      const raw = host.run(() => archive.extract_image(req.path));
-      const bytes = new Uint8Array(raw).slice().buffer;
+      // wasm-bindgen returns an owned full-span Uint8Array; transfer its
+      // standalone buffer directly, matching the parse worker contract.
+      const bytes = host.run(() => archive.extract_image(req.path).buffer as ArrayBuffer);
       post({ type: 'imageExtracted', id, bytes }, [bytes]);
       return;
     }

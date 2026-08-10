@@ -393,10 +393,19 @@ describe('textRunsForPage', () => {
       { scale: 1 },
     );
 
-    expect(runs.map(({ text, paragraphId }) => ({ text, paragraphId }))).toEqual([
-      { text: 'first', paragraphId: '1A2B3C4D' },
-      { text: 'second', paragraphId: '1A2B3C4D' },
-      { text: 'third', paragraphId: undefined },
+    expect(runs.map(({ text, paragraphId, source }) => ({ text, paragraphId, source }))).toEqual([
+      {
+        text: 'first', paragraphId: '1A2B3C4D',
+        source: { story: 'body', storyInstance: 'body:test', path: [0] },
+      },
+      {
+        text: 'second', paragraphId: '1A2B3C4D',
+        source: { story: 'body', storyInstance: 'body:test', path: [0] },
+      },
+      {
+        text: 'third', paragraphId: undefined,
+        source: { story: 'body', storyInstance: 'body:test', path: [0] },
+      },
     ]);
   });
 

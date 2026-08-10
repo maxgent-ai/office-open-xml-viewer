@@ -179,13 +179,18 @@ impl DocxArchive {
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
         max_total_inflated_bytes: Option<u64>,
+        max_archive_entries: Option<u64>,
     ) -> Result<DocxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // RB7 (MAJOR): a truncated / corrupt CONTAINER is deferred, not thrown, so
         // `parse()` can degrade it to a placeholder document instead of the
         // constructor failing with an opaque error.
-        let archive =
-            parser::open_zip_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes);
+        let archive = parser::open_zip_with_policy(
+            data,
+            max_archive_entry_bytes,
+            max_total_inflated_bytes,
+            max_archive_entries,
+        );
         if let Err(error) = &archive {
             if error.starts_with("OOXML_RESOURCE_LIMIT:") {
                 return Err(JsValue::from_str(error));
@@ -1088,7 +1093,7 @@ mod tests {
         let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<String, JsValue> = docx_to_markdown;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
             extract_image;
-        let _: fn(Vec<u8>, Option<u64>, Option<u64>) -> Result<DocxArchive, JsValue> =
+        let _: fn(Vec<u8>, Option<u64>, Option<u64>, Option<u64>) -> Result<DocxArchive, JsValue> =
             DocxArchive::new;
         let _: fn(&mut DocxArchive) -> Result<Vec<u8>, JsValue> = DocxArchive::parse;
         let _: fn(&mut DocxArchive, &str) -> Result<Vec<u8>, JsValue> = DocxArchive::extract_image;

@@ -100,7 +100,7 @@ export interface Worksheet {
   /** Sheet tab color (ECMA-376 §18.3.1.79). */
   tabColor?: string | null;
   /** AutoFilter header range (ECMA-376 §18.3.1.2). */
-  autoFilter?: CellRange | null;
+  autoFilter?: WorksheetCellRange | null;
   /** Hyperlinks in this worksheet (ECMA-376 §18.3.1.47). */
   hyperlinks?: Hyperlink[];
   /** A1-style cell refs of commented cells (ECMA-376 §18.7.3). Rendered as a
@@ -178,7 +178,7 @@ export interface PivotTableMetadata {
   extensionUris?: string[];
 }
 
-export interface PivotLocation extends CellRange {
+export interface PivotLocation extends WorksheetCellRange {
   firstHeaderRow: number;
   firstDataRow: number;
   firstDataCol: number;
@@ -312,7 +312,7 @@ export interface SlicerElementStyle {
 }
 
 export interface TableInfo {
-  range: CellRange;
+  range: WorksheetCellRange;
   styleName: string;
   headerRowCount: number;
   totalsRowCount: number;
@@ -430,36 +430,6 @@ export type {
   ChartManualLayout,
   LegendManualLayout,
 } from '@silurus/ooxml-core';
-import type {
-  ChartSeries as CoreChartSeries,
-  ChartSeriesDataLabels as CoreSeriesDataLabels,
-  ChartDataLabelOverride as CoreDataLabelOverride,
-  ChartDataPointOverride as CoreDataPointOverride,
-  ChartErrBars as CoreErrBars,
-  ChartManualLayout as CoreManualLayout,
-} from '@silurus/ooxml-core';
-/**
- * @deprecated Chart series are now the core {@link ChartModel}'s `ChartSeries`.
- * Kept as an alias for backward-compatible imports; scheduled for removal in a
- * future breaking release.
- */
-export type XlsxChartSeries = CoreChartSeries;
-/** @deprecated Use `ChartSeriesDataLabels` from @silurus/ooxml-core. Scheduled
- * for removal in a future breaking release. */
-export type SeriesDataLabels = CoreSeriesDataLabels;
-/** @deprecated Use `ChartDataLabelOverride` from @silurus/ooxml-core. Scheduled
- * for removal in a future breaking release. */
-export type DataLabelOverride = CoreDataLabelOverride;
-/** @deprecated Use `ChartDataPointOverride` from @silurus/ooxml-core. Scheduled
- * for removal in a future breaking release. */
-export type DataPointOverride = CoreDataPointOverride;
-/** @deprecated Use `ChartErrBars` from @silurus/ooxml-core. Scheduled for
- * removal in a future breaking release. */
-export type ErrBars = CoreErrBars;
-/** @deprecated Use `ChartManualLayout` from @silurus/ooxml-core. Scheduled for
- * removal in a future breaking release. */
-export type ManualLayout = CoreManualLayout;
-
 export interface ChartAnchor {
   fromCol: number; fromColOff: number;
   fromRow: number; fromRowOff: number;
@@ -719,7 +689,8 @@ export interface ImageAnchor {
   duotone?: Duotone;
 }
 
-export interface CellRange {
+/** Rectangular worksheet-model range; distinct from Viewer selection state. */
+export interface WorksheetCellRange {
   top: number;
   left: number;
   bottom: number;
@@ -741,7 +712,7 @@ export interface Hyperlink {
 }
 
 export interface ConditionalFormat {
-  sqref: CellRange[];
+  sqref: WorksheetCellRange[];
   rules: CfRule[];
 }
 
@@ -1047,7 +1018,8 @@ export interface XlsxTextRunInfo {
   col: number;
 }
 
-export interface RenderViewportOptions {
+/** Public options for {@link XlsxWorkbook.renderViewport}. */
+export interface XlsxRenderViewportOptions {
   width?: number;
   height?: number;
   dpr?: number;
@@ -1059,15 +1031,6 @@ export interface RenderViewportOptions {
   freezeCols?: number;
   /** Scale factor applied to all cell/header dimensions (default 1). */
   cellScale?: number;
-  /** Pre-decoded image sources keyed by their zip `imagePath` (for ImageAnchor
-   *  and group-leaf image rendering). */
-  loadedImages?: Map<string, CanvasImageSource | null>;
-  /** Fetch an embedded image's bytes by zip path, wrapped in a Blob of the given
-   *  MIME (twin of pptx/docx `fetchImage`). The orchestrator decodes these into
-   *  {@link loadedImages} before the synchronous draw. Supplied by
-   *  {@link XlsxWorkbook} (routing through the worker) or the render worker
-   *  (reading its retained buffer). Absent ⇒ no images are decoded. */
-  fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
   onTextRun?: (info: XlsxTextRunInfo) => void;
   /** Highlighted row range for selected row headers (1-indexed inclusive).
@@ -1078,6 +1041,14 @@ export interface RenderViewportOptions {
   selectedColRange?: { start: number; end: number; strong: boolean } | null;
 }
 
+/** Internal renderer options. The workbook owns both the byte source and the
+ * frame-local decoded image map, so these fields are not part of its public
+ * method contract. */
+export interface RenderViewportOptions extends XlsxRenderViewportOptions {
+  loadedImages?: Map<string, CanvasImageSource | null>;
+  fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+}
+
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | {
@@ -1085,17 +1056,6 @@ export type WorkerRequest =
       id: number;
       data: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
-    }
-  /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
-   *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
-   *  it here would structured-clone the entire file per sheet switch for no
-   *  gain. `parseSheet` is therefore only valid AFTER a `parse` (a `parseSheet`
-   *  with no retained buffer is a protocol violation). */
-  | {
-      type: 'parseSheet';
-      id: number;
-      sheetIndex: number;
-      sheetName: string;
     }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
       PullSessionIdentity<number>)
@@ -1121,7 +1081,6 @@ export type WorkerResponse =
       workbookJson: ArrayBuffer;
       usage?: OoxmlResourceUsageSnapshot;
     }
-  | { type: 'parsedSheet'; id: number; worksheetJson: ArrayBuffer }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }

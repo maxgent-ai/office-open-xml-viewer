@@ -132,7 +132,12 @@ export class DocxFindController {
     for (let page = 0; page < pages; page++) {
       let runs = pageRuns.get(page);
       if (!runs) {
-        runs = await this._collectPageRuns(page);
+        try {
+          runs = await this._collectPageRuns(page);
+        } catch (error) {
+          if (generation !== this._generation) return [];
+          throw error;
+        }
         if (generation !== this._generation) return [];
         pageRuns.set(page, runs);
       }

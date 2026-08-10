@@ -171,7 +171,7 @@ function createServices(input: Readonly<{
         return {
           layout: paragraph(sourceIndex, heightPt),
           blockExtentPt: heightPt,
-          lineEndBoundaries: [],
+          fragmentation: { kind: 'indivisible' },
         };
       },
       measureTable: () => { throw new Error('unused'); },

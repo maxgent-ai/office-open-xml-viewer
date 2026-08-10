@@ -75,6 +75,20 @@ function pageFieldRun(): DocParagraph['runs'][number] {
   return { type: 'field', ...run } as DocParagraph['runs'][number];
 }
 
+function vmlRectRun(horizontalOffsetPt: number): DocParagraph['runs'][number] {
+  return {
+    type: 'shape', inline: false,
+    widthPt: 45, heightPt: 14,
+    anchorXPt: horizontalOffsetPt, anchorYPt: 0,
+    anchorXFromMargin: true, anchorYFromPara: true,
+    anchorXRelativeFrom: 'column', anchorYRelativeFrom: 'paragraph',
+    presetGeometry: 'rect', adjValues: [], subpaths: [],
+    fill: null, stroke: '000000', strokeWidth: 0.75,
+    rotation: 0, flipH: false, flipV: false,
+    textBlocks: [], textBoxContent: [],
+  } as unknown as DocParagraph['runs'][number];
+}
+
 const missingEdges = (): AnchorEdgesInput => ({
   topPt: null, topStatus: 'missing',
   rightPt: null, rightStatus: 'missing',
@@ -262,6 +276,21 @@ function bodyParagraphs(paragraphs: DocParagraph[]): ParagraphLayout[] {
 }
 
 describe('table-cell parser-owned anchor reflow', () => {
+  it('translates a public VML text-relative rectangle with its owning cell', () => {
+    const retainedParagraph = cellParagraphs(model([
+      paragraph([textRun('Postcode'), vmlRectRun(10)]),
+    ]))[0]!;
+    const drawing = retainedParagraph.drawings.find((candidate) =>
+      candidate.anchorLayer?.acquisitionOccurrenceId?.startsWith('public-shape:'));
+
+    expect(drawing).toBeDefined();
+    expect(drawing!.flowBounds.xPt).toBe(10);
+    // A VML `mso-position-horizontal-relative:text` rectangle maps to the
+    // containing column. Inside a table that column is the cell-local text
+    // frame, so the final page projection must translate it with the host.
+    expect(drawing!.anchorLayer?.horizontalOwnership).toBe('host');
+  });
+
   it('keeps a layoutInCell column anchor in the owning cell coordinate space', () => {
     const retainedParagraph = cellParagraphs(model([
       paragraph([
@@ -823,6 +852,39 @@ describe('table-cell parser-owned anchor reflow', () => {
     expect(row.flowBounds.yPt + row.flowBounds.heightPt).toBeGreaterThanOrEqual(
       placedMovingBottomPt,
     );
+  });
+
+  it('does not grow an automatic row for an overlapping layoutInCell wrapNone object', () => {
+    const baseline = model([
+      paragraph([textRun('A')]),
+    ], 100);
+    const withOverlay = model([
+      paragraph([
+        ...anchoredImageRuns({
+          occurrenceId: 'cell-overlay',
+          verticalRelativeFrom: 'paragraph',
+          horizontalOffsetPt: 0,
+          verticalOffsetPt: 10,
+          widthPt: 80,
+          heightPt: 80,
+          allowOverlap: true,
+          wrapKind: 'none',
+        }),
+        textRun('A'),
+      ]),
+    ], 100);
+    const rowHeight = (document: DocxDocumentModel): number => {
+      const result = layoutDocument(
+        document,
+        createLayoutServices(document, { measureContext: makeCtx() }),
+        { currentDateMs: 0 },
+      );
+      const table = result.pages[0]!.layers.body.find((node) => node.kind === 'table');
+      if (!table || table.kind !== 'table') throw new Error('Expected retained table');
+      return table.rows[0]!.heightPt;
+    };
+
+    expect(rowHeight(withOverlay)).toBe(rowHeight(baseline));
   });
 });
 

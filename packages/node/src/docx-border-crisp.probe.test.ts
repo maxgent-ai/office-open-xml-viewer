@@ -74,11 +74,11 @@ function lum(r: number, g: number, b: number): number {
 /** Parse the sample and splice a single empty paragraph carrying a thin
  *  pure-black BOTTOM border at the top of the body. Rendered at scale = 1 px/pt,
  *  the 1 pt border resolves to lineWidth = 1 logical px (Math.max(0.5, 1*1)). */
-function buildInjected(): DocxDocumentModel {
+async function buildInjected(): Promise<DocxDocumentModel> {
   if (!docxMod) throw new Error('docx WASM unavailable (run pnpm build:wasm)');
-  const { parseDocx } = docxMod;
+  const { materializeDocxDocument } = docxMod;
   const buf = readFileSync(SAMPLE);
-  const doc = parseDocx(buf);
+  const doc = await materializeDocxDocument(buf);
 
   // A standalone paragraph with no runs, no shading, and ONLY a thin black
   // bottom border (space 0 so it sits at the bottom of the empty mark line).
@@ -139,7 +139,7 @@ async function renderInjected(dpr: number): Promise<{
   h: number;
   canvas: InstanceType<typeof Canvas>;
 }> {
-  const doc = buildInjected();
+  const doc = await buildInjected();
   const { renderDocumentToCanvas } = rendererMod!;
   // Render at scale = 1 px/pt so the 1 pt border = lineWidth 1 logical px.
   const widthPx = doc.section.pageWidth; // pt → px at scale 1

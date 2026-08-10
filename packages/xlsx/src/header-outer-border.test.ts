@@ -65,6 +65,33 @@ function recordingCtx(width = 300, height = 120): { ctx: CanvasRenderingContext2
 }
 
 describe('XLSX header frame ownership', () => {
+  it('bounds frozen-band materialization to the visible canvas', () => {
+    const ws = worksheet(false);
+    let rowReads = 0;
+    let colReads = 0;
+    ws.rowHeights = new Proxy({}, {
+      get: (target, key, receiver) => {
+        if (typeof key === 'string' && /^\d+$/.test(key)) rowReads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    ws.colWidths = new Proxy({}, {
+      get: (target, key, receiver) => {
+        if (typeof key === 'string' && /^\d+$/.test(key)) colReads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const { ctx } = recordingCtx();
+
+    renderViewport(ctx, ws, { ...STYLES }, { row: 1, col: 1, rows: 2, cols: 2 }, {
+      freezeRows: 4_294_967_295,
+      freezeCols: 4_294_967_295,
+    });
+
+    expect(rowReads).toBeLessThan(100);
+    expect(colReads).toBeLessThan(100);
+  });
+
   it.each([
     { direction: 'LTR', rtl: false, outerX: 0.5, dividerX: 49.5 },
     { direction: 'RTL', rtl: true, outerX: 299.5, dividerX: 250.5 },

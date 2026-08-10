@@ -144,7 +144,8 @@ function columnState(
 describe('table intrinsic content widths', () => {
   const intrinsicContext = (overrides: Partial<ParagraphLayoutContext> = {}): ParagraphLayoutContext => ({
     lineGrid: { active: false, pitchPt: null },
-    characterGrid: { active: false, deltaPt: 0 },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
     physicalIndentLeftPt: 0,
     physicalIndentRightPt: 0,
     firstIndentPt: 0,
@@ -167,7 +168,7 @@ describe('table intrinsic content widths', () => {
 
     expect(measureParagraphIntrinsicWidths(
       source,
-      intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
+      intrinsicContext({ characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 12, deltaPt: 2 } }),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
       {
@@ -185,7 +186,7 @@ describe('table intrinsic content widths', () => {
 
     expect(measureParagraphIntrinsicWidths(
       source,
-      intrinsicContext({ characterGrid: { active: true, deltaPt: 2 } }),
+      intrinsicContext({ characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 12, deltaPt: 2 } }),
       200,
       { context: measuringContext(), fontFamilyClasses: {} },
       {
@@ -193,6 +194,85 @@ describe('table intrinsic content widths', () => {
         documentHasEastAsianText: true,
       },
     )).toEqual({ minWidthPt: 7, maxWidthPt: 12 });
+  });
+
+  it('uses the balanced space cells and SBCS grid delta for intrinsic width', () => {
+    const source = paragraph([textRun('AB  ')]);
+    const context = measuringContext((text) => [...text].reduce(
+      (sum, character) => sum + (character === ' ' ? 3 : character === '一' ? 10 : 5),
+      0,
+    ));
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({
+        characterGrid: {
+          active: true,
+          kind: 'linesAndChars',
+          pitchPt: 3,
+          deltaPt: -2,
+        },
+      }),
+      200,
+      { context, fontFamilyClasses: {} },
+      {
+        pageIndex: 0,
+        totalPages: 1,
+        pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+        balanceSingleByteDoubleByteWidth: true,
+        layoutServices: createLayoutServices(model([]), { measureContext: context }),
+      },
+    )).toEqual({
+      // The breakable trailing-space sequence is excluded from the minimum;
+      // the unbroken maximum retains both balanced half-width cells.
+      minWidthPt: 8,
+      maxWidthPt: 16,
+    });
+  });
+
+  it('uses per-grapheme whole-cell allocation for snapToChars intrinsic widths', () => {
+    const source = paragraph([textRun('漢字')]);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({
+        characterGrid: {
+          active: true,
+          kind: 'snapToChars',
+          pitchPt: 4,
+          deltaPt: -6,
+        },
+      }),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+      },
+    )).toEqual({ minWidthPt: 8, maxWidthPt: 16 });
+  });
+
+  it('keeps Latin and East-Asian snapToChars allocation blocks distinct', () => {
+    const source = paragraph([textRun('A漢')]);
+
+    expect(measureParagraphIntrinsicWidths(
+      source,
+      intrinsicContext({
+        characterGrid: {
+          active: true,
+          kind: 'snapToChars',
+          pitchPt: 4,
+          deltaPt: -6,
+        },
+      }),
+      200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+        documentHasEastAsianText: true,
+      },
+    )).toEqual({ minWidthPt: 8, maxWidthPt: 16 });
   });
 
   it('keeps adjacent tate-chu-yoko runs as separate one-em cells', () => {
@@ -282,6 +362,35 @@ describe('table intrinsic content widths', () => {
     const source = table([row([cell([nested as CellElement])])], [0]);
 
     expect(resolveColumnWidths(source, 200, columnState(measuringContext()))).toEqual([80]);
+  });
+
+  it('does not shrink a fixed nested table to its containing cell width', () => {
+    const nested = table([
+      row([cell([]), cell([])]),
+    ], [60, 60], 'fixed');
+    const outer = table([
+      row([cell([nested as CellElement])]),
+    ], [100], 'fixed');
+    const document = model([outer as BodyElement]);
+    const layout = layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: measuringContext() }),
+      { currentDateMs: 0 },
+    );
+    const retainedOuter = layout.pages[0]?.layers.body.find((node) => node.kind === 'table');
+    if (!retainedOuter || retainedOuter.kind !== 'table') {
+      throw new Error('Expected outer retained table');
+    }
+    const retainedNested = retainedOuter.rows[0]?.cells[0]?.blocks[0]?.layout;
+    if (!retainedNested || retainedNested.kind !== 'table') {
+      throw new Error('Expected nested retained table');
+    }
+
+    // ECMA-376 §17.18.87 fixed layout resolves tblGrid/tcW against an authored
+    // tblW; the containing cell is not an implicit preferred table width.
+    // Word therefore permits a fixed nested table to overflow its cell.
+    expect(retainedNested.columnWidthsPt).toEqual([60, 60]);
+    expect(retainedNested.flowBounds.widthPt).toBe(120);
   });
 
   it('shapes identical formatting across a run seam as one proportional atom', () => {

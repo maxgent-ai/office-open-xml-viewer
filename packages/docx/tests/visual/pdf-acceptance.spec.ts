@@ -120,10 +120,12 @@ test.describe('local Word PDF acceptance', () => {
 
     const expectedPageCount = manifest.pageCount ?? referencePages.length;
     expect(referencePages, 'Word PDF page count').toHaveLength(expectedPageCount);
-    expect(rendered.pages, 'DOCX rendered page count').toHaveLength(expectedPageCount);
-    expect(rendered.pageCount).toBe(expectedPageCount);
+    // Keep the page-count assertion loud, but compare every page that exists on
+    // both sides first. A pagination regression must still leave useful image
+    // evidence for the shared prefix instead of failing before page 1 is diffed.
+    const comparablePageCount = Math.min(referencePages.length, rendered.pages.length);
 
-    for (let pageIndex = 0; pageIndex < referencePages.length; pageIndex += 1) {
+    for (let pageIndex = 0; pageIndex < comparablePageCount; pageIndex += 1) {
       const pageNumber = pageIndex + 1;
       const expectation = manifest.pages?.[String(pageNumber)];
       const text = normalizedText(rendered.pages[pageIndex]!.text);
@@ -178,5 +180,8 @@ test.describe('local Word PDF acceptance', () => {
       );
       expect(matchPct, `page ${pageNumber} Word-PDF pixel match`).toBeGreaterThanOrEqual(minimum);
     }
+
+    expect(rendered.pages, 'DOCX rendered page count').toHaveLength(expectedPageCount);
+    expect(rendered.pageCount).toBe(expectedPageCount);
   });
 });

@@ -141,8 +141,8 @@ interface Rendered {
 }
 
 async function render(docxBytes: Uint8Array, pngBytes: Uint8Array): Promise<Rendered> {
-  const { parseDocx } = docxMod!;
-  const doc = parseDocx(docxBytes);
+  const { materializeDocxDocument } = docxMod!;
+  const doc = await materializeDocxDocument(docxBytes);
   const { renderDocumentToCanvas } = rendererMod!;
   const widthPx = doc.section.pageWidth;
   const heightPx = doc.section.pageHeight;

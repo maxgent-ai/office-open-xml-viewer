@@ -142,8 +142,8 @@ interface Rendered {
 }
 
 async function render(): Promise<Rendered> {
-  const { parseDocx } = docxMod!;
-  const doc = parseDocx(watermarkDocx());
+  const { materializeDocxDocument } = docxMod!;
+  const doc = await materializeDocxDocument(watermarkDocx());
   const { renderDocumentToCanvas } = rendererMod!;
   const widthPx = doc.section.pageWidth; // scale 1 px/pt
   const heightPx = doc.section.pageHeight;

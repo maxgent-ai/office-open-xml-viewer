@@ -890,8 +890,13 @@ pub fn scoped_limits(
     max_archive_entry_bytes: Option<u64>,
     max_total_inflated_bytes: Option<u64>,
 ) -> ResourceScope {
-    ResourceGovernor::from_wasm(format, max_archive_entry_bytes, max_total_inflated_bytes)
-        .scope(operation)
+    ResourceGovernor::from_wasm(
+        format,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        None,
+    )
+    .scope(operation)
 }
 
 /// Install a retained archive's persistent governor for one synchronous method.
@@ -1331,7 +1336,7 @@ mod tests {
 
     #[test]
     fn declared_entry_limit_is_typed_and_poisoned() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(64), None);
         let _scope = governor.scope("parse");
         let mut archive = archive_with("word/document.xml", b"12345678");
         validate_archive_limits(&mut archive).unwrap();
@@ -1373,7 +1378,7 @@ mod tests {
             .expect("central-directory header");
         bytes[central + 24..central + 28].copy_from_slice(&1u32.to_le_bytes());
 
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(4), Some(64), None);
         let _scope = governor.scope("parse");
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         validate_archive_limits(&mut archive).unwrap();
@@ -1387,7 +1392,7 @@ mod tests {
 
     #[test]
     fn distinct_total_counts_two_entries_and_stops_at_limit_plus_one() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(16), Some(6));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(16), Some(6), None);
         let _scope = governor.scope("parse");
         let mut archive = archive_with_two();
         validate_archive_limits(&mut archive).unwrap();
@@ -1404,7 +1409,7 @@ mod tests {
 
     #[test]
     fn reread_does_not_double_charge_distinct_total() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(16), Some(8));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(16), Some(8), None);
         let mut archive = archive_with_two();
         {
             let _scope = governor.scope("parse");
@@ -1421,7 +1426,7 @@ mod tests {
 
     #[test]
     fn prefix_then_full_charges_only_the_larger_observation() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(16), Some(8));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(16), Some(8), None);
         let _scope = governor.scope("parse-sheet");
         let mut archive = archive_with("xl/sheet.xml", b"12345678");
         validate_archive_limits(&mut archive).unwrap();
@@ -1439,7 +1444,7 @@ mod tests {
 
     #[test]
     fn full_then_prefix_adds_no_distinct_bytes() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(16), Some(8));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(16), Some(8), None);
         let _scope = governor.scope("parse-sheet");
         let mut archive = archive_with("xl/sheet.xml", b"12345678");
         validate_archive_limits(&mut archive).unwrap();
@@ -1451,7 +1456,7 @@ mod tests {
 
     #[test]
     fn prefix_preserves_utf8_boundary() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(16), Some(16));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(16), Some(16), None);
         let _scope = governor.scope("probe");
         let mut archive = archive_with("xl/sheet.xml", "ab€cd".as_bytes());
         validate_archive_limits(&mut archive).unwrap();
@@ -1465,7 +1470,7 @@ mod tests {
     #[test]
     fn hard_entry_count_has_no_dummy_part() {
         let mut archive = archive_with_two();
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(16), Some(16));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(16), Some(16), None);
         let _scope = governor.scope("open");
         // Exercise the resource layer directly with a proven raw count beyond
         // the hard quota; ZIP preflight wiring is covered separately.
@@ -1662,7 +1667,7 @@ mod tests {
         bytes.extend_from_slice(b"trailing-garbage");
         assert!(zip::ZipArchive::new(Cursor::new(bytes.as_slice())).is_ok());
 
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let error = preflight_archive_limits(&bytes).unwrap_err();
         assert!(!error.starts_with("OOXML_RESOURCE_LIMIT:"));
@@ -1742,7 +1747,7 @@ mod tests {
         for replacement in [b"\xc3\xa9rd/a.xml".as_slice(), b"\xfford/a.xml".as_slice()] {
             let mut bytes = zip_bytes(false);
             replace_raw_name(&mut bytes, replacement);
-            let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64));
+            let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64), None);
             let _scope = governor.scope("open");
             let error = preflight_archive_limits(&bytes).unwrap_err();
             assert!(error.contains("ASCII"));
@@ -1753,7 +1758,7 @@ mod tests {
 
     #[test]
     fn raw_eocd_entry_count_is_rejected_before_zip_open() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let (mut eocd, central_offset, central_size) = synthetic_entries(20_001, 0);
         append_classic_eocd(
@@ -1770,13 +1775,19 @@ mod tests {
         // Preflight must continue scanning and use the real record above.
         let error = preflight_archive_limits(&eocd).unwrap_err();
         let json = details(&error);
-        assert_eq!(json["details"]["violation"]["metric"], "entry-count");
-        assert_eq!(json["details"]["violation"]["observed"], 20_001);
+        let violation = &json["details"]["violation"];
+        assert_eq!(violation["metric"], "entry-count");
+        assert_eq!(violation["limit"], resource::STANDARD_MAX_ARCHIVE_ENTRIES);
+        assert_eq!(
+            violation["observed"],
+            resource::STANDARD_MAX_ARCHIVE_ENTRIES + 1
+        );
+        assert_eq!(violation["configurable"], true);
     }
 
     #[test]
     fn raw_zip64_eocd_entry_count_is_rejected_before_zip_open() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let (mut bytes, central_offset, central_size) = synthetic_entries(20_001, 0);
 
@@ -1812,13 +1823,19 @@ mod tests {
 
         let error = preflight_archive_limits(&bytes).unwrap_err();
         let json = details(&error);
-        assert_eq!(json["details"]["violation"]["metric"], "entry-count");
-        assert_eq!(json["details"]["violation"]["observed"], 20_001);
+        let violation = &json["details"]["violation"];
+        assert_eq!(violation["metric"], "entry-count");
+        assert_eq!(violation["limit"], resource::STANDARD_MAX_ARCHIVE_ENTRIES);
+        assert_eq!(
+            violation["observed"],
+            resource::STANDARD_MAX_ARCHIVE_ENTRIES + 1
+        );
+        assert_eq!(violation["configurable"], true);
     }
 
     #[test]
     fn malformed_eocd_remains_an_ordinary_container_error() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let mut bytes = 0x0605_4b50u32.to_le_bytes().to_vec();
         bytes.resize(22, 0);
@@ -1833,7 +1850,7 @@ mod tests {
         let mut bytes = zip_bytes(false);
         let central = last_signature(&bytes, CENTRAL_DIRECTORY_HEADER_SIGNATURE);
         bytes[central] = 0;
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let error = preflight_archive_limits(&bytes).unwrap_err();
         assert!(!error.starts_with("OOXML_RESOURCE_LIMIT:"));
@@ -1854,7 +1871,7 @@ mod tests {
         bytes[fake_central + 42..fake_central + 46].copy_from_slice(&u32::MAX.to_le_bytes());
         append_classic_eocd(&mut bytes, 0, 46, 1, &[]);
 
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Docx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let preflight = preflight_archive_limits(&bytes).unwrap();
         assert_eq!(preflight.entry_count, 2);
@@ -1878,7 +1895,7 @@ mod tests {
             append_classic_eocd(&mut bytes, 0, fake_directory_bytes as u32, fake_count, &[]);
             bytes.extend_from_slice(b"end");
 
-            let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(64), Some(64));
+            let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(64), Some(64), None);
             let _scope = governor.scope("open");
             let preflight = preflight_archive_limits(&bytes).unwrap();
             assert_eq!(preflight.entry_count, 2);
@@ -1892,7 +1909,7 @@ mod tests {
         bytes.resize(22, 0);
         bytes.extend_from_slice(&zip_bytes(false));
 
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let preflight = preflight_archive_limits(&bytes).unwrap();
         assert_eq!(preflight.entry_count, 2);
@@ -1911,7 +1928,7 @@ mod tests {
         // An EOCD-looking suffix cannot latch a resource violation until its
         // claimed central/local structure is proven semantically coherent.
         append_classic_eocd(&mut bytes, 0, central_size as u32, 1, &[]);
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let error = preflight_archive_limits(&bytes).unwrap_err();
         assert!(!error.starts_with("OOXML_RESOURCE_LIMIT:"));
@@ -1926,7 +1943,7 @@ mod tests {
         let (mut bytes, central_offset, central_size) = synthetic_entries(count, MAX_NAME);
         append_classic_eocd(&mut bytes, central_offset, central_size, count as u16, &[]);
 
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         let error = preflight_archive_limits(&bytes).unwrap_err();
         let json = details(&error);
@@ -1939,7 +1956,7 @@ mod tests {
 
     #[test]
     fn central_directory_limit_accepts_exact_limit_and_poisons_at_plus_one() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Pptx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         resource::observe_archive_central_directory_bytes(HARD_MAX_CENTRAL_DIRECTORY_BYTES)
             .unwrap();
@@ -1957,7 +1974,7 @@ mod tests {
 
     #[test]
     fn zip64_footer_limit_accepts_exact_and_types_plus_one() {
-        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64));
+        let governor = ResourceGovernor::from_wasm(OoxmlFormat::Xlsx, Some(64), Some(64), None);
         let _scope = governor.scope("open");
         preflight_archive_limits(&empty_zip64_with_footer_bytes(
             HARD_MAX_CENTRAL_DIRECTORY_BYTES as usize,

@@ -167,6 +167,50 @@ describe('layoutBidiTabStops (§17.3.1.37 mirror — margin-anchored reading fra
     expect(edge[2]).toBeCloseTo(210, 6);
   });
 
+  it('aligns the first following period at a decimal stop across segment boundaries', () => {
+    const items: BidiTabItem[] = [
+      { isTab: false, width: 40 },
+      { isTab: true, width: 0 },
+      { isTab: false, width: 10 },
+      { isTab: false, width: 30, decimalOffset: 5 },
+      { isTab: false, width: 10 },
+    ];
+    const res = layoutBidiTabStops(
+      items,
+      [{ pos: 200, alignment: 'decimal', leader: 'none' }],
+      0,
+      avail,
+      1000,
+    );
+    const edge = readingEdges(items, res, 0);
+    // The logical prefix is 10 + 5px, but the LTR numeric cell is embedded in
+    // a mirrored reading frame. Its physical period-left edge is therefore
+    // total(50) - prefix(15) = 35px from the cell's physical right edge.
+    expect(edge[1]).toBeCloseTo(165, 6);
+    expect(edge[1] + 35).toBeCloseTo(200, 6);
+  });
+
+  it('aligns a no-decimal LTR cell by its physical right edge', () => {
+    const items: BidiTabItem[] = [
+      { isTab: false, width: 40 },
+      { isTab: true, width: 0 },
+      { isTab: false, width: 50 },
+    ];
+    const res = layoutBidiTabStops(
+      items,
+      [{ pos: 200, alignment: 'decimal', leader: 'none' }],
+      0,
+      avail,
+      1000,
+    );
+    const edge = readingEdges(items, res, 0);
+    // The mirrored reading frame starts at the physical right edge. Word puts
+    // that edge on the stop when no decimal exists, so the tab itself advances
+    // to 200 and the cell continues leftward from there.
+    expect(edge[1]).toBeCloseTo(200, 6);
+    expect(edge[2]).toBeCloseTo(250, 6);
+  });
+
   it('assigns the Nth tab the Nth-reachable stop IN READING ORDER (leader cell)', () => {
     // sample-28 TOC2 shape: [chapNum][TAB][title][TAB][pageNum] with an early
     // left stop and the right/underscore leader stop. The FIRST logical tab must

@@ -101,13 +101,13 @@ function makeDocx(sectPrInner: string): Uint8Array {
 }
 
 describe.skipIf(!skia)('WD6 sectPr decorations — WASM parse boundary', () => {
-  const parse = (sectPrInner: string) => {
-    const { parseDocx } = docxMod as unknown as { parseDocx: (b: Uint8Array) => { section: Record<string, unknown> } };
-    return parseDocx(makeDocx(sectPrInner));
+  const parse = async (sectPrInner: string) => {
+    const { materializeDocxDocument } = docxMod as unknown as { materializeDocxDocument: (b: Uint8Array) => Promise<{ section: Record<string, unknown> }> };
+    return await materializeDocxDocument(makeDocx(sectPrInner));
   };
 
-  it('§17.6.10 pgBorders round-trips to section.pageBorders with camelCase edges', () => {
-    const doc = parse(
+  it('§17.6.10 pgBorders round-trips to section.pageBorders with camelCase edges', async () => {
+    const doc = await parse(
       `<w:pgBorders w:offsetFrom="page" w:zOrder="back" w:display="firstPage">
          <w:top w:val="dashed" w:sz="24" w:space="24" w:color="FF0000"/>
          <w:left w:val="single" w:sz="8" w:space="12" w:color="auto"/>
@@ -129,8 +129,8 @@ describe.skipIf(!skia)('WD6 sectPr decorations — WASM parse boundary', () => {
     expect(pb.right).toBeUndefined();
   });
 
-  it('§17.6.8 lnNumType round-trips to section.lineNumbering', () => {
-    const doc = parse(`<w:lnNumType w:countBy="5" w:start="3" w:distance="720" w:restart="continuous"/>`);
+  it('§17.6.8 lnNumType round-trips to section.lineNumbering', async () => {
+    const doc = await parse(`<w:lnNumType w:countBy="5" w:start="3" w:distance="720" w:restart="continuous"/>`);
     const ln = doc.section.lineNumbering as Record<string, unknown>;
     expect(ln).toBeTruthy();
     expect(ln.countBy).toBe(5);
@@ -139,14 +139,14 @@ describe.skipIf(!skia)('WD6 sectPr decorations — WASM parse boundary', () => {
     expect(ln.restart).toBe('continuous');
   });
 
-  it('§17.6.23 vAlign round-trips to section.vAlign (default "top" ⇒ omitted)', () => {
-    expect(parse(`<w:vAlign w:val="center"/>`).section.vAlign).toBe('center');
-    expect(parse(`<w:vAlign w:val="both"/>`).section.vAlign).toBe('both');
-    expect(parse(`<w:vAlign w:val="top"/>`).section.vAlign).toBeUndefined();
+  it('§17.6.23 vAlign round-trips to section.vAlign (default "top" ⇒ omitted)', async () => {
+    expect((await parse(`<w:vAlign w:val="center"/>`)).section.vAlign).toBe('center');
+    expect((await parse(`<w:vAlign w:val="both"/>`)).section.vAlign).toBe('both');
+    expect((await parse(`<w:vAlign w:val="top"/>`)).section.vAlign).toBeUndefined();
   });
 
-  it('a bare sectPr carries none of the three (non-regression: fields omitted)', () => {
-    const doc = parse('');
+  it('a bare sectPr carries none of the three (non-regression: fields omitted)', async () => {
+    const doc = await parse('');
     expect(doc.section.pageBorders).toBeUndefined();
     expect(doc.section.lineNumbering).toBeUndefined();
     expect(doc.section.vAlign).toBeUndefined();

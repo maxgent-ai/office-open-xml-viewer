@@ -37,6 +37,12 @@ export default defineConfig({
         '@silurus/ooxml-core/internal/bounded-raw-part-cache': fileURLToPath(
           new URL('../packages/core/src/internal/bounded-raw-part-cache.ts', import.meta.url),
         ),
+        '@silurus/ooxml-core/internal/canvas-viewer-mechanics': fileURLToPath(
+          new URL('../packages/core/src/internal/canvas-viewer-mechanics.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/internal/chart-context': fileURLToPath(
+          new URL('../packages/core/src/internal/chart-context.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core/internal/script-preload-accumulator': fileURLToPath(
           new URL('../packages/core/src/internal/script-preload-accumulator.ts', import.meta.url),
         ),

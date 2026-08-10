@@ -6,8 +6,8 @@ import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
 import { createLayoutServices } from '../../docx/src/layout-runtime.ts';
 import { layoutDocument } from '../../docx/src/document-layout.ts';
 import {
+  materializeDocxDocument,
   openDocxDocument,
-  parseDocx,
 } from './docx.ts';
 import type { NodeCanvasFactory } from './render.ts';
 
@@ -25,12 +25,26 @@ beforeAll(async () => {
 });
 
 describe('Node bounded DOCX document session', () => {
+  it('materializes the compatibility model through the bounded document producer', async () => {
+    const parse = vi.spyOn(docxWasm, 'parse_docx');
+    try {
+      const document = await materializeDocxDocument(bytes);
+      expect(document.body.length).toBeGreaterThan(0);
+      expect(document.section).toBeDefined();
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it('matches compatibility pagination and renders one caller-owned canvas at a time', async () => {
-    const expected = parseDocx(bytes);
+    const expected = await materializeDocxDocument(bytes);
     const measure = factory.createCanvas(1, 1).getContext('2d');
     const expectedPages = layoutDocument(
       expected,
-      createLayoutServices(expected, { measureContext: measure }),
+      createLayoutServices(expected, {
+        measureContext: measure as unknown as CanvasRenderingContext2D,
+      }),
       { currentDateMs: 0 },
     ).pages.length;
 
@@ -59,6 +73,25 @@ describe('Node bounded DOCX document session', () => {
     } finally {
       parse.mockRestore();
     }
+  });
+
+  it('fans a render-time trap out to sibling sessions and recovers on the next open', async () => {
+    const extract = vi.spyOn(archivePrototype(), 'extract_image')
+      .mockImplementationOnce(() => { throw new RangeError('synthetic trap'); });
+    const first = await openDocxDocument(bytes, { factory, currentDate: 0 });
+    const sibling = await openDocxDocument(bytes, { factory, currentDate: 0 });
+    try {
+      await expect(first.renderPage(0)).rejects.toMatchObject({ code: 'parser-crashed' });
+      await expect(sibling.renderPage(0)).rejects.toMatchObject({ code: 'parser-crashed' });
+      await expect(first.close()).resolves.toBeUndefined();
+      await expect(sibling.close()).resolves.toBeUndefined();
+    } finally {
+      extract.mockRestore();
+    }
+
+    const recovered = await openDocxDocument(bytes, { factory, currentDate: 0 });
+    await expect(recovered.renderPage(0)).resolves.toMatchObject({ width: expect.any(Number) });
+    await recovered.close();
   });
 
   it('frees exactly once after completion, early return, and explicit close', async () => {
@@ -108,6 +141,20 @@ describe('Node bounded DOCX document session', () => {
       name: 'OoxmlResourceLimitError',
       code: 'ooxml-resource-limit',
     });
+    await expect(openDocxDocument(bytes, {
+      factory,
+      resourceLimits: { maxArchiveEntries: 1 },
+    })).rejects.toMatchObject({
+      name: 'OoxmlResourceLimitError',
+      code: 'ooxml-resource-limit',
+      details: expect.objectContaining({
+        violation: expect.objectContaining({
+          metric: 'entry-count',
+          configurable: true,
+          limit: 1,
+        }),
+      }),
+    });
 
     const before = new AbortController();
     before.abort();
@@ -129,6 +176,7 @@ describe('Node bounded DOCX document session', () => {
 
 type ArchivePrototype = {
   free(): void;
+  extract_image(path: string): Uint8Array;
 };
 
 function archivePrototype(): ArchivePrototype {

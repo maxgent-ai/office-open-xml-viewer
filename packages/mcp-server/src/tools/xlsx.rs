@@ -232,27 +232,6 @@ impl XlsxTools {
         }
     }
 
-    #[tool(description = "Return only the list of sheet names from an XLSX file")]
-    pub fn xlsx_get_sheet_names(Parameters(p): Parameters<XlsxPathParam>) -> String {
-        let data = match read_file(&p.path) {
-            Ok(d) => d,
-            Err(e) => return format!("Error: {}", e),
-        };
-        let wb_json = match xlsx_parser::parse_workbook_native(&data) {
-            Ok(j) => j,
-            Err(e) => return format!("Error: {}", e),
-        };
-        let wb: Value = match serde_json::from_str(&wb_json) {
-            Ok(v) => v,
-            Err(e) => return format!("Error parsing workbook JSON: {}", e),
-        };
-        let names: Vec<&str> = wb["sheets"]
-            .as_array()
-            .map(|sheets| sheets.iter().filter_map(|s| s["name"].as_str()).collect())
-            .unwrap_or_default();
-        serde_json::to_string(&names).unwrap_or_else(|e| format!("Error: {}", e))
-    }
-
     #[tool(description = "Return the dimensions (max row and column) of a worksheet")]
     pub fn xlsx_get_sheet_dimensions(Parameters(p): Parameters<XlsxSheetParam>) -> String {
         let data = match read_file(&p.path) {
@@ -605,7 +584,7 @@ impl XlsxTools {
     }
 
     #[tool(
-        description = "Return one chart's full series data (categories and per-point values) for drill-down. `chartIndex` matches the index from `xlsx_get_charts` for the same sheet"
+        description = "Return one chart's full series data (categories and per-point values) for drill-down. `chart_index` matches the index from `xlsx_get_charts` for the same sheet"
     )]
     pub fn xlsx_get_chart_series(Parameters(p): Parameters<XlsxChartIndexParam>) -> String {
         let data = match read_file(&p.path) {
@@ -1028,21 +1007,6 @@ mod sample_tests {
         assert!(
             v["sheets"].as_array().is_some(),
             "missing 'sheets' array: {out}"
-        );
-    }
-
-    #[test]
-    fn xlsx_get_sheet_names_sample() {
-        let path = sample_path();
-        if !std::path::Path::new(&path).exists() {
-            return;
-        }
-        let out = XlsxTools::xlsx_get_sheet_names(pp(&path));
-        let v: Value = serde_json::from_str(&out).expect("must return JSON array");
-        let arr = v.as_array().expect("must be JSON array");
-        assert!(
-            !arr.is_empty(),
-            "sample-1.xlsx should have at least one sheet"
         );
     }
 

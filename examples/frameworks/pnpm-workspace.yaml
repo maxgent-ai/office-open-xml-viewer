@@ -1,0 +1,11 @@
+packages:
+  - react
+  - vue
+  - svelte
+  - solid
+
+allowBuilds:
+  esbuild: false
+
+minimumReleaseAgeExclude:
+  - '@silurus/ooxml@0.75.3'

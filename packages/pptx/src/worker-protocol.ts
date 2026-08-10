@@ -7,6 +7,11 @@ import type {
   WorkerErrorPayload,
 } from '@silurus/ooxml-core/worker';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import type {
+  PptxElementContextOptions,
+  PptxElementContext,
+  PptxSlidePoint,
+} from './element-selection';
 
 /** Canonical compact payload emitted by Rust `presentation_bootstrap()`. */
 export interface PresentationBootstrap {
@@ -80,7 +85,14 @@ export type RenderWorkerRequest =
       skipMediaControls?: boolean;
       dim?: DimOptions;
     }
-  | { kind: 'collectRuns'; id: number; slideIndex: number; width: number };
+  | { kind: 'collectRuns'; id: number; slideIndex: number; width: number }
+  | {
+      kind: 'hitTestElement';
+      id: number;
+      slideIndex: number;
+      point: PptxSlidePoint;
+      options: PptxElementContextOptions;
+    };
 
 export type RenderWorkerResponse =
   | Exclude<
@@ -94,4 +106,5 @@ export type RenderWorkerResponse =
       usage?: OoxmlResourceUsageSnapshot;
     }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }
-  | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] };
+  | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] }
+  | { kind: 'elementHit'; id: number; context: PptxElementContext | null };

@@ -1,8 +1,16 @@
 // "Try yours" — render a user-supplied file entirely in the browser. The file
 // is read with FileReader/arrayBuffer and parsed by the WASM engines; it never
 // leaves the page (no upload, no server).
-import { PptxPresentation, PptxScrollViewer } from '@silurus/ooxml-pptx';
-import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml-docx';
+import {
+  PptxPresentation,
+  PptxScrollViewer,
+  type PptxScrollViewerOptions,
+} from '@silurus/ooxml-pptx';
+import {
+  DocxDocument,
+  DocxScrollViewer,
+  type DocxScrollViewerOptions,
+} from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
 import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine';
 
@@ -87,7 +95,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
 
   if (ext === 'pptx') {
     const host = scrollViewerHost(stage);
-    const viewerOptions = {
+    const viewerOptions: PptxScrollViewerOptions = {
       gap: VIEWER_GAP,
       overscan: 0,
       enableTextSelection: true,
@@ -123,7 +131,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
   }
 
   const host = scrollViewerHost(stage);
-  const viewerOptions = {
+  const viewerOptions: DocxScrollViewerOptions = {
     gap: VIEWER_GAP,
     overscan: 0,
     enableTextSelection: true,

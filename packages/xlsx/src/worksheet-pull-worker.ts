@@ -11,12 +11,14 @@ import {
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import type { Row, Worksheet } from './types.js';
+import { decodeWorksheetPullChunk } from './worksheet-pull-codec.js';
 import {
   addWorksheetUsage,
   assertWorksheetJsonBytes,
   assertWorksheetModelUsage,
+  completeWorksheetUsage,
   measureRows,
-  measureWorksheet,
+  type WorksheetCacheUsage,
   type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
 
@@ -33,9 +35,7 @@ export interface WorksheetCursorArchive {
   close_sheet_cursor(): void;
 }
 
-export type WorksheetWireChunk =
-  | { kind: 'rows'; rows: Row[] }
-  | { kind: 'finished'; worksheet: Worksheet };
+export type { WorksheetWireChunk } from './worksheet-pull-codec.js';
 
 /** Format-owned XLSX driver composed with core's shared pull state machine. */
 export class WorksheetPullWorker {
@@ -56,6 +56,7 @@ export class WorksheetPullWorker {
     private readonly acceptWorksheet?: (
       sheetIndex: number,
       worksheet: Worksheet,
+      modelUsage: WorksheetCacheUsage,
       usage?: OoxmlResourceUsageSnapshot,
     ) => void | (() => void) | { rollback?: () => void; commit?: () => void },
     private readonly executeArchive: <T>(operation: (archive: WorksheetCursorArchive) => T) => T =
@@ -111,13 +112,9 @@ export class WorksheetPullWorker {
               archive.pull_sheet_cursor(XLSX_WORKSHEET_PULL_ROWS));
             const done = this.executeArchive((archive) => archive.sheet_cursor_pull_finished());
             if (this.acceptWorksheet) {
-              const decoded = JSON.parse(new TextDecoder().decode(bytes)) as WorksheetWireChunk;
-              if (done !== (decoded.kind === 'finished')) {
-                throw new Error('worksheet cursor terminal marker mismatch');
-              }
+              const decoded = decodeWorksheetPullChunk(bytes, done, undefined, this.prepareRows);
               try {
                 if (decoded.kind === 'rows') {
-                  this.prepareRows?.(decoded.rows);
                   const next = addWorksheetUsage(modelUsage, measureRows(decoded.rows));
                   assertWorksheetModelUsage(
                     next,
@@ -148,8 +145,11 @@ export class WorksheetPullWorker {
             try {
               if (this.acceptWorksheet) {
                 if (!terminal) throw new Error('worksheet terminal payload is missing');
-                terminal.rows = rows;
-                const measured = measureWorksheet(terminal);
+                terminal.rows = terminal.parseError ? [] : rows;
+                const retainedModelUsage = terminal.parseError
+                  ? { rows: 0, cells: 0, ownedUtf8Bytes: 0 }
+                  : modelUsage;
+                const measured = completeWorksheetUsage(terminal, retainedModelUsage);
                 const resourceUsage = this.readResourceUsage();
                 assertWorksheetModelUsage(
                   measured,
@@ -166,6 +166,7 @@ export class WorksheetPullWorker {
                 const accepted = this.acceptWorksheet(
                   sheetIndex,
                   terminal,
+                  measured,
                   resourceUsage,
                 );
                 if (typeof accepted === 'function') rollback = accepted;

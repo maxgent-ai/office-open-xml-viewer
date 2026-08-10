@@ -19,13 +19,13 @@ test.describe('xlsx list data-validation dropdown panel', () => {
   const panel = '[data-xlsx-validation-panel]';
   const items = '[data-xlsx-validation-item]';
 
-  // Select a cell deterministically via the viewer's public `select(ref)` API
+  // Select a cell deterministically via the viewer's public `setSelection(ref)` API
   // (exposed on window by the fixture) — equivalent to the user clicking it,
   // but free of pixel-coordinate flakiness.
   async function selectCell(page: import('@playwright/test').Page, ref: string) {
     await page.evaluate((r) => {
-      const v = (window as unknown as { __viewer: { select: (ref: string) => void } }).__viewer;
-      v.select(r);
+      const v = (window as unknown as { __viewer: { setSelection: (ref: string) => void } }).__viewer;
+      v.setSelection(r);
     }, ref);
   }
 

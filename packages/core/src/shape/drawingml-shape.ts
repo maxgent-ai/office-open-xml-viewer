@@ -4,7 +4,12 @@ import { buildCustomPath } from './custGeom';
 import { getCustGeomEndpoints } from './custgeom-endpoints';
 import { applyStroke, resolveFill } from './paint';
 import { buildShapePath } from './preset';
-import { getConnectorAnchors, hasPreset, renderPresetShape } from './preset-geometry';
+import {
+  buildPresetGeometryFillPath,
+  getConnectorAnchors,
+  hasPreset,
+  renderPresetShape,
+} from './preset-geometry';
 
 type DeepReadonly<T> =
   T extends (...args: never[]) => unknown ? T
@@ -35,6 +40,56 @@ export interface DrawingMLShapePaintPlan {
     flipH: boolean;
     flipV: boolean;
   }>;
+}
+
+/** Execute paint in the authored DrawingML shape transform. Resource-backed
+ * fills use this same frame as ordinary solid/gradient shape paint. */
+export function withDrawingMLShapeTransform(
+  ctx: CanvasRenderingContext2D,
+  plan: DrawingMLShapePaintPlan,
+  paint: () => void,
+): void {
+  const { x, y, w, h } = plan.rect;
+  const { rotationDeg, flipH, flipV } = plan.transform;
+  ctx.save();
+  try {
+    if (rotationDeg !== 0 || flipH || flipV) {
+      ctx.translate(x + w / 2, y + h / 2);
+      if (rotationDeg !== 0) ctx.rotate(rotationDeg * Math.PI / 180);
+      ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+      ctx.translate(-(x + w / 2), -(y + h / 2));
+    }
+    paint();
+  } finally {
+    ctx.restore();
+  }
+}
+
+/** Clip the current canvas state to the exact DrawingML shape silhouette.
+ * The caller owns save/restore and should enter the shape transform first. */
+export function clipDrawingMLShape(
+  ctx: CanvasRenderingContext2D,
+  plan: DrawingMLShapePaintPlan,
+): void {
+  const { x, y, w, h } = plan.rect;
+  ctx.beginPath();
+  if (plan.geometry.kind === 'preset') {
+    const adjustments = [...plan.geometry.adjustments];
+    if (!buildPresetGeometryFillPath(
+      ctx, plan.geometry.name, x, y, w, h, adjustments,
+    )) {
+      buildShapePath(
+        ctx, plan.geometry.name, x, y, w, h,
+        adjustments[0], adjustments[1], adjustments[2], adjustments[3],
+      );
+    }
+  } else {
+    buildCustomPath(ctx, plan.geometry.subpaths as PathCmd[][], x, y, w, h);
+  }
+  // Use Canvas's nonzero rule, matching normal DrawingML shape fill and PPTX
+  // picture clipping. `evenodd` would turn overlapping silhouette subpaths into
+  // XOR holes that do not exist in the authored geometry.
+  ctx.clip();
 }
 
 const CONNECTOR_GEOMETRIES = new Set([
@@ -164,15 +219,7 @@ export function paintDrawingMLShape(
   unitToDevice: number,
 ): void {
   const { x, y, w, h } = plan.rect;
-  const { rotationDeg, flipH, flipV } = plan.transform;
-  ctx.save();
-  try {
-    if (rotationDeg !== 0 || flipH || flipV) {
-      ctx.translate(x + w / 2, y + h / 2);
-      if (rotationDeg !== 0) ctx.rotate(rotationDeg * Math.PI / 180);
-      ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
-      ctx.translate(-(x + w / 2), -(y + h / 2));
-    }
+  withDrawingMLShapeTransform(ctx, plan, () => {
     // Shared fill resolution is observational; retained plans keep gradient
     // stops readonly so layout snapshots cannot be mutated by a painter.
     const fillStyle = resolveFill(plan.fill as Fill | null, ctx, x, y, w, h);
@@ -228,7 +275,5 @@ export function paintDrawingMLShape(
       if (applyAndStroke) applyAndStroke();
       paintCustomEnds(ctx, plan, unitToDevice);
     }
-  } finally {
-    ctx.restore();
-  }
+  });
 }

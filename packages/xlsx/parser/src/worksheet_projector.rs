@@ -478,7 +478,9 @@ fn parse_row_node(
     let height = if hidden {
         Some(0.0)
     } else {
-        node.attribute("ht").and_then(|s| s.parse().ok())
+        node.attribute("ht")
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
     };
     let outline_level = node
         .attribute("outlineLevel")
@@ -1993,6 +1995,7 @@ mod worksheet_streaming_tests {
             ooxml_common::resource::OoxmlFormat::Xlsx,
             None,
             None,
+            None,
         );
         let _scope = governor.scope("parse-sheet");
         let error = report_projector_limit(
@@ -2032,6 +2035,7 @@ mod worksheet_streaming_tests {
             OoxmlFormat::Xlsx,
             Some(2 * 1024 * 1024),
             Some(2 * 1024 * 1024),
+            None,
         )
         .expect("package opens");
         let operation = package

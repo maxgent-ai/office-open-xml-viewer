@@ -69,7 +69,6 @@ export interface CanvasPaintContext {
    * DrawingML text-box `fontRef` color override. */
   readonly documentDefaultTextColor?: string;
   readonly defaultTextColor?: string;
-  readonly showTrackChanges?: boolean;
   readonly resources: CanvasPaintResourcePainter;
   /**
    * Affine map from the current retained point-space to final logical CSS pixels

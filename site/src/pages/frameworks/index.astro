@@ -1,0 +1,50 @@
+---
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
+import { frameworkGuides } from '../../lib/framework-guides';
+
+const title = 'Office file viewer examples for React, Vue, Svelte, and Solid';
+const description = 'Choose a TypeScript integration guide for rendering DOCX, XLSX, and PPTX files in React, Vue, Svelte, or Solid.';
+---
+<Base title={title} description={description} canonicalPath="/frameworks">
+  <Nav active="frameworks" />
+  <main>
+    <header class="frameworks-hero">
+      <div class="wrap">
+        <p class="eyebrow">Framework guides</p>
+        <h1>Render Office files in your framework.</h1>
+        <p>Open a complete TypeScript example for your framework and run it directly on StackBlitz.</p>
+      </div>
+    </header>
+    <section class="framework-grid wrap" aria-label="Framework guides">
+      {frameworkGuides.map((guide) => (
+        <a href={`/frameworks/${guide.id}`}>
+          <span>{guide.name} + TypeScript</span>
+          <h2>{guide.name}</h2>
+          <p>{guide.description}</p>
+          <strong>Open guide &#x2197;&#xFE0E;</strong>
+        </a>
+      ))}
+    </section>
+  </main>
+  <SiteFooter />
+</Base>
+
+<style>
+  .frameworks-hero { padding: 96px 0 88px; background: var(--hero-bg); border-bottom: 1px solid var(--hero-line); }
+  .frameworks-hero h1 { max-width: 12ch; margin-top: 24px; font-size: clamp(48px, 7vw, 82px); letter-spacing: -.055em; }
+  .frameworks-hero p:last-child { max-width: 62ch; margin: 30px 0 0; color: var(--hero-muted); font-size: 17px; }
+  .framework-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; padding-top: 72px; padding-bottom: 96px; background: var(--border); }
+  .framework-grid a { min-height: 320px; padding: 28px; background: var(--bg); transition: background .18s; }
+  .framework-grid a:hover { background: var(--signal-wash); }
+  .framework-grid span { color: var(--text-faint); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .framework-grid h2 { margin-top: 52px; font-size: 42px; }
+  .framework-grid p { max-width: 52ch; color: var(--text-dim); font-size: 14px; }
+  .framework-grid strong { display: block; margin-top: 32px; color: var(--accent); font: 12px var(--mono); }
+  @media (max-width: 680px) {
+    .frameworks-hero { padding: 58px 0 64px; }
+    .framework-grid { grid-template-columns: 1fr; padding-top: 40px; padding-bottom: 56px; }
+    .framework-grid a { min-height: 260px; }
+  }
+</style>

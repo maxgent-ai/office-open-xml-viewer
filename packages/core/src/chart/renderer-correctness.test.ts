@@ -190,6 +190,37 @@ describe('CH1 — negative bar/column values extend from the zero line', () => {
     expect(neg.w).toBeCloseTo(pos.w, 4);
   });
 
+  it('a deleted value axis uses the default automatic scale instead of visible-tick density', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarH',
+      categories: ['A'],
+      series: [
+        series({ name: 'S1', values: [20] }),
+        series({ name: 'S2', values: [77] }),
+      ],
+      valAxisHidden: true,
+      plotAreaManualLayout: {
+        layoutTarget: 'inner',
+        xMode: 'edge',
+        yMode: 'edge',
+        x: 0.1,
+        y: 0.1,
+        w: 0.8,
+        h: 0.8,
+      },
+    }), RECT, 1);
+
+    // With no visible value-axis ticks, Office uses the default five-interval
+    // auto-scale target: data max 97 → major unit 20 → axis max 120. Applying
+    // the wide-axis tick-density rule would instead choose unit 10 / max 110,
+    // making the stacked bar too long relative to separately authored labels.
+    const bars = rec.rects;
+    expect(bars).toHaveLength(2);
+    const totalLength = bars[0].w + bars[1].w;
+    expect(totalLength).toBeCloseTo(RECT.w * 0.8 * (97 / 120), 4);
+  });
+
   it('positive-only data keeps the axis anchored at 0 (pre-fix behavior)', () => {
     // Regression guard: min degenerates to 0 so nothing about a positive-only
     // chart changes. Zero-line bottom edge == plot bottom.
@@ -431,7 +462,7 @@ describe('CH7 — percentStacked normalizes signed values against per-category �
     }
   });
 
-  it('keeps explicit-size value-axis labels inside an inner manual-layout chart frame', () => {
+  it('keeps explicit-size value-axis labels inside a correctly authored inner manual-layout frame', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'stackedBarPct',
@@ -444,13 +475,13 @@ describe('CH7 — percentStacked normalizes signed values against per-category �
       valAxisFormatCode: '0%',
       valAxisFontSizeHpt: 1100,
       // ECMA-376 §21.2.2.89: an inner target describes the data region,
-      // excluding axes and labels. Those labels must still remain inside the
-      // chart frame when their actual DrawingML font metrics need more room.
+      // excluding axes and labels. The producer therefore reserves the label
+      // gutter in the authored x offset rather than relying on auto-layout.
       plotAreaManualLayout: {
         layoutTarget: 'inner',
         xMode: 'edge',
         yMode: 'edge',
-        x: 0.055,
+        x: 0.184,
         y: 0.046,
         w: 0.728,
         h: 0.784,

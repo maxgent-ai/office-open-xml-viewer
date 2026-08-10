@@ -163,4 +163,30 @@ describe('canonical body layout — trailing empty-paragraph mark grazes the bot
     );
     expect(pages[0].length).toBe(4);
   });
+
+  it('does not create an intermediate blank page solely for an inkless section mark', () => {
+    const sectionBreak = {
+      type: 'sectionBreak',
+      kind: 'nextPage',
+      geom: {
+        pageWidth: 200,
+        pageHeight: PAGE_HEIGHT,
+        marginTop: 10,
+        marginRight: 10,
+        marginBottom: 10,
+        marginLeft: 10,
+        headerDistance: 4,
+        footerDistance: 4,
+      },
+    } as unknown as BodyElement;
+    const pages = bodyPages(doc([
+      ...B(para('a'), para('b'), para('c'), para('d'), para('')),
+      sectionBreak,
+      ...B(para('e')),
+    ], PAGE_HEIGHT));
+
+    expect(pages.length).toBe(2);
+    expect(pages[0].length).toBe(5);
+    expect(pages[1].length).toBe(1);
+  });
 });

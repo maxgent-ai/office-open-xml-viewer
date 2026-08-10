@@ -214,6 +214,88 @@ function cellInput(
 }
 
 describe('retained table layout', () => {
+  it('retains complete compound outer-frame membership for measurement-free paint', async () => {
+    const compound = {
+      widthPt: 1.5,
+      color: '#000000',
+      authoredStyle: 'thinThickSmallGap',
+    };
+    const rows = [{
+      id: 'row-0',
+      source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: 20,
+      heightRule: 'exact',
+      cells: [cellInput('cell-0', 0, [])],
+    }];
+    const model = document([]);
+    const services = createLayoutServices(model, { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const result = layoutTable(tableInput(rows, [100], {
+      ...noBorderInputs,
+      top: compound,
+      right: compound,
+      bottom: compound,
+      left: compound,
+    }), placement(), services);
+    const layout = result.layout as TableLayout;
+
+    expect(layout.compoundBorderFrames).toEqual([{
+      bounds: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 20 },
+      border: {
+        authoredStyle: 'thinThickSmallGap',
+        color: '#000000',
+        widthPt: 1.5,
+        style: 'compound',
+      },
+      segmentIndexes: [0, 1, 2, 3],
+    }]);
+  });
+
+  it('includes half of each collapsed horizontal rule in adjacent non-exact rows', async () => {
+    const single = { widthPt: 0.5, color: '#000000', authoredStyle: 'single' };
+    const rows = Array.from({ length: 4 }, (_, rowIndex) => ({
+      id: `row-${rowIndex}`,
+      source: { story: 'body', storyInstance: 'body', path: [0, rowIndex] },
+      heightPt: 20.4,
+      heightRule: 'atLeast',
+      cells: [cellInput(`cell-${rowIndex}`, 0, [], {
+        borders: { ...noBorderInputs, top: single, bottom: single },
+      })],
+    }));
+    const model = document([]);
+    const services = createLayoutServices(model, { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const result = layoutTable(tableInput(rows, [100]), placement(), services);
+    const layout = result.layout as TableLayout;
+
+    expect(layout.rows.map((rowLayout) => rowLayout.advancePt)).toEqual([
+      20.9, 20.9, 20.9, 20.9,
+    ]);
+    expect(layout.advancePt).toBeCloseTo(83.6, 8);
+  });
+
+  it('does not expand exact rows by collapsed horizontal rule footprints', async () => {
+    const single = { widthPt: 0.5, color: '#000000', authoredStyle: 'single' };
+    const input = tableInput([{
+      id: 'row-0',
+      source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      heightPt: 20.4,
+      heightRule: 'exact',
+      cells: [cellInput('cell-0', 0, [], {
+        borders: { ...noBorderInputs, top: single, bottom: single },
+      })],
+    }], [100]);
+    const model = document([]);
+    const services = createLayoutServices(model, { measureContext: measuringContext() });
+    const { layoutTable } = await import('./table.js');
+
+    const result = layoutTable(input, placement(), services);
+
+    expect((result.layout as TableLayout).rows[0]?.advancePt).toBe(20.4);
+  });
+
   it('acquires each ordinary and nested cell paragraph final geometry once', () => {
     const nested = table([row([textCell('nested-only')])], [80]);
     const outer = table([row([
@@ -381,7 +463,7 @@ describe('retained table layout', () => {
     expect(continuation.blocks).toEqual([]);
   });
 
-  it('keeps collapsed boundary footprints out of row-track allocation', async () => {
+  it('adds collapsed boundary footprints to non-exact row-track allocation', async () => {
     const single = { widthPt: 1, color: '#000000', authoredStyle: 'single' };
     const input = tableInput([
       {
@@ -410,11 +492,8 @@ describe('retained table layout', () => {
 
     const { layout } = layoutTable(input, placement(), services);
 
-    // Collapsed rules are centred on row boundaries and contribute only to
-    // inkBounds. Authored atLeast and exact tracks both retain their 8pt flow
-    // allocation; border overhang must not change fit or pagination.
-    expect(layout.rows.map((row) => row.advancePt)).toEqual([8, 8, 8]);
-    expect(layout.advancePt).toBe(24);
+    expect(layout.rows.map((row) => row.advancePt)).toEqual([9, 9, 8]);
+    expect(layout.advancePt).toBe(26);
   });
 
   it('keeps explicit auto content-sized and adds Word bottom padding to exact heights', async () => {

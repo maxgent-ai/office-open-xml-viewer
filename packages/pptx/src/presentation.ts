@@ -794,6 +794,9 @@ export class PptxPresentation {
    * theme / fetch plumbing, but paint the caller's mutated {@link Slide}
    * snapshots. Unavailable in `mode: 'worker'` — the worker owns its own slide
    * projections and cannot accept main-thread model patches.
+   *
+   * @internal Used by `@maxgent/ooxml-pptx-editor`; not part of the public
+   * `@maxgent/ooxml/pptx` API.
    */
   replaceSlides(
     replacements: ReadonlyArray<{ readonly index: number; readonly slide: Slide }>,

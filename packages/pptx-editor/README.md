@@ -2,7 +2,7 @@
 
 Optimistic PPTX editing for Maxgent's `@maxgent/ooxml` fork: mutate an
 in-memory `Presentation`, translate commands to OfficeCLI batches, and paint
-through a host such as `PptxViewer.applyPresentation`.
+through a `PptxEditorViewerHost` backed by a loaded `PptxPresentation`.
 
 This package is published **separately** from `@maxgent/ooxml` so upstream
 viewer syncs stay thin. Prefer the high-level `PptxEditorSession` +
@@ -30,7 +30,7 @@ PptxEditorSession          ← snapshot, history, sync state, listeners
 PptxEditorViewBinding
   │  session.subscribe → coalesced apply
   ▼
-PptxEditorViewHost         ← usually PptxViewer (mode: 'main')
+PptxEditorViewerHost       ← PptxViewer + PptxPresentation (mode: 'main')
   └─ replaceSlides + redraw
 ```
 
@@ -52,11 +52,12 @@ pnpm add @maxgent/ooxml @maxgent/ooxml-pptx-editor
 ```
 
 ```ts
-import { PptxViewer } from '@maxgent/ooxml/pptx';
+import { PptxPresentation, PptxViewer } from '@maxgent/ooxml/pptx';
 import type { Presentation } from '@maxgent/ooxml/pptx';
 import {
   PptxEditorSession,
   PptxEditorViewBinding,
+  PptxEditorViewerHost,
   UpdateTextMutation,
   createElementRef,
   OFFICECLI_BATCH_SEND_STATUSES,
@@ -64,9 +65,8 @@ import {
 } from '@maxgent/ooxml-pptx-editor';
 ```
 
-Requires a Maxgent `@maxgent/ooxml` build that exposes
-`PptxViewer.applyPresentation` (main-thread mode). Inside this monorepo, depend
-on the workspace package:
+Requires `@maxgent/ooxml >= 0.77.0-0`, which provides the internal main-thread
+slide replacement hook. Inside this monorepo, depend on the workspace package:
 
 ```json
 {
@@ -85,6 +85,7 @@ Minimal loop: load a viewer in **main** mode, open a session on a matching
 import {
   PptxEditorSession,
   PptxEditorViewBinding,
+  PptxEditorViewerHost,
   UpdateTextMutation,
   createElementRef,
   COMMAND_SUBMISSION_STATUSES,
@@ -92,7 +93,7 @@ import {
   type OfficeCliBatch,
   type OfficeCliBatchSendResult,
 } from '@maxgent/ooxml-pptx-editor';
-import { PptxViewer } from '@maxgent/ooxml/pptx';
+import { PptxPresentation, PptxViewer } from '@maxgent/ooxml/pptx';
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
 async function openEditor(args: {
@@ -101,9 +102,11 @@ async function openEditor(args: {
   presentation: Presentation;
   sendBatch: (batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>;
 }) {
-  // Editor paint path requires mode: 'main' (worker cannot accept slide patches).
-  const viewer = new PptxViewer(args.canvas, { mode: 'main' });
-  await viewer.load(args.source);
+  // The viewer borrows this main-mode presentation. The caller owns both.
+  const loadedPresentation = await PptxPresentation.load(args.source, {
+    mode: 'main',
+  });
+  const viewer = PptxViewer.fromPresentation(args.canvas, loadedPresentation);
 
   if (args.presentation.slides.length !== viewer.slideCount) {
     throw new Error('Editor presentation slide count must match the loaded viewer');
@@ -119,9 +122,10 @@ async function openEditor(args: {
     },
   });
 
+  const host = new PptxEditorViewerHost(viewer, loadedPresentation);
   const binding = new PptxEditorViewBinding({
     session,
-    host: viewer,
+    host,
     onRenderError: (cause) => {
       console.error('view apply failed', cause);
       // Host may be stale; recover with a full sync:
@@ -130,7 +134,7 @@ async function openEditor(args: {
   });
   await binding.whenIdle();
 
-  return { viewer, session, binding };
+  return { viewer, loadedPresentation, session, binding };
 }
 
 async function editFirstShapeText(
@@ -376,12 +380,14 @@ interface PptxEditorViewHost {
 }
 ```
 
-`PptxViewer.applyPresentation` satisfies this in `mode: 'main'`.
+Create the standard host from a viewer that borrows the same main-mode
+presentation:
 
 ```ts
+const host = new PptxEditorViewerHost(viewer, loadedPresentation);
 const binding = new PptxEditorViewBinding({
   session,
-  host: viewer,
+  host,
   syncOnBind: true, // default: push current session state immediately
   onRenderError: (cause) => {
     console.error(cause);
@@ -405,13 +411,15 @@ Behavior:
 - Does **not** auto-retry. After a failure, call `requestRender()` or wait for
   the next session change (which escalates to a full apply).
 
-Viewer-side notes for `applyPresentation`:
+`PptxEditorViewerHost` behavior:
 
 - Keeps the loaded package’s media / theme plumbing; only swaps in-memory slide
   JSON used by the next paint.
 - Invalidates find geometry; clears leftover highlight overlays even when the
   visible slide is not redrawn.
 - Throws if slide counts differ, or if the presentation is in `mode: 'worker'`.
+- Does not own resources. Dispose the binding, viewer, and presentation
+  explicitly.
 
 ## Shape selection
 
@@ -443,8 +451,9 @@ numeric value. Dispose the controller before the session:
 ```ts
 selection.dispose();
 binding.dispose();
-session.dispose();
 viewer.destroy();
+loadedPresentation.destroy();
+session.dispose();
 ```
 
 The MVP hit test uses each rotated shape frame, reverse render order, and a
@@ -499,13 +508,13 @@ custom pipelines:
 
 Document these in product code rather than papering over them:
 
-1. **Main-thread viewer only.** `replaceSlides` / `applyPresentation` throw in
-   `mode: 'worker'`. Construct the viewer with `{ mode: 'main' }`.
+1. **Main-thread presentation only.** The internal slide replacement hook throws
+   in `mode: 'worker'`. Load `PptxPresentation` with `{ mode: 'main' }`.
 2. **Fixed slide count.** Binding and viewer reject presentations whose
    `slides.length` differs from the loaded package. Adding/removing slides needs
    a full viewer reload, not a patch.
-3. **Slide content only.** `applyPresentation` installs slide models; presentation
-   theme / size fields on the session snapshot are not pushed into the viewer.
+3. **Slide content only.** The host installs slide models; presentation theme /
+   size fields on the session snapshot are not pushed into the viewer.
 4. **Slide-origin shapes only.** Master/layout elements are not editable.
 5. **Complete `elementSources` required** for any editable slide.
 6. **Bootstrap `Presentation`.** The viewer does not yet export a ready-made
@@ -519,9 +528,8 @@ Document these in product code rather than papering over them:
   `0.1.0`).
 - Peer-depends on `@maxgent/ooxml` — not wired into the umbrella `exports` map,
   so upstream sync of the viewer SDK does not fight editor packaging.
-- Keep Maxgent-only viewer hooks (`applyPresentation` / `replaceSlides`) as a
-  small, documented patch set on `packages/pptx`; that remains the main sync
-  surface with upstream.
+- Keep the Maxgent-only internal `replaceSlides` hook as the only editor patch in
+  `packages/pptx`; viewer composition remains inside `packages/pptx-editor`.
 
 ```bash
 pnpm --filter @maxgent/ooxml-pptx-editor build

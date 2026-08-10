@@ -2,10 +2,7 @@ import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import type { PptxEditorSession } from '../session/pptx-editor-session';
 
-/**
- * Paint host for the editor. {@link PptxViewer.applyPresentation} satisfies
- * this contract: one canvas, swap in-memory slide models, redraw.
- */
+/** Paint host that installs editor snapshots and redraws affected slides. */
 export interface PptxEditorViewHost {
   applyPresentation(
     presentation: Presentation,
@@ -17,7 +14,7 @@ export type PptxEditorViewErrorHandler = (cause: unknown) => void;
 
 export interface PptxEditorViewBindingOptions {
   readonly session: PptxEditorSession;
-  /** Typically a loaded {@link PptxViewer} in `mode: 'main'`. */
+  /** Typically a {@link PptxEditorViewerHost} backed by a main-mode presentation. */
   readonly host: PptxEditorViewHost;
   /**
    * Called when `host.applyPresentation` rejects. At that point the host may

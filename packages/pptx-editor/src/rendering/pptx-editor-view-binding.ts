@@ -9,9 +9,9 @@ import type {
 } from './types';
 
 /**
- * Binds a {@link PptxEditorSession} to a single paint host (normally
- * {@link PptxViewer}). Session subscription stays inside the editor; the host
- * only receives updated presentation data and redraws its existing canvas.
+ * Binds a {@link PptxEditorSession} to a single paint host. Session
+ * subscription stays inside the editor; the host only receives updated
+ * presentation data and redraws its existing canvas.
  */
 export class PptxEditorViewBinding {
   readonly #session: PptxEditorSession;

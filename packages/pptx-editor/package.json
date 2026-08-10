@@ -46,7 +46,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json"
   },
   "peerDependencies": {
-    "@maxgent/ooxml": ">=0.75.0-0"
+    "@maxgent/ooxml": ">=0.77.0-0"
   },
   "devDependencies": {
     "@maxgent/ooxml": "workspace:*",

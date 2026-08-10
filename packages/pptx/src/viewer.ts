@@ -9,7 +9,7 @@ import { PptxFindController, type PptxMatchLocation } from './find';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
-import type { DimOptions, Presentation } from './types';
+import type { DimOptions } from './types';
 import {
   type HyperlinkTarget,
   type FindHighlightColors,
@@ -903,55 +903,6 @@ export class PptxViewer implements ZoomableViewer {
     // application failures, not presentation/render failures.
     this._setElementContext(context);
     return this.destroyed ? null : this.getSelectionContext();
-  }
-
-  /**
-   * Replace the viewer's in-memory slide models and redraw when the visible
-   * slide is among the replacements.
-   *
-   * This is the editor data-source hook: keep the single caller-owned canvas
-   * and the loaded package's media/theme plumbing; only swap the slide JSON
-   * that {@link renderCurrentSlide} paints. Requires `mode: 'main'` on the
-   * underlying {@link PptxPresentation}.
-   *
-   * When `changedSlideIndexes` is omitted, every slide in `presentation` is
-   * installed and the current slide is redrawn.
-   */
-  async applyPresentation(
-    presentation: Presentation,
-    options: { readonly changedSlideIndexes?: readonly number[] } = {},
-  ): Promise<void> {
-    if (this._destroyed) return;
-    if (!this.engine) throw new Error('Presentation not loaded');
-    if (presentation.slides.length !== this.engine.slideCount) {
-      throw new Error(
-        `applyPresentation slide count mismatch: presentation has ${presentation.slides.length}, viewer has ${this.engine.slideCount}`,
-      );
-    }
-
-    const indexes = options.changedSlideIndexes
-      ? [...options.changedSlideIndexes]
-      : presentation.slides.map((_, index) => index);
-    const replacements = indexes.map((index) => {
-      if (!Number.isInteger(index) || index < 0 || index >= presentation.slides.length) {
-        throw new RangeError(
-          `changedSlideIndexes entry ${index} out of range (count: ${presentation.slides.length})`,
-        );
-      }
-      return { index, slide: presentation.slides[index] };
-    });
-
-    this.engine.replaceSlides(replacements);
-    // Mutated slide content invalidates cached find geometry / matches.
-    this._find.invalidate();
-    if (indexes.includes(this.currentSlide)) {
-      await this.renderCurrentSlide();
-    } else {
-      // The visible slide's pixels are untouched, but the just-invalidated
-      // matches may still be painted on the overlay — clear them (parity with
-      // clearFind()).
-      this._redrawHighlights();
-    }
   }
 
   /**

@@ -147,6 +147,11 @@ export type {
   PptxEditorViewBindingErrorCode,
 } from './rendering/errors';
 export { PptxEditorViewBinding } from './rendering/pptx-editor-view-binding';
+export { PptxEditorViewerHost } from './rendering/pptx-editor-viewer-host';
+export type {
+  PptxEditorBorrowedViewer,
+  PptxEditorLoadedPresentation,
+} from './rendering/pptx-editor-viewer-host';
 export type {
   PptxEditorViewBindingOptions,
   PptxEditorViewErrorHandler,

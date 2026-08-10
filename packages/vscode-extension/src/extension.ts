@@ -5,12 +5,14 @@ import { PptxEditorProvider } from './providers/pptxEditor';
 import { refreshAllWebviews, showFindInActiveWebview } from './providers/baseEditor';
 import { USE_GOOGLE_FONTS_CONFIG_ID } from './config';
 import { activateMcp } from './mcp';
+import { SelectionContextRegistry } from './selectionContextRegistry';
 
 export function activate(context: vscode.ExtensionContext): void {
+  const selectionContexts = new SelectionContextRegistry();
   context.subscriptions.push(
-    DocxEditorProvider.register(context),
-    XlsxEditorProvider.register(context),
-    PptxEditorProvider.register(context),
+    DocxEditorProvider.register(context, selectionContexts),
+    XlsxEditorProvider.register(context, selectionContexts),
+    PptxEditorProvider.register(context, selectionContexts),
     vscode.commands.registerCommand('ooxmlViewer.find', showFindInActiveWebview),
   );
 
@@ -29,7 +31,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  activateMcp(context);
+  activateMcp(context, selectionContexts);
 }
 
 export function deactivate(): void {

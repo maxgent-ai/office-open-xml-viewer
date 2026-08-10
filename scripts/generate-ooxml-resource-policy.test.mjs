@@ -4,11 +4,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { synchronizeResourcePolicy } from './generate-ooxml-resource-policy.mjs';
+import { readArchiveEntryCount } from './measure-ooxml-archive-entries.mjs';
 
 function fixture(policy = {
   defaults: {
     maxArchiveEntryBytes: 128,
     maxTotalInflatedBytes: 256,
+    maxArchiveEntries: 12,
   },
   hardCeilings: {
     maxArchiveEntryBytes: 512,
@@ -42,6 +44,8 @@ function fixture(policy = {
     maxWorksheetJsonBytes: 640,
     maxWorkbookCachedRows: 200,
     maxWorkbookCachedCells: 500,
+    maxWorkbookCachedCellContentUtf8Bytes: 640,
+    maxWorkbookCachedJsonBytes: 1280,
     maxRendererCoordinateIndexEntries: 250,
   },
 }) {
@@ -53,6 +57,18 @@ function fixture(policy = {
     `${JSON.stringify(policy, null, 2)}\n`,
   );
   return root;
+}
+
+test('reads the exact classic ZIP central-directory entry count for calibration', () => {
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(12, 8);
+  eocd.writeUInt16LE(12, 10);
+  expectArchiveEntryCount(eocd, 12);
+});
+
+function expectArchiveEntryCount(bytes, expected) {
+  assert.equal(readArchiveEntryCount(bytes), expected);
 }
 
 test('generates matching TypeScript and Rust constants from one policy source', (context) => {
@@ -72,6 +88,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   );
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /STANDARD_MAX_ARCHIVE_ENTRIES = 12/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /STANDARD_MAX_ARCHIVE_ENTRIES: u64 = 12/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
     /HARD_MAX_DOCX_BODY_BLOCK_XML_BYTES = 320/,
   );
   assert.match(
@@ -81,6 +105,14 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
     /HARD_MAX_XLSX_WORKSHEET_JSON_BYTES = 640/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES = 640/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES = 1280/,
   );
   assert.match(
     readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
@@ -144,6 +176,7 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
     defaults: {
       maxArchiveEntryBytes: 513,
       maxTotalInflatedBytes: 1024,
+      maxArchiveEntries: 12,
     },
     hardCeilings: {
       maxArchiveEntryBytes: 512,
@@ -177,6 +210,8 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxWorksheetJsonBytes: 640,
       maxWorkbookCachedRows: 200,
       maxWorkbookCachedCells: 500,
+      maxWorkbookCachedCellContentUtf8Bytes: 640,
+      maxWorkbookCachedJsonBytes: 1280,
       maxRendererCoordinateIndexEntries: 250,
     },
   });
@@ -203,6 +238,26 @@ for (const [name, smallerKey, largerKey] of [
     'cached slide projection smaller than one slide',
     'maxPptxCachedSlideProjectionBytes',
     'maxPptxSlideJsonBytes',
+  ],
+  [
+    'workbook cached rows smaller than one worksheet',
+    'maxWorkbookCachedRows',
+    'maxWorksheetRows',
+  ],
+  [
+    'workbook cached cells smaller than one worksheet',
+    'maxWorkbookCachedCells',
+    'maxWorksheetCells',
+  ],
+  [
+    'workbook cached cell content smaller than one worksheet',
+    'maxWorkbookCachedCellContentUtf8Bytes',
+    'maxWorksheetCellContentUtf8Bytes',
+  ],
+  [
+    'workbook cached JSON smaller than one worksheet',
+    'maxWorkbookCachedJsonBytes',
+    'maxWorksheetJsonBytes',
   ],
 ]) {
   test(`rejects ${name}`, (context) => {

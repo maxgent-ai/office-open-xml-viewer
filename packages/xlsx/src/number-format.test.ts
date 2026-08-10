@@ -15,6 +15,25 @@ function styles(formatCode: string): Styles {
   };
 }
 
+function builtinStyles(numFmtId: number): Styles {
+  return {
+    fonts: [],
+    fills: [],
+    borders: [],
+    cellXfs: [{
+      fontId: 0,
+      fillId: 0,
+      borderId: 0,
+      numFmtId,
+      alignH: null,
+      alignV: null,
+      wrapText: false,
+    }],
+    numFmts: [],
+    dxfs: [],
+  };
+}
+
 function numCell(n: number): Cell {
   return { row: 1, col: 1, value: { type: 'number', number: n }, styleIndex: 0 };
 }
@@ -151,6 +170,42 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
     expect(fmt(45292, 'd')).toBe('1');
     expect(fmt(45292, 'dd')).toBe('01');
   });
+
+  it('localizes built-in short-date format 14 to the application UI language', () => {
+    vi.stubGlobal('navigator', { language: 'ja-JP' });
+    try {
+      expect(formatCellValue(numCell(45306), builtinStyles(14))).toBe('2024/1/15');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps built-in short-date format 14 in month/day/year order for en-US', () => {
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      expect(formatCellValue(numCell(45306), builtinStyles(14))).toBe('1/15/2024');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reuses the localized short-date formatter for cells in the same UI locale', () => {
+    vi.stubGlobal('navigator', { language: 'ko-KR' });
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const formatter = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
+      function dateTimeFormat(locales, options) {
+        return new NativeDateTimeFormat(locales, options);
+      },
+    );
+    try {
+      formatCellValue(numCell(45306), builtinStyles(14));
+      formatCellValue(numCell(45307), builtinStyles(14));
+      expect(formatter).toHaveBeenCalledTimes(1);
+    } finally {
+      formatter.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('date formats — 1900 Lotus leap-year-bug compat (§18.17.4.1)', () => {
@@ -245,6 +300,17 @@ describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
   it('TODAY() in a 1904 workbook renders the correct 1900-system today (not 1462 days off)', () => {
     const rendered = formatCellValue(volatileCell('TODAY()'), styles('yyyy-mm-dd'), null, true);
     expect(rendered).toBe(frozenTodayString());
+  });
+
+  it('renders TODAY() through localized built-in short-date format 14', () => {
+    vi.stubGlobal('navigator', { language: 'ja-JP' });
+    try {
+      const [year, month, day] = frozenTodayString().split('-').map(Number);
+      const rendered = formatCellValue(volatileCell('TODAY()'), builtinStyles(14));
+      expect(rendered).toBe(`${year}/${month}/${day}`);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('tolerates a leading = and whitespace in the recomputed formula', () => {

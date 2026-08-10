@@ -2,6 +2,23 @@ import { excelSerialToUtcDate, roundDecimalHalfUp } from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
 import { todaySerial, nowSerial } from './formula.js';
 
+const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function localizedShortDateFormatter(locale: string | undefined): Intl.DateTimeFormat {
+  const cacheKey = locale ?? '';
+  const cached = localizedShortDateFormatters.get(cacheKey);
+  if (cached) return cached;
+
+  const formatter = new Intl.DateTimeFormat(locale, {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+  localizedShortDateFormatters.set(cacheKey, formatter);
+  return formatter;
+}
+
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
@@ -151,14 +168,12 @@ function recomputeVolatile(formula: string | undefined): number | null {
 // Date / time formatting  (ECMA-376 §18.8.30)
 // ────────────────────────────────────────────────────────────────
 
-// Built-in numFmtId → format code. IDs 14-22 are the ECMA-376 US-English
-// built-ins; IDs 27-31 and 50-58 are East-Asian (Japanese) locale built-ins
-// that Office ships pre-assigned when the file was authored in ja-JP. The
-// spec lists the codes under §18.8.30 Table "Built-in formats" (the
-// locale-dependent block is given without format strings but the de-facto
-// codes match the ones that Office writes back when opening and re-saving).
+// Built-in numFmtId → format code. ID 14 is handled separately because
+// ECMA-376 §18.8.30 permits built-in formats to be interpreted differently
+// according to the implementing application's UI language. IDs 15-22 use the
+// generic table's patterns here; IDs 27-31 and 50-58 are East-Asian (Japanese)
+// locale built-ins that Office ships pre-assigned when authored in ja-JP.
 const BUILTIN_DATE_FMT: Record<number, string> = {
-  14: 'm/d/yyyy',
   15: 'd-mmm-yy',
   16: 'd-mmm',
   17: 'mmm-yy',
@@ -502,6 +517,17 @@ function formatGeneralNumber(num: number): string {
 }
 
 function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): FormattedCell {
+  // Built-in 14 is Excel's locale-sensitive short-date format rather than a
+  // file-authored pattern. Use the host application's UI locale, while keeping
+  // UTC fields so the Excel serial cannot cross a calendar-day boundary in a
+  // non-UTC timezone.
+  if (numFmtId === 14 && !formatCode) {
+    const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
+    const date = excelSerialToUtcDate(num, date1904);
+    return {
+      text: localizedShortDateFormatter(locale).format(date),
+    };
+  }
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
   if (builtinFmt) return { text: formatExcelDateCode(num, builtinFmt, date1904) };

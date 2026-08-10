@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
-import { installDom, makeContainer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeContainer, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import type { DocxTextRunInfo } from './renderer';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 
@@ -43,7 +43,7 @@ async function setup(
     Array.from({ length: pageCount }, () => ({ widthPt: 100, heightPt: 200 })),
   );
   engine.feedTextRuns = [linkRun(hyperlink)];
-  const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+  const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
     document: engine.asDoc(),
     gap: 10,
     overscan: 1,

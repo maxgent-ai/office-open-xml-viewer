@@ -4,8 +4,8 @@
     <h2 class="section-title">Configure resource limits for large files.</h2>
     <p class="section-lead">
       DOCX, XLSX and PPTX share measured package-expansion limits. The defaults allow
-      <strong>128 MiB per part</strong> and <strong>256 MiB across distinct parts read</strong>
-      during a package session. Reaching either limit rejects with a structured
+      <strong>128 MiB per part</strong>, <strong>256 MiB across distinct parts read</strong>,
+      and <strong>4,096 archive entries</strong> during a package session. Reaching a limit rejects with a structured
       <code>OoxmlResourceLimitError</code>.
     </p>
     <div class="rg-facts">
@@ -36,6 +36,7 @@
   resourceLimits: {'{'}
     maxArchiveEntryBytes: <span class="num">128</span> * <span class="num">1024</span> * <span class="num">1024</span>,
     maxTotalInflatedBytes: <span class="num">256</span> * <span class="num">1024</span> * <span class="num">1024</span>,
+    maxArchiveEntries: <span class="num">4096</span>,
   {'}'},
   onResourceMetrics(metrics) {'{'}
     analytics.record(<span class="str">'ooxml-resource-usage'</span>, metrics);

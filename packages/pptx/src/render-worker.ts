@@ -32,6 +32,7 @@ import type {
   RenderWorkerRequest,
   RenderWorkerResponse,
 } from './worker-protocol';
+import { hitTestPptxSlideContext } from './element-selection';
 
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (archive) => archive.free(),
@@ -106,17 +107,14 @@ function getMedia(path: string): Promise<Blob> {
   const mimeType = findPreflightMimeType(requirePreflight(), path);
   return rawParts.get(path, mimeType, () => slidePull.run(() => {
     const bytes = executeArchive((archive) => archive.extract_media(path));
-    return new Blob(
-      [new Uint8Array(bytes).slice().buffer],
-      { type: mimeType },
-    );
+    return new Blob([bytes as BlobPart], { type: mimeType });
   }));
 }
 
 function getImage(path: string, mimeType: string): Promise<Blob> {
   return rawParts.get(path, mimeType, () => slidePull.run(() => {
     const bytes = executeArchive((archive) => archive.extract_image(path));
-    return new Blob([new Uint8Array(bytes).slice().buffer], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   }));
 }
 
@@ -134,11 +132,12 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   fontsLoaded = Promise.resolve();
   resourceUsage = undefined;
 
-  const [maxEntry, maxTotal] = resourcePolicyForWasm(request.resourcePolicy);
+  const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
   const bootstrap = await slidePull.run(() => executeArchiveFromNew(
     request.buffer,
     maxEntry,
     maxTotal,
+    maxEntries,
   ));
   preflightBuilder = new PresentationPreflightBuilder(bootstrap);
   slides = new PptxSlideRepository({
@@ -162,9 +161,15 @@ function executeArchiveFromNew(
   buffer: ArrayBuffer,
   maxEntry: bigint | null | undefined,
   maxTotal: bigint | null | undefined,
+  maxEntries: bigint | null | undefined,
 ): PresentationBootstrap {
   return host.run(() => {
-    const archive = new PptxArchive(new Uint8Array(buffer), maxEntry, maxTotal);
+    const archive = new PptxArchive(
+      new Uint8Array(buffer),
+      maxEntry,
+      maxTotal,
+      maxEntries,
+    );
     host.setArchive(archive);
     return JSON.parse(
       new TextDecoder().decode(archive.presentation_bootstrap()),
@@ -244,6 +249,13 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
         return runs;
       });
       post({ kind: 'runsCollected', id: request.id, runs });
+      return;
+    }
+
+    if (request.kind === 'hitTestElement') {
+      const context = await requireSlides().withSlide(request.slideIndex, (slide) =>
+        hitTestPptxSlideContext(request.slideIndex, slide, request.point, request.options));
+      post({ kind: 'elementHit', id: request.id, context });
       return;
     }
 

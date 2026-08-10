@@ -177,6 +177,159 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(fetchImage).toHaveBeenCalledWith('xl/media/image2.png', 'image/png');
   });
 
+  it('prefetchImages skips anchors wholly outside the current viewport', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await prefetchImages(worksheetWithImages(), cache, fetchImage, {
+      viewport: { row: 1, col: 1, rows: 2, cols: 2 },
+    });
+
+    expect(cache.has('xl/media/image1.png')).toBe(true);
+    expect(cache.has('xl/media/image2.png')).toBe(false);
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+  });
+
+  it('prefetchImages retains an off-cell anchor whose signed offset reaches the viewport', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    const group = ws.shapeGroups?.[0];
+    if (!group) throw new Error('fixture group missing');
+    // CT_Marker offsets are signed ST_Coordinate values. Although the from-cell
+    // is outside cols 1..2, this authored negative offset moves the frame back
+    // into the visible sheet range and must not be culled before decode.
+    group.fromColOff = -20_000_000;
+    group.fromRowOff = -20_000_000;
+
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 1, col: 1, rows: 2, cols: 2 },
+    });
+
+    expect(cache.has('xl/media/image2.png')).toBe(true);
+  });
+
+  it('does not fetch small one-cell images above a distant viewport', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    const image = ws.images?.[0];
+    if (!image) throw new Error('fixture image missing');
+    image.editAs = 'oneCell';
+    image.nativeExtCx = 914_400;
+    image.nativeExtCy = 914_400;
+
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 10_000, col: 1, rows: 20, cols: 20 },
+    });
+
+    expect(fetchImage).not.toHaveBeenCalled();
+    expect(cache.size).toBe(0);
+  });
+
+  it('falls back to both to-markers when a one-cell native extent is incomplete', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    const image = ws.images?.[0];
+    if (!image) throw new Error('fixture image missing');
+    image.editAs = 'oneCell';
+    image.fromCol = 4;
+    image.toCol = 8;
+    image.nativeExtCx = 1;
+    image.nativeExtCy = 0;
+
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 1, col: 8, rows: 2, cols: 2 },
+      width: 640,
+      height: 480,
+    });
+
+    expect(fetchImage).toHaveBeenCalledOnce();
+  });
+
+  it('does not decode reversed two-cell anchors that paint no rectangle', async () => {
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    const image = ws.images?.[0];
+    if (!image) throw new Error('fixture image missing');
+    image.fromCol = 5;
+    image.toCol = 2;
+
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 1, col: 1, rows: 20, cols: 20 },
+      width: 800,
+      height: 600,
+    });
+
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+
+  it('limits an authored whole-sheet freeze to frozen bands visible on canvas', async () => {
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    ws.freezeRows = 1_048_576;
+    ws.freezeCols = 16_384;
+    const image = ws.images?.[0];
+    if (!image) throw new Error('fixture image missing');
+    image.fromRow = 10_000;
+    image.toRow = 10_001;
+    image.fromCol = 100;
+    image.toCol = 101;
+
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 1, col: 1, rows: 20, cols: 20 },
+      width: 640,
+      height: 480,
+      freezeRows: ws.freezeRows,
+      freezeCols: ws.freezeCols,
+    });
+
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+
+  it('uses scaled sparse axes for distant-anchor visibility', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    ws.colWidths = { 2_000: 17.25 };
+    ws.rowHeights = { 2_000: 19.5 };
+    const image = ws.images?.[0];
+    if (!image) throw new Error('fixture image missing');
+    image.fromCol = 1_999;
+    image.toCol = 2_000;
+    image.fromRow = 1_999;
+    image.toRow = 2_000;
+
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 2_000, col: 2_000, rows: 1, cols: 1 },
+      width: 320,
+      height: 240,
+      cellScale: 1.25,
+    });
+
+    expect(fetchImage).toHaveBeenCalledOnce();
+  });
+
   it('prefetchImages does not re-fetch an already-decoded path (shared cache hit, not a stale map entry)', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
     const fetchImage = vi.fn(async (path: string, mime: string) =>

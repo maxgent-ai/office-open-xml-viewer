@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clipDrawingMLShape,
   paintDrawingMLShape,
   type DrawingMLShapePaintPlan,
 } from './drawingml-shape.js';
@@ -29,6 +30,7 @@ function recordingContext() {
     bezierCurveTo(...args: unknown[]) { operations.push({ name: 'bezierCurveTo', args }); },
     ellipse(...args: unknown[]) { operations.push({ name: 'ellipse', args }); },
     closePath() { operations.push({ name: 'closePath', args: [] }); },
+    clip(...args: unknown[]) { operations.push({ name: 'clip', args }); },
     fill(...args: unknown[]) { operations.push({ name: 'fill', args }); },
     stroke() { operations.push({ name: 'stroke', args: [] }); },
     setLineDash(...args: unknown[]) { operations.push({ name: 'setLineDash', args }); },
@@ -150,5 +152,30 @@ describe('shared DrawingML shape painter', () => {
 
     expect(() => paintDrawingMLShape(ctx, plan, 1)).not.toThrow();
     expect(plan.geometry.kind === 'preset' && plan.geometry.adjustments).toHaveLength(12);
+  });
+
+  it('clips overlapping custom subpaths with the normal nonzero rule', () => {
+    const { ctx, operations } = recordingContext();
+    clipDrawingMLShape(ctx, {
+      rect: { x: 0, y: 0, w: 100, h: 100 },
+      geometry: { kind: 'custom', subpaths: [[
+        { cmd: 'moveTo', x: 0, y: 0 },
+        { cmd: 'lineTo', x: 1, y: 0 },
+        { cmd: 'lineTo', x: 1, y: 1 },
+        { cmd: 'close' },
+      ], [
+        { cmd: 'moveTo', x: .25, y: .25 },
+        { cmd: 'lineTo', x: .75, y: .25 },
+        { cmd: 'lineTo', x: .75, y: .75 },
+        { cmd: 'close' },
+      ]] },
+      fill: null,
+      stroke: null,
+      transform: { rotationDeg: 0, flipH: false, flipV: false },
+    });
+
+    expect(operations.filter(({ name }) => name === 'clip')).toEqual([
+      { name: 'clip', args: [] },
+    ]);
   });
 });

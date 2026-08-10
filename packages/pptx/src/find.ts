@@ -110,7 +110,12 @@ export class PptxFindController {
     for (let slide = 0; slide < slides; slide++) {
       let runs = slideRuns.get(slide);
       if (!runs) {
-        runs = await this._collectSlideRuns(slide);
+        try {
+          runs = await this._collectSlideRuns(slide);
+        } catch (error) {
+          if (generation !== this._generation) return [];
+          throw error;
+        }
         if (generation !== this._generation) return [];
         slideRuns.set(slide, runs);
       }

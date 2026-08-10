@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
 import { installDom, makeContainer, type FakeEl } from './viewer-destroy-test-dom.js';
 import type { Worksheet } from './types.js';
+import { extractViewerRenderContext } from './worker-protocol.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,7 +74,8 @@ function buildWorker() {
     renderCurrentSheet: () => Promise<void>;
   };
   priv.wb = fakeWb;
-  priv.currentWorksheet = emptyWorksheet();
+  const currentWorksheet = emptyWorksheet();
+  priv.currentWorksheet = currentWorksheet;
   priv.currentSheet = 0;
   priv.canvasArea.clientWidth = 800;
   priv.canvasArea.clientHeight = 600;
@@ -83,6 +85,7 @@ function buildWorker() {
     inflight,
     renderViewportToBitmap,
     canvas: priv.canvas,
+    currentWorksheet,
     render: () => priv.renderCurrentSheet(),
   };
 }
@@ -95,6 +98,26 @@ function buildWorker() {
  * of the pptx scroll-viewer render epoch.
  */
 describe('XlsxViewer worker-mode stale-frame drop (C4 commit 3)', () => {
+  it('sends the Window-measured MDW as internal layout authority for worker paint', async () => {
+    const { currentWorksheet, inflight, renderViewportToBitmap, render } = buildWorker();
+    currentWorksheet.defaultFontFamily = 'Realm Divergence';
+    currentWorksheet.defaultFontSize = 11;
+    vi.stubGlobal('OffscreenCanvas', class {
+      getContext() {
+        return { font: '', measureText: () => ({ width: 13.2 }) };
+      }
+    });
+
+    const pending = render();
+    const call = renderViewportToBitmap.mock.calls[0] as unknown[] | undefined;
+    const options = call?.[2];
+    expect(extractViewerRenderContext(options as never).layoutMetrics).toEqual({
+      maximumDigitWidth: 13,
+    });
+    inflight[0].resolve(fakeBitmap());
+    await pending;
+  });
+
   it('drops the older in-flight bitmap and paints only the latest', async () => {
     const { inflight, canvas, render } = buildWorker();
 

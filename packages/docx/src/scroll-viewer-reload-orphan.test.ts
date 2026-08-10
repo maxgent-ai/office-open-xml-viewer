@@ -54,12 +54,30 @@ describe('DocxScrollViewer.load() — no orphaned engine on re-load (SC20)', () 
       .mockRejectedValueOnce(new Error('boom'));
 
     await v.load('one.docx');
-    await v.load('bad.docx');
-    expect(onError).toHaveBeenCalledTimes(1);
+    await expect(v.load('bad.docx')).rejects.toThrow('boom');
+    expect(onError).not.toHaveBeenCalled();
     expect(first.destroyed).toBe(false);
     expect(v.pageCount).toBe(4);
 
     v.destroy();
     expect(first.destroyed).toBe(true);
+  });
+
+  it('rejects an initial window render failure without also calling onError', async () => {
+    const onError = vi.fn();
+    const { v } = build({ onError });
+    const engine = new FakeDocxEngine(1, SIZE, 'main', true);
+    const failure = new Error('initial page render failed');
+    vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
+
+    const loading = v.load('one.docx');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.renderCalls).toHaveLength(1);
+    engine.renderCalls[0].reject(failure);
+
+    await expect(loading).rejects.toBe(failure);
+    expect(onError).not.toHaveBeenCalled();
+    v.destroy();
   });
 });

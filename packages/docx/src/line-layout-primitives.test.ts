@@ -18,6 +18,16 @@ describe('parser-independent line-layout primitives', () => {
     });
   });
 
+  it('skips bar positions when resolving custom and automatic stops (§17.18.84)', () => {
+    expect(nextTabStop(50, [
+      { pos: 60, alignment: 'bar' },
+      { pos: 72, alignment: 'left' },
+    ], 36)).toEqual({ pos: 72, alignment: 'left' });
+    expect(nextTabStop(50, [
+      { pos: 120, alignment: 'bar' },
+    ], 36)).toEqual({ pos: 72, alignment: 'left' });
+  });
+
   it('applies small-caps and vertical-alignment font reductions before scale', () => {
     expect(calcEffectiveFontPx({ fontSize: 20, smallCaps: true, vertAlign: null }, 2)).toBe(36);
     expect(calcEffectiveFontPx({ fontSize: 10, vertAlign: 'super' }, 2)).toBe(13);

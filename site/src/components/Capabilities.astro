@@ -5,10 +5,10 @@ const cols = [
     items: [
       'Paginated layout with headers, footers & sections',
       'Complex tables with borders, fills & merged cells',
-      'Inline and anchored images / SVG with text wrap',
+      'Inline / anchored images and DrawingML shapes with image fills',
       'CJK typography: ruby, vertical writing & line grids',
       'Math equations and embedded charts',
-      'Virtualized scroll, zoom, selection, find & links',
+      'Text / element context, virtualized scroll, zoom, find & links',
     ],
   },
   {
@@ -19,7 +19,7 @@ const cols = [
       'Charts, sparklines and conditional formatting',
       'Images, drawing shapes and styled slicers',
       'Pivot metadata, comments and CJK cell text',
-      'Selection, TSV copy, find, zoom & drag-resize',
+      'Range / element context, TSV copy, find, zoom & drag-resize',
     ],
   },
   {
@@ -30,7 +30,7 @@ const cols = [
       'Gradient fills, picture effects and 3D shading',
       'Combo, chartEx and stock charts with data labels',
       'WordArt, math equations and embedded audio / video',
-      'Virtualized scroll, zoom, selection, find & links',
+      'Text / element context, virtualized scroll, zoom, find & links',
     ],
   },
 ];
@@ -42,10 +42,14 @@ const cols = [
       <ul>
         {col.items.map((it) => <li>{it}</li>)}
       </ul>
-      <a class="caps-link" href="https://github.com/yukiyokotani/office-open-xml-viewer#feature-support">Full support matrix ↗</a>
+      <a class="caps-link" href="https://github.com/yukiyokotani/office-open-xml-viewer#feature-support">Full support matrix &#x2197;&#xFE0E;</a>
     </div>
   ))}
 </div>
+<p class="selection-guide">
+  Building “explain this”, “evaluate these cells”, or a similar read-only integration?
+  <a href="/selection-context">See how selection context works across all three formats →</a>
+</p>
 
 <style>
   .caps-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 0; margin-top: 48px; border-top: 1px solid var(--border-bright); }
@@ -81,6 +85,8 @@ const cols = [
     transition: opacity 0.15s;
   }
   .caps-link:hover { opacity: 0.75; }
+  .selection-guide { margin: 28px 0 0; color: var(--text-dim); font-size: 14px; }
+  .selection-guide a { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
   @media (max-width: 860px) {
     .caps-col { grid-column: span 12; border-right: 0; padding: 28px 0 !important; }
   }

@@ -21,11 +21,9 @@ function throwingEngine(): FakeDocxEngine {
 }
 
 /**
- * PD14: a failed page render must follow the scroll-viewer contract — invoke
- * `onError` if provided, else `console.error` (never silent), and never
- * propagate (which from a `void`-style `nextPage()` would be an unhandled
- * rejection). Before the fix `_render` had no try/catch and rethrew to its
- * caller.
+ * Awaitable initial rendering rejects `load()`. Later Viewer-managed navigation
+ * keeps the async callback/console fallback because callers commonly invoke it
+ * from an event without retaining its Promise.
  */
 describe('DocxViewer render error contract (PD14)', () => {
   function mount() {
@@ -33,18 +31,17 @@ describe('DocxViewer render error contract (PD14)', () => {
     return { canvas: makeEl('canvas') };
   }
 
-  it('routes a render failure to onError during load() and resolves', async () => {
+  it('rejects an initial render failure without also calling onError', async () => {
     const { canvas } = mount();
     vi.spyOn(DocxDocument, 'load').mockResolvedValue(throwingEngine().asDoc());
     const onError = vi.fn();
     const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, { onError });
-    await expect(v.load('x.docx')).resolves.toBeUndefined();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect((onError.mock.calls[0][0] as Error).message).toContain('boom');
+    await expect(v.load('x.docx')).rejects.toThrow('render boom');
+    expect(onError).not.toHaveBeenCalled();
     v.destroy();
   });
 
-  it('routes a render failure to onError during goToPage() (no rejection)', async () => {
+  it('rejects a navigation render failure without also calling onError', async () => {
     const { canvas } = mount();
     const good = new FakeDocxEngine(2, A4);
     vi.spyOn(DocxDocument, 'load').mockResolvedValue(good.asDoc());
@@ -57,19 +54,18 @@ describe('DocxViewer render error contract (PD14)', () => {
     (good as unknown as { renderPage: () => Promise<void> }).renderPage = () => {
       throw new Error('nav boom');
     };
-    await expect(v.nextPage()).resolves.toBeUndefined();
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect((onError.mock.calls[0][0] as Error).message).toContain('nav boom');
+    await expect(v.nextPage()).rejects.toThrow('nav boom');
+    expect(onError).not.toHaveBeenCalled();
     v.destroy();
   });
 
-  it('falls back to console.error when no onError is provided (never silent)', async () => {
+  it('does not console-log an initial error already delivered by load rejection', async () => {
     const { canvas } = mount();
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(DocxDocument, 'load').mockResolvedValue(throwingEngine().asDoc());
     const v = new DocxViewer(canvas as unknown as HTMLCanvasElement);
-    await expect(v.load('x.docx')).resolves.toBeUndefined();
-    expect(spy).toHaveBeenCalledTimes(1);
+    await expect(v.load('x.docx')).rejects.toThrow('render boom');
+    expect(spy).not.toHaveBeenCalled();
     v.destroy();
   });
 });

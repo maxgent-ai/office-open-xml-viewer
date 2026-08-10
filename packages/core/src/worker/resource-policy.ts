@@ -1,5 +1,7 @@
 import type { LoadOptions, OoxmlResourceLimit } from '../types/load-options.js';
 import {
+  HARD_MAX_ARCHIVE_ENTRIES,
+  STANDARD_MAX_ARCHIVE_ENTRIES,
   STANDARD_MAX_ARCHIVE_ENTRY_BYTES,
   STANDARD_MAX_TOTAL_INFLATED_BYTES,
 } from './resource-policy.generated.js';
@@ -11,11 +13,13 @@ import {
 export const DEFAULT_OOXML_RESOURCE_LIMITS = Object.freeze({
   maxArchiveEntryBytes: STANDARD_MAX_ARCHIVE_ENTRY_BYTES,
   maxTotalInflatedBytes: STANDARD_MAX_TOTAL_INFLATED_BYTES,
+  maxArchiveEntries: STANDARD_MAX_ARCHIVE_ENTRIES,
 });
 
 export interface NormalizedOoxmlResourcePolicy {
   readonly maxArchiveEntryBytes: number | null;
   readonly maxTotalInflatedBytes: number | null;
+  readonly maxArchiveEntries: number | null;
 }
 
 export interface NormalizedOoxmlResourceOptions {
@@ -39,6 +43,24 @@ function normalizeLimit(
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RangeError(
       `resourceLimits.${name} must be null or a positive safe integer number of bytes`,
+    );
+  }
+  return value;
+}
+
+function normalizeEntryCount(
+  value: OoxmlResourceLimit | undefined,
+): number | null {
+  if (value === undefined) return DEFAULT_OOXML_RESOURCE_LIMITS.maxArchiveEntries;
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RangeError(
+      'resourceLimits.maxArchiveEntries must be null or a positive safe integer',
+    );
+  }
+  if (value > HARD_MAX_ARCHIVE_ENTRIES) {
+    throw new RangeError(
+      `resourceLimits.maxArchiveEntries must not exceed the internal hard ceiling of ${HARD_MAX_ARCHIVE_ENTRIES}`,
     );
   }
   return value;
@@ -84,6 +106,7 @@ export function normalizeResourcePolicy(
       configured?.maxTotalInflatedBytes,
       DEFAULT_OOXML_RESOURCE_LIMITS.maxTotalInflatedBytes,
     ),
+    maxArchiveEntries: normalizeEntryCount(configured?.maxArchiveEntries),
   });
 }
 
@@ -109,12 +132,13 @@ export function normalizeLoadResourceOptions(
   });
 }
 
-/** Convert the normalized policy to the two scalar u64 WASM arguments. */
+/** Convert the normalized policy to the three scalar u64 WASM arguments. */
 export function resourcePolicyForWasm(
   policy: NormalizedOoxmlResourcePolicy,
-): readonly [bigint, bigint] {
+): readonly [bigint, bigint, bigint] {
   return [
     policy.maxArchiveEntryBytes === null ? 0n : BigInt(policy.maxArchiveEntryBytes),
     policy.maxTotalInflatedBytes === null ? 0n : BigInt(policy.maxTotalInflatedBytes),
+    policy.maxArchiveEntries === null ? 0n : BigInt(policy.maxArchiveEntries),
   ];
 }

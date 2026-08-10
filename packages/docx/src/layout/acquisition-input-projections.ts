@@ -30,7 +30,7 @@ export interface BodyAcquisitionInputProjections {
     intrinsicWidths: (
       cell: TableLayoutSource['rows'][number]['cells'][number],
     ) => Readonly<{ minWidthPt: number; maxWidthPt: number }>,
-    maximumWidthPt?: number,
+    maximumWidthPt?: number | null,
   ) => TableColumnLayoutInput;
   readonly tableParticipatesInOrdinaryFlow: (
     table: TableLayoutSource,

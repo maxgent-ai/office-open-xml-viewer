@@ -10,7 +10,11 @@ import {
 } from './convergence.js';
 import { LayoutInvariantError } from './diagnostics.js';
 import { sliceParagraphLayout } from './paragraph.js';
-import { layoutTable, measureTableCellBlockFlowHeightPt } from './table.js';
+import {
+  layoutTable,
+  measureTableCellBlockFlowHeightPt,
+  tableRowBoundaryFootprintsPt,
+} from './table.js';
 import { wordClipsOverPageCantSplitRow } from './table-compatibility.js';
 import type {
   FlowBlockPlacement,
@@ -818,9 +822,21 @@ function partialRow(
   // A one-row fragment owns both outer cell-spacing bands. Reserve them before
   // selecting legal child boundaries so layoutTable cannot grow past the page.
   const spacingInsetsPt = Math.max(0, row.cellSpacingPt) * 2;
+  // A continued row is materialized as an auto-height, one-row table fragment.
+  // Reserve the same page-local collapsed top/bottom half-rules that layoutTable
+  // will add to that track after the legal child boundary has been selected.
+  const fragmentRow: TableRowLayoutInput = {
+    ...row,
+    heightPt: null,
+    heightRule: 'auto',
+  };
+  const boundaryInsetsPt = tableRowBoundaryFootprintsPt({
+    ...source.input,
+    rows: [fragmentRow],
+  })[0] ?? 0;
   const availableContentHeightPt = Math.max(
     0,
-    availableHeightPt - verticalInsetsPt - spacingInsetsPt,
+    availableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
   const selectedCells = row.cells.map((cell, index) => selectCell(
     source,
@@ -853,7 +869,7 @@ function partialRow(
   // Authored exact/atLeast height constrains that logical row once, not every
   // continuation, so fragment-local tracks must derive from retained content.
   const fragmentInput: TableRowLayoutInput = {
-    ...row,
+    ...fragmentRow,
     id: `${row.id}:fragment:${cursor.rowFragmentIndex}`,
     heightPt: null,
     heightRule: 'auto',

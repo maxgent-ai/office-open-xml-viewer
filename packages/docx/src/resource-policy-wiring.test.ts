@@ -36,6 +36,7 @@ describe('DocxDocument resource-policy wiring', () => {
     const policy = {
       maxArchiveEntryBytes: 64,
       maxTotalInflatedBytes: 512,
+      maxArchiveEntries: 17,
     } as const;
 
     await (

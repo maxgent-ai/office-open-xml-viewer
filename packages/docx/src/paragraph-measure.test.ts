@@ -83,7 +83,8 @@ const layoutContext = (
   overrides: Partial<ParagraphLayoutContext> = {},
 ): ParagraphLayoutContext => ({
   lineGrid: { active: false, pitchPt: null },
-  characterGrid: { active: false, deltaPt: 0 },
+  characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+  rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
   physicalIndentLeftPt: 0,
   physicalIndentRightPt: 0,
   firstIndentPt: 0,
@@ -118,6 +119,44 @@ const measuredTextSequence = (
   .join(''));
 
 describe('measureParagraph', () => {
+  it('uses the same character-grid right-edge adjustment for line partitioning', () => {
+    const source = paragraph({
+      runs: [{ type: 'text', ...textRun('あ'.repeat(20)) }],
+      spaceBefore: 0,
+      spaceAfter: 0,
+    });
+    const grid = layoutContext({
+      characterGrid: { active: true, kind: 'linesAndChars', pitchPt: 10, deltaPt: 0 },
+      rightIndentGrid: { pitchPt: 9, paragraphAllowsAdjustment: true },
+      spaceBeforePt: 0,
+      spaceAfterPt: 0,
+      hasEastAsianText: true,
+    });
+    const optedOut = {
+      ...grid,
+      rightIndentGrid: { pitchPt: 9, paragraphAllowsAdjustment: false },
+    };
+
+    const adjusted = measureParagraph(
+      source,
+      grid,
+      placement({ availableWidthPt: 100 }),
+      measurer,
+      environment({ documentHasEastAsianText: true }),
+    );
+    const exact = measureParagraph(
+      source,
+      optedOut,
+      placement({ availableWidthPt: 100 }),
+      measurer,
+      environment({ documentHasEastAsianText: true }),
+    );
+
+    expect(adjusted.lines).toHaveLength(2);
+    expect(exact.lines).toHaveLength(1);
+    expect(adjusted.placement.availableWidthPt).toBe(100);
+  });
+
   it('chooses the globally widest gap from one oracle containing every float', () => {
     const float = (id: string, xLeft: number, xRight: number): FloatRect => ({
       kind: 'shape', mode: 'square', imageKey: id,
@@ -355,6 +394,144 @@ describe('measureParagraph', () => {
     // participate in the same Far East whole-cell allocation as a CJK mark.
     expect(result.markOnly).toBe(true);
     expect(result.contentEndYPt).toBe(40);
+  });
+
+  it('uses face-specific Far East design metrics for useFELayout empty marks', () => {
+    const markAdvance = (
+      fontSize: number,
+      pitchPt: number,
+      family: string,
+    ): number => measureParagraph(
+      paragraph({
+        defaultFontSize: fontSize,
+        defaultFontFamily: family,
+        defaultFontFamilyEastAsia: family,
+        spaceBefore: 0,
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt },
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({ useFeLayout: true }),
+    ).contentEndYPt;
+
+    // Word 16.111.1 / macOS 26.5.2 synthetic matrix. Meiryo UI uses
+    // 1.3 * hhea while the other requested faces stay below one grid pitch.
+    expect(markAdvance(10, 18, 'Meiryo UI')).toBe(18);
+    expect(markAdvance(11, 18, 'Meiryo UI')).toBe(36);
+    expect(markAdvance(12, 20, 'Meiryo UI')).toBe(20);
+    expect(markAdvance(13, 20, 'Meiryo UI')).toBe(40);
+    expect(markAdvance(11, 18, 'Times New Roman')).toBe(18);
+    expect(markAdvance(11, 18, 'Yu Gothic')).toBe(18);
+    expect(markAdvance(11, 18, 'ＭＳ 明朝')).toBe(18);
+  });
+
+  it('keeps positive atLeast useFELayout marks on the grid unless exact spacing overrides it', () => {
+    const atLeast = { value: 18, rule: 'atLeast' as const, explicit: true };
+    const exact = { value: 18, rule: 'exact' as const, explicit: true };
+    const measure = (lineSpacing: typeof atLeast | typeof exact): number => measureParagraph(
+      paragraph({
+        defaultFontSize: 11,
+        defaultFontFamily: 'Meiryo UI',
+        defaultFontFamilyEastAsia: 'Meiryo UI',
+        lineSpacing,
+        spaceBefore: 0,
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 18 },
+        lineSpacing,
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({ useFeLayout: true }),
+    ).contentEndYPt;
+
+    // §17.6.5 names exact spacing (not atLeast) as the grid-line override.
+    expect(measure(atLeast)).toBe(36);
+    expect(measure(exact)).toBe(18);
+  });
+
+  it.each([true, false])(
+    'keeps an atLeast-zero empty mark at its design advance (explicit=%s)',
+    (explicit) => {
+      const atLeastZero = { value: 0, rule: 'atLeast' as const, explicit };
+      const result = measureParagraph(
+        paragraph({
+          defaultFontSize: 10,
+          defaultFontFamily: 'Meiryo',
+          defaultFontFamilyEastAsia: 'Meiryo',
+          lineSpacing: atLeastZero,
+          spaceBefore: 0,
+        }),
+        layoutContext({
+          lineGrid: { active: true, pitchPt: 14.55 },
+          lineSpacing: atLeastZero,
+          spaceBeforePt: 0,
+        }),
+        placement({ startYPt: 0 }),
+        measurer,
+        environment({ useFeLayout: true }),
+      );
+
+      // Word's atLeast-zero compatibility path keeps a line whose design box
+      // exceeds one grid pitch at its raw design advance instead of rounding
+      // it to a second grid cell. Empty paragraph marks follow the same rule.
+      expect(result.contentEndYPt).toBeCloseTo(10 * 3269 / 2048, 12);
+    },
+  );
+
+  it.each([
+    { value: -18, expected: 18 },
+    { value: -0.05, expected: 0.05 },
+    { value: 0.05, expected: 29.1 },
+  ])('keeps the observed signed atLeast empty-mark boundary at $value pt', ({ value, expected }) => {
+    const lineSpacing = { value, rule: 'atLeast' as const, explicit: true };
+    const result = measureParagraph(
+      paragraph({
+        defaultFontSize: 10,
+        defaultFontFamily: 'Meiryo',
+        defaultFontFamilyEastAsia: 'Meiryo',
+        lineSpacing,
+        spaceBefore: 0,
+      }),
+      layoutContext({
+        lineGrid: { active: true, pitchPt: 14.55 },
+        lineSpacing,
+        spaceBeforePt: 0,
+      }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({ useFeLayout: true }),
+    );
+
+    expect(result.contentEndYPt).toBeCloseTo(expected, 12);
+  });
+
+  it.each([
+    { name: 'without a document grid', lineGrid: { active: false, pitchPt: null } },
+    // snapToGrid=false is resolved by layout context into an inactive line axis
+    // while retaining the section pitch for diagnostics.
+    { name: 'when snapToGrid disables the line axis', lineGrid: { active: false, pitchPt: 14.55 } },
+  ])('does not project negative atLeast grid compatibility $name', ({ lineGrid }) => {
+    const lineSpacing = { value: -0.05, rule: 'atLeast' as const, explicit: true };
+    const result = measureParagraph(
+      paragraph({
+        defaultFontSize: 10,
+        defaultFontFamily: 'Meiryo',
+        defaultFontFamilyEastAsia: 'Meiryo',
+        lineSpacing,
+        spaceBefore: 0,
+      }),
+      layoutContext({ lineGrid, lineSpacing, spaceBeforePt: 0 }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({ useFeLayout: true }),
+    );
+
+    expect(result.contentEndYPt).toBeCloseTo(10 * 3269 / 2048, 12);
   });
 
   it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {

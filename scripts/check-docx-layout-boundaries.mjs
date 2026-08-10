@@ -5,8 +5,11 @@ import { createRequire } from 'node:module';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const require = createRequire(new URL('../packages/docx/package.json', import.meta.url));
-const ts = require('typescript');
+// TypeScript 7 intentionally exposes no stable Compiler API yet. This
+// architecture guard is root-only tooling, so it uses the explicitly named
+// TypeScript 6 compatibility dependency while library builds stay on TS 7.
+const require = createRequire(new URL('../package.json', import.meta.url));
+const ts = require('typescript-compiler-api');
 
 const BASELINE_PATH = 'scripts/docx-layout-boundary-baseline.json';
 const DOCX_SOURCE = 'packages/docx/src';
@@ -89,6 +92,9 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['autoContrastColor', 'value'],
     ['canvasFontString', 'value'],
     ['clampCanvasSize', 'value'],
+    // DrawingML silhouette clipping is shared paint behavior used by
+    // resource-backed shape fills; it does not expose layout acquisition.
+    ['clipDrawingMLShape', 'value'],
     ['crispOffset', 'value'],
     ['defaultDpr', 'value'],
     ['deferBitmapCloseWhileLeased', 'value'],
@@ -117,6 +123,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['resolveFill', 'value'],
     ['recolorSvg', 'value'],
     ['renderChart', 'value'],
+    ['withDrawingMLShapeTransform', 'value'],
     ['Duotone', 'type'],
     ['MathRenderer', 'type'],
   ])],
@@ -296,7 +303,6 @@ const ACQUISITION_PAINT_PROPERTIES = new Set([
   'images',
   'restore',
   'save',
-  'showTrackChanges',
 ]);
 
 function fail(code, detail) {

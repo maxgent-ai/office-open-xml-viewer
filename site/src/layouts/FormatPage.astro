@@ -1,25 +1,25 @@
 ---
 import Base from './Base.astro';
 import Nav from '../components/Nav.astro';
-import BrandIcon from '../components/BrandIcon.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import { formatSeo } from '../lib/seo';
 interface Props {
   format: 'pptx' | 'docx' | 'xlsx';
   name: string;   // "PowerPoint"
   ext: string;    // ".pptx"
-  tagline: string;
 }
-const { format, name, ext, tagline } = Astro.props;
-const title = `${name} (${ext}) — @silurus/ooxml`;
+const { format, name, ext } = Astro.props;
+const seo = formatSeo[format];
 const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPoint deck' }[format];
 ---
-<Base title={title}>
+<Base title={seo.title} description={seo.description} canonicalPath={`/${format}/`}>
   <Nav active={format} />
 
   <header class="fp-hero" data-format={format}>
     <div class="wrap">
       <a class="fp-back" href="/">← All formats</a>
       <p class="eyebrow">{name}</p>
-      <h1 class="fp-title">{tagline}</h1>
+      <h1 class="fp-title">{seo.heading}</h1>
       <p class="fp-lead">
         The examples below render a sample {fileNoun} (<code>{ext}</code>) in your browser and show
         the corresponding TypeScript.
@@ -31,24 +31,7 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
     <slot />
   </main>
 
-  <footer class="footer">
-    <div class="wrap footer-inner">
-      <div class="footer-brand">
-        <BrandIcon />
-        <div>
-          <strong>@silurus/ooxml</strong>
-          <span>Browser-based OOXML viewer · Rust/WASM + Canvas</span>
-        </div>
-      </div>
-      <div class="footer-links">
-        <a href="/">Home</a>
-        <a href="/announcements">Announcements</a>
-        <a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a>
-        <a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a>
-        <a href="/storybook/">Storybook</a>
-      </div>
-    </div>
-  </footer>
+  <SiteFooter />
 
   <script>
     import { mountDemoInto, type DemoKind, type Format } from '../lib/demos';

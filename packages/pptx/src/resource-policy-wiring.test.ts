@@ -38,6 +38,7 @@ describe('PptxPresentation resource-policy wiring', () => {
     const policy = {
       maxArchiveEntryBytes: null,
       maxTotalInflatedBytes: 512,
+      maxArchiveEntries: 18,
     } as const;
 
     await (

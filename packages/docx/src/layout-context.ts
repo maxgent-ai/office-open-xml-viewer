@@ -9,6 +9,11 @@ import {
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
 import { prepareBodyFrameMetadata } from './layout/frame.js';
+import {
+  wordAuthoredTabReplacesImplicitHangingStop,
+  wordContainerAllowsGridRightIndentAdjustment,
+  wordGridRightIndentAdjustmentPt,
+} from './layout/line-compatibility.js';
 import type { NumberingMarkerGeometry } from './layout/numbering-marker.js';
 import type {
   BodyElement,
@@ -30,11 +35,19 @@ export interface DocumentLayoutSettings {
   readonly characterSpacingControl?: string;
   readonly mathDefJc?: string;
   readonly documentHasEastAsianText: boolean;
+  /** ECMA-376 §17.6.5 base pitch from the resolved Normal style. */
+  readonly normalStyleFontSizePt: number;
   readonly compat: {
     readonly adjustLineHeightInTable: boolean;
     readonly useFeLayout: boolean;
     readonly balanceSingleByteDoubleByteWidth: boolean;
   };
+}
+
+/** Parser-independent document typography facts projected once at the model
+ * boundary. Layout owns only the resolved point value, never the private wire. */
+export interface DocumentTypographySettingsInput {
+  readonly normalStyleFontSizePt: number;
 }
 
 export interface SectionGridContext {
@@ -86,12 +99,25 @@ export interface LineGridPolicy {
 
 export interface CharacterGridPolicy {
   readonly active: boolean;
+  /** ECMA-376 §17.6.5 character-grid scope retained from w:docGrid/@w:type. */
+  readonly kind: 'linesAndChars' | 'snapToChars' | null;
+  /** Full character pitch: Normal-style font size plus w:docGrid/@w:charSpace. */
+  readonly pitchPt: number | null;
   readonly deltaPt: number;
+}
+
+export interface RightIndentGridPolicy {
+  /** Full character pitch (Normal-style size + w:docGrid@w:charSpace delta). */
+  readonly pitchPt: number | null;
+  /** Effective §17.3.1.1 policy after the paragraph/style switch and the
+   * isolated Word table-cell compatibility projection. */
+  readonly paragraphAllowsAdjustment: boolean;
 }
 
 export interface ParagraphLayoutContext {
   readonly lineGrid: LineGridPolicy;
   readonly characterGrid: CharacterGridPolicy;
+  readonly rightIndentGrid: RightIndentGridPolicy;
   readonly physicalIndentLeftPt: number;
   readonly physicalIndentRightPt: number;
   readonly firstIndentPt: number;
@@ -149,6 +175,7 @@ export function documentHasEastAsianText(body: readonly BodyElement[]): boolean 
 
 export function resolveDocumentLayoutSettings(
   document: DocxDocumentModel,
+  typography: DocumentTypographySettingsInput = { normalStyleFontSizePt: 10 },
 ): DocumentLayoutSettings {
   // This document-level resolver is the session boundary shared by production
   // and direct layout callers. Preparing source/frame adjacency here keeps
@@ -160,6 +187,7 @@ export function resolveDocumentLayoutSettings(
     characterSpacingControl: document.settings?.characterSpacingControl,
     mathDefJc: document.settings?.mathDefJc,
     documentHasEastAsianText: documentHasEastAsianText(document.body),
+    normalStyleFontSizePt: typography.normalStyleFontSizePt,
     compat: {
       adjustLineHeightInTable: document.settings?.adjustLineHeightInTable ?? false,
       useFeLayout: document.settings?.useFeLayout ?? false,
@@ -262,10 +290,15 @@ export function resolveParagraphLayoutContext(
     && paragraph.snapToGrid !== false
     && paragraph.lineSpacing?.rule !== 'exact'
     && (!hasTableCellContainer(story) || settings.compat.adjustLineHeightInTable);
-  const characterGridActive =
-    isSectionCharacterGrid(section.grid.kind)
-    && section.grid.charSpacePt != null;
+  const characterGridActive = isSectionCharacterGrid(section.grid.kind);
   const baseRtl = paragraph.bidi === true;
+  const insideTableCell = hasTableCellContainer(story);
+  const characterPitchPt = characterGridActive
+    ? settings.normalStyleFontSizePt + (section.grid.charSpacePt ?? 0)
+    : null;
+  const rightIndentPitchPt = section.grid.kind === 'linesAndChars'
+    ? characterPitchPt
+    : null;
 
   // ECMA-376 §17.9.28 (`<w:suff>`, default "tab") + §17.3.1.6 (`<w:ind>` is logical
   // under `<w:bidi>`): a suff=tab numbering marker with a HANGING first-line indent
@@ -304,7 +337,20 @@ export function resolveParagraphLayoutContext(
     },
     characterGrid: {
       active: characterGridActive,
+      kind: characterGridActive
+        ? section.grid.kind as 'linesAndChars' | 'snapToChars'
+        : null,
       deltaPt: characterGridActive ? section.grid.charSpacePt ?? 0 : 0,
+      pitchPt: characterPitchPt != null && characterPitchPt > 0
+        ? characterPitchPt
+        : null,
+    },
+    rightIndentGrid: {
+      pitchPt: rightIndentPitchPt != null && rightIndentPitchPt > 0
+        ? rightIndentPitchPt
+        : null,
+      paragraphAllowsAdjustment: paragraph.adjustRightInd !== false
+        && wordContainerAllowsGridRightIndentAdjustment(insideTableCell),
     },
     physicalIndentLeftPt: baseRtl ? paragraph.indentRight : paragraph.indentLeft,
     physicalIndentRightPt: baseRtl ? paragraph.indentLeft : paragraph.indentRight,
@@ -315,7 +361,7 @@ export function resolveParagraphLayoutContext(
     baseRtl,
     isJustified: jcIsFullyJustified(paragraph.alignment),
     stretchLastLine: jcStretchesLastLine(paragraph.alignment),
-    tabStops: [...paragraph.tabStops],
+    tabStops: effectiveParagraphTabStops(paragraph),
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
     kinsoku: settings.kinsoku,
@@ -323,6 +369,37 @@ export function resolveParagraphLayoutContext(
     overflowPunct: paragraph.overflowPunct !== false,
     mathDefJc: settings.mathDefJc,
   };
+}
+
+/** ECMA-376 §17.3.1.38: a hanging indent always contributes an implicit
+ * leading custom tab at the logical paragraph indent. Keep a bar at the same
+ * coordinate as a separate drawing rule: §17.18.84 says it is not a stop. */
+export function effectiveParagraphTabStops(
+  paragraph: Pick<ParagraphLayoutSource, 'indentLeft' | 'indentFirst' | 'tabStops'>,
+): readonly TabStop[] {
+  const authored = paragraph.tabStops
+    .filter((stop) => stop.alignment !== 'clear')
+    .map((stop) => ({ ...stop }));
+  const implicitPosition = paragraph.indentLeft;
+  const authoredReplacesImplicit = authored.some((stop) => (
+    stop.pos === implicitPosition
+      && wordAuthoredTabReplacesImplicitHangingStop(stop.alignment)
+  ));
+  const effective = paragraph.indentFirst < 0 && !authoredReplacesImplicit
+    ? [{ pos: implicitPosition, alignment: 'left', leader: 'none' } as TabStop, ...authored]
+    : authored;
+  return effective.sort((left, right) => left.pos - right.pos);
+}
+
+/** Resolve the registered §17.3.1.1 character-pitch alignment after container
+ * eligibility and grid-kind scoping have been projected into the context. */
+export function paragraphGridRightAdjustmentPt(
+  context: Pick<ParagraphLayoutContext, 'rightIndentGrid'>,
+  availableWidthPt: number,
+): number {
+  const { pitchPt, paragraphAllowsAdjustment } = context.rightIndentGrid;
+  if (!paragraphAllowsAdjustment || pitchPt == null) return 0;
+  return wordGridRightIndentAdjustmentPt(availableWidthPt, pitchPt);
 }
 
 export function resolveRunLayoutContext(
@@ -333,6 +410,8 @@ export function resolveRunLayoutContext(
   return {
     characterGrid: {
       active,
+      kind: active ? paragraph.characterGrid.kind : null,
+      pitchPt: active ? paragraph.characterGrid.pitchPt : null,
       deltaPt: active ? paragraph.characterGrid.deltaPt : 0,
     },
   };

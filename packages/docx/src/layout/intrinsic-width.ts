@@ -7,17 +7,22 @@ import {
   hasCJKBreakOpportunity,
   layoutLines,
   segAdvanceWidth,
+  snapToCharsAllocatedWidthPx,
+  snapToCharsClass,
   slicedPunctuationCompressions,
   splitTextForLayout,
   type LayoutLine,
   type LayoutSeg,
   type LayoutTextSeg,
+  type DocGridCtx,
 } from '../line-layout.js';
 import type {
   ParagraphMeasurementEnvironment,
   TextMeasurer,
 } from '../paragraph-measure.js';
+import { paragraphCharacterGrid } from '../paragraph-measure.js';
 import { calcEffectiveFontPx } from './text.js';
+import { wordSnapToCharsEastAsianCellCount } from './line-compatibility.js';
 import type { ParagraphLayoutSource, TextFontSlots } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
 import type { DeepReadonly } from './types.js';
@@ -109,6 +114,13 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.fitTextTrailingPadPx ?? null,
     segment.fitTextRegionIndex ?? null,
     segment.snapToCharacterGrid !== false,
+    segment.widthBalanceGridDeltaFactor ?? null,
+    segment.widthBalanceSpaceSequence ?? false,
+    segment.widthBalanceSpaceAdjustmentPt ?? null,
+    // The snap-to-character-grid allocator consumes contiguous script blocks.
+    // A shaping-compatible Latin→East-Asian seam is therefore still a semantic
+    // grid boundary and must survive this intrinsic-only merge.
+    segment.script,
     segment.tateChuYoko ?? false,
     // A tate-chu-yoko run is one authored one-em cell (§17.3.2.10). Two
     // adjacent runs with identical fonts remain two cells, so their source-run
@@ -170,9 +182,27 @@ function measureTextRange(
   start: number,
   end: number,
   measurer: TextMeasurer,
-  gridDeltaPt: number,
+  characterGrid: DocGridCtx | undefined,
 ): number {
   let widthPt = 0;
+  let pendingSnapBlock: Readonly<{
+    kind: 'latin' | 'complexScript';
+    naturalWidthPt: number;
+  }> | null = null;
+  const pitchPt = characterGrid?.type === 'snapToChars'
+    && characterGrid.characterPitchPt != null
+    && characterGrid.characterPitchPt > 0
+      ? characterGrid.characterPitchPt
+      : null;
+  const flushSnapBlock = (): void => {
+    if (!pendingSnapBlock || pitchPt == null) return;
+    widthPt += snapToCharsAllocatedWidthPx(
+      pendingSnapBlock.naturalWidthPt,
+      pendingSnapBlock.kind,
+      pitchPt,
+    );
+    pendingSnapBlock = null;
+  };
   for (const piece of pieces) {
     const overlapStart = Math.max(start, piece.start);
     const overlapEnd = Math.min(end, piece.end);
@@ -189,32 +219,122 @@ function measureTextRange(
         localEnd,
       ),
     };
-    if (candidate.textLayoutService && candidate.textShapeRequest) {
-      const shaped = candidate.textLayoutService.shape({
-        ...candidate.textShapeRequest,
-        text,
-        fontSizePt: calcEffectiveFontPx(candidate, 1),
-        measure: true,
-        clusterGeometry: false,
+    const measureCandidate = (measured: LayoutTextSeg): number => {
+      if (measured.textLayoutService && measured.textShapeRequest) {
+        const shaped = measured.textLayoutService.shape({
+          ...measured.textShapeRequest,
+          text: measured.text,
+          fontSizePt: calcEffectiveFontPx(measured, 1),
+          measure: true,
+          clusterGeometry: false,
+        });
+        return segAdvanceWidth(measured, shaped.advancePt, characterGrid, 1);
+      }
+      measurer.context.font = buildFont(
+        measured.bold,
+        measured.italic,
+        calcEffectiveFontPx(measured, 1),
+        measured.fontFamily,
+        measurer.fontFamilyClasses as Record<string, string>,
+        measured.fontRoute,
+      );
+      return segAdvanceWidth(
+        measured,
+        measurer.context.measureText(measured.text).width,
+        characterGrid,
+        1,
+      );
+    };
+    const kind = snapToCharsClass(candidate, characterGrid);
+    if (kind === 'eastAsia' && pitchPt != null) {
+      flushSnapBlock();
+      const shapedClusters = candidate.textLayoutService && candidate.textShapeRequest
+        ? candidate.textLayoutService.shape({
+            ...candidate.textShapeRequest,
+            text,
+            fontSizePt: calcEffectiveFontPx(candidate, 1),
+            measure: true,
+            clusterGeometry: true,
+          }).clusters
+        : undefined;
+      const boundaries = shapedClusters?.length
+        ? null
+        : [...new Set([
+            0,
+            ...graphemeClusterOffsets(text),
+            text.length,
+          ])].sort((a, b) => a - b);
+      const ranges = shapedClusters?.map((cluster) => ({
+        start: cluster.range.start,
+        end: cluster.range.end,
+        naturalWidthPt: segAdvanceWidth(
+          {
+            ...candidate,
+            text: text.slice(cluster.range.start, cluster.range.end),
+            punctuationCompressions: slicedPunctuationCompressions(
+              candidate,
+              cluster.range.start,
+              cluster.range.end,
+            ),
+          },
+          cluster.advancePt,
+          characterGrid,
+          1,
+        ),
+      })) ?? boundaries!.slice(0, -1).map((clusterStart, index) => {
+        const clusterEnd = boundaries![index + 1]!;
+        const cluster = {
+          ...candidate,
+          text: text.slice(clusterStart, clusterEnd),
+          punctuationCompressions: slicedPunctuationCompressions(
+            candidate,
+            clusterStart,
+            clusterEnd,
+          ),
+        };
+        return {
+          start: clusterStart,
+          end: clusterEnd,
+          naturalWidthPt: measureCandidate(cluster),
+        };
       });
-      widthPt += segAdvanceWidth(candidate, shaped.advancePt, gridDeltaPt, 1);
-      continue;
+      let cells = 0;
+      for (const range of ranges) {
+        if (range.end <= range.start) continue;
+        cells += wordSnapToCharsEastAsianCellCount(
+          range.naturalWidthPt,
+          pitchPt,
+        );
+      }
+      widthPt += snapToCharsAllocatedWidthPx(
+        ranges.reduce((sum, range) => sum + range.naturalWidthPt, 0),
+        kind,
+        pitchPt,
+        Math.max(1, cells),
+      );
+    } else {
+      const naturalWidthPt = measureCandidate(candidate);
+      if ((kind === 'latin' || kind === 'complexScript') && pitchPt != null) {
+        const previousBlock = pendingSnapBlock as Readonly<{
+          kind: 'latin' | 'complexScript';
+          naturalWidthPt: number;
+        }> | null;
+        if (previousBlock?.kind === kind) {
+          pendingSnapBlock = {
+            kind,
+            naturalWidthPt: previousBlock.naturalWidthPt + naturalWidthPt,
+          };
+        } else {
+          flushSnapBlock();
+          pendingSnapBlock = { kind, naturalWidthPt };
+        }
+      } else {
+        flushSnapBlock();
+        widthPt += naturalWidthPt;
+      }
     }
-    measurer.context.font = buildFont(
-      candidate.bold,
-      candidate.italic,
-      calcEffectiveFontPx(candidate, 1),
-      candidate.fontFamily,
-      measurer.fontFamilyClasses as Record<string, string>,
-      candidate.fontRoute,
-    );
-    widthPt += segAdvanceWidth(
-      candidate,
-      measurer.context.measureText(text).width,
-      gridDeltaPt,
-      1,
-    );
   }
+  flushSnapBlock();
   return widthPt;
 }
 
@@ -223,7 +343,7 @@ function minimumTextAtomWidthPt(
   context: ParagraphLayoutContext,
   measurer: TextMeasurer,
 ): number {
-  const gridDeltaPt = context.characterGrid.active ? context.characterGrid.deltaPt : 0;
+  const characterGrid = paragraphCharacterGrid(context);
   let maximumPt = 0;
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
@@ -259,7 +379,7 @@ function minimumTextAtomWidthPt(
             trimmedStart,
             trimmedEnd,
             measurer,
-            gridDeltaPt,
+            characterGrid,
           ),
         );
         continue;
@@ -304,7 +424,7 @@ function minimumTextAtomWidthPt(
             unbreakable.start,
             unbreakable.end,
             measurer,
-            gridDeltaPt,
+            characterGrid,
           ),
         );
       }
@@ -357,7 +477,7 @@ export function measureParagraphIntrinsicWidths(
     measurer.fontFamilyClasses as Record<string, string>,
     context.physicalIndentLeftPt,
     context.kinsoku,
-    context.characterGrid.active ? context.characterGrid.deltaPt : 0,
+    paragraphCharacterGrid(context),
     context.defaultTabPt,
     paragraphWidthPt + context.physicalIndentRightPt,
     context.baseRtl,

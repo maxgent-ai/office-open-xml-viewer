@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { layoutBodyTableRowAdvances } from './test-support/document-layout.test-support.js';
+import {
+  layoutBodyModel,
+  layoutBodyTableRowAdvances,
+} from './test-support/document-layout.test-support.js';
 import type {
   DocParagraph,
   DocTable,
@@ -209,6 +212,44 @@ describe('table-cell line grid compatibility', () => {
 // 20 pt; the mock font box is a flat 1.0×em, so every height difference below
 // comes from the line-height / script routing alone.
 describe('docGrid line-cell integration through the cell measure path', () => {
+  it('retains atLeast-zero empty-mark row and horizontal-border boundaries', () => {
+    const para = paragraphWithRuns([]);
+    para.defaultFontSize = 10;
+    para.defaultFontFamily = 'Meiryo';
+    para.defaultFontFamilyEastAsia = 'Meiryo';
+    para.lineSpacing = { value: 0, rule: 'atLeast', explicit: true };
+    const source = table();
+    const horizontal = { width: 2, color: '#000000', style: 'single' };
+    source.rows = [rowWith(para)];
+    source.borders = { ...source.borders, top: horizontal, bottom: horizontal };
+    const gridSection = { ...section(), docGridLinePitch: 14.55 };
+
+    const layout = layoutBodyModel(
+      [{ type: 'table', ...source }],
+      gridSection,
+      makeMeasureContext(),
+      {},
+      { adjustLineHeightInTable: true, useFeLayout: true },
+    );
+    const retained = layout.pages[0]?.layers.body[0];
+    if (retained?.kind !== 'table') throw new Error('Canonical layout omitted the table');
+    const retainedRow = retained.rows[0];
+    if (!retainedRow) throw new Error('Canonical table omitted the row');
+    const top = retained.borders.find((border) => border.edge === 'top');
+    const bottom = retained.borders.find((border) => border.edge === 'bottom');
+    if (!top || !bottom) throw new Error('Canonical table omitted horizontal borders');
+
+    const designAdvancePt = 10 * 3269 / 2048;
+    expect(retainedRow.contentHeightPt).toBeCloseTo(designAdvancePt, 12);
+    expect(retainedRow.advancePt).toBeCloseTo(designAdvancePt + 2, 12);
+    expect(retained.advancePt).toBeCloseTo(retainedRow.advancePt, 12);
+    expect(top.from.yPt).toBeCloseTo(retained.flowBounds.yPt, 12);
+    expect(bottom.from.yPt).toBeCloseTo(
+      retained.flowBounds.yPt + retained.advancePt,
+      12,
+    );
+  });
+
   it('matches observed Word spacing for explicit atLeast lines in a table cell', () => {
     const para = paragraphWithRuns([
       {

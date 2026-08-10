@@ -1,0 +1,27 @@
+---
+interface Props {
+  framework: string;
+  src: string;
+  openUrl: string;
+}
+
+const { framework, src, openUrl } = Astro.props;
+---
+<div class="stackblitz">
+  <iframe
+    src={src}
+    title={`${framework} Office viewer example on StackBlitz`}
+    loading="lazy"
+    allow="cross-origin-isolated; clipboard-write"
+  ></iframe>
+  <a href={openUrl}>Open live project in StackBlitz &#x2197;&#xFE0E;</a>
+</div>
+
+<style>
+  .stackblitz { border: 1px solid var(--border); background: var(--panel); }
+  iframe { display: block; width: 100%; height: min(78vh, 760px); min-height: 560px; border: 0; }
+  a { display: block; padding: 12px 16px; border-top: 1px solid var(--border); color: var(--accent); font: 12px var(--mono); text-align: right; }
+  @media (max-width: 680px) {
+    iframe { height: 68vh; min-height: 480px; }
+  }
+</style>

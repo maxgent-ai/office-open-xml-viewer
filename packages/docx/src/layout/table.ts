@@ -7,6 +7,7 @@ import { firstAuthoredTableBorder } from './table-border-layer.js';
 import { unionLayoutRects } from './rect-union.js';
 import {
   wordAlignedTableOriginPt,
+  wordCollapsedBorderRowTrackFootprintPt,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
@@ -239,6 +240,7 @@ function semanticRowFloor(row: TableRowLayoutInput): number {
 function resolveRowHeights(
   rows: readonly TableRowLayoutInput[],
   flows: ReadonlyMap<string, CellFlowGeometry>,
+  boundaryFootprintsPt: readonly number[],
 ): Readonly<{ heights: readonly number[]; contentHeights: readonly number[] }> {
   const heights = rows.map((row) => semanticRowFloor(row));
   const contentHeights = rows.map((row, rowIndex) => Math.max(
@@ -310,6 +312,10 @@ function resolveRowHeights(
       break;
     }
   }
+  rows.forEach((row, rowIndex) => {
+    if (row.heightRule === 'exact') return;
+    heights[rowIndex] = (heights[rowIndex] ?? 0) + (boundaryFootprintsPt[rowIndex] ?? 0);
+  });
   return { heights, contentHeights };
 }
 
@@ -529,6 +535,47 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
     })
   ));
   return { horizontal, vertical, occupancy };
+}
+
+/** Winning collapsed rules contribute their page-local half-rule footprint to
+ * non-exact Word row tracks. Spaced cells keep independent edge boxes. */
+function collapsedHorizontalBoundaryWidthsPt(
+  input: TableLayoutInput,
+  boundaries: ReturnType<typeof resolvedBoundaries>,
+): readonly number[] {
+  return boundaries.horizontal.map((segments, boundaryIndex) => {
+    if (
+      effectiveCellSpacingPt(input.rows[boundaryIndex - 1]) > 0
+      || effectiveCellSpacingPt(input.rows[boundaryIndex]) > 0
+    ) return 0;
+    return segments.reduce((maximumPt, segment) => {
+      if (!segment) return maximumPt;
+      const winner = resolveBoundary(segment.above.border, segment.below.border, segment.edge);
+      return Math.max(maximumPt, winner?.border.widthPt ?? 0);
+    }, 0);
+  });
+}
+
+function rowBoundaryFootprintsPt(
+  input: TableLayoutInput,
+  boundaries: ReturnType<typeof resolvedBoundaries>,
+): readonly number[] {
+  const widthsPt = collapsedHorizontalBoundaryWidthsPt(input, boundaries);
+  return input.rows.map((row, rowIndex) => (
+    row.heightRule === 'exact'
+      ? 0
+      : wordCollapsedBorderRowTrackFootprintPt(
+          widthsPt[rowIndex] ?? 0,
+          widthsPt[rowIndex + 1] ?? 0,
+        )
+  ));
+}
+
+/** Resolve the page-local collapsed-rule footprint charged to each row track.
+ * Pagination uses the same layout authority before selecting partial content,
+ * so fragment materialization cannot introduce an unreserved border advance. */
+export function tableRowBoundaryFootprintsPt(input: TableLayoutInput): readonly number[] {
+  return rowBoundaryFootprintsPt(input, resolvedBoundaries(input));
 }
 
 function borderSegment(
@@ -937,6 +984,85 @@ function unionInkBounds(flowBounds: LayoutRect, borders: readonly ResolvedBorder
   return { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top };
 }
 
+/** Recognize complete compound outer frames while retained geometry is still
+ * being built. Paint must not infer table structure from independent segments. */
+function compoundBorderFrames(
+  borders: readonly ResolvedBorderSegment[],
+): NonNullable<TableLayout['compoundBorderFrames']> {
+  const groups = new Map<string, Array<Readonly<{
+    border: ResolvedBorderSegment;
+    index: number;
+  }>>>();
+  borders.forEach((border, index) => {
+    if (border.style !== 'compound' || !border.edge || border.edge === 'between') return;
+    const key = `${border.authoredStyle}\u0000${border.color}\u0000${border.widthPt}`;
+    const group = groups.get(key) ?? [];
+    group.push({ border, index });
+    groups.set(key, group);
+  });
+  const frames: NonNullable<TableLayout['compoundBorderFrames']>[number][] = [];
+  for (const group of groups.values()) {
+    const onEdge = (edge: ResolvedBorderSegment['edge']) =>
+      group.filter((item) => item.border.edge === edge);
+    const top = onEdge('top');
+    const right = onEdge('right');
+    const bottom = onEdge('bottom');
+    const left = onEdge('left');
+    if (!top.length || !right.length || !bottom.length || !left.length) continue;
+    const leftPt = Math.min(...top.flatMap(({ border }) => [border.from.xPt, border.to.xPt]));
+    const rightPt = Math.max(...top.flatMap(({ border }) => [border.from.xPt, border.to.xPt]));
+    const topPt = top[0]!.border.from.yPt;
+    const bottomPt = bottom[0]!.border.from.yPt;
+    const continuous = (
+      items: typeof group,
+      startPt: number,
+      endPt: number,
+      coordinate: (border: ResolvedBorderSegment) => readonly [number, number],
+    ): boolean => {
+      const intervals = items.map(({ border }) => coordinate(border))
+        .map(([start, end]) => [Math.min(start, end), Math.max(start, end)] as const)
+        .sort((a, b) => a[0] - b[0]);
+      if (intervals[0]?.[0] !== startPt) return false;
+      let cursor = startPt;
+      for (const interval of intervals) {
+        if (interval[0] > cursor) return false;
+        cursor = Math.max(cursor, interval[1]);
+      }
+      return cursor === endPt;
+    };
+    const isRectangle = top.every(({ border }) =>
+      border.from.yPt === topPt && border.to.yPt === topPt)
+      && bottom.every(({ border }) =>
+        border.from.yPt === bottomPt && border.to.yPt === bottomPt)
+      && left.every(({ border }) =>
+        border.from.xPt === leftPt && border.to.xPt === leftPt)
+      && right.every(({ border }) =>
+        border.from.xPt === rightPt && border.to.xPt === rightPt)
+      && continuous(top, leftPt, rightPt, (border) => [border.from.xPt, border.to.xPt])
+      && continuous(bottom, leftPt, rightPt, (border) => [border.from.xPt, border.to.xPt])
+      && continuous(left, topPt, bottomPt, (border) => [border.from.yPt, border.to.yPt])
+      && continuous(right, topPt, bottomPt, (border) => [border.from.yPt, border.to.yPt]);
+    if (!isRectangle) continue;
+    const representative = group[0]!.border;
+    frames.push({
+      bounds: {
+        xPt: leftPt,
+        yPt: topPt,
+        widthPt: rightPt - leftPt,
+        heightPt: bottomPt - topPt,
+      },
+      border: {
+        authoredStyle: representative.authoredStyle,
+        color: representative.color,
+        widthPt: representative.widthPt,
+        style: representative.style,
+      },
+      segmentIndexes: group.map(({ index }) => index),
+    });
+  }
+  return frames;
+}
+
 function intersectRects(left: LayoutRect, right: LayoutRect): LayoutRect | null {
   const xPt = Math.max(left.xPt, right.xPt);
   const yPt = Math.max(left.yPt, right.yPt);
@@ -979,10 +1105,14 @@ export function layoutTable(
     flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
   }));
   const boundaries = resolvedBoundaries(input);
-  const resolvedRows = resolveRowHeights(input.rows, flows);
-  // ECMA-376 §17.4.80 owns row-track height. Collapsed rules are centred on
-  // those tracks, so their overhang contributes to inkBounds, never flow fit or
-  // advance; each page-local fragment still resolves its own winning segments.
+  const resolvedRows = resolveRowHeights(
+    input.rows,
+    flows,
+    rowBoundaryFootprintsPt(input, boundaries),
+  );
+  // ECMA-376 §17.4.80 owns the authored row height. Word's page-local collapsed
+  // boundary footprint is added only to non-exact tracks above; exact tracks
+  // already define the complete row box.
   const rowHeightsPt = resolvedRows.heights;
   const widthPt = input.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const heightPt = rowHeightsPt.reduce((sum, height) => sum + height, 0);
@@ -1002,6 +1132,7 @@ export function layoutTable(
     widthPt,
   );
   const borders = materializeBorders(input, rowXPt, yPt, rowHeightsPt, boundaries);
+  const retainedCompoundFrames = compoundBorderFrames(borders);
 
   const columnOffsets = [0];
   for (const width of input.columnWidthsPt) columnOffsets.push((columnOffsets.at(-1) ?? 0) + width);
@@ -1145,6 +1276,9 @@ export function layoutTable(
     columnWidthsPt: input.columnWidthsPt,
     rows,
     borders,
+    ...(retainedCompoundFrames.length
+      ? { compoundBorderFrames: retainedCompoundFrames }
+      : {}),
   };
   return snapshotPlainData({
     layout,

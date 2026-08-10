@@ -20,10 +20,10 @@ const SLIDE_H_EMU = 9525 * 150;
  * (load() throws up-front there), so this only covers the self-loading path.
  */
 describe('PptxScrollViewer.load() — concurrent-load latch', () => {
-  function build() {
+  function build(onError?: (error: Error) => void) {
     installDom();
     const container = makeContainer(200, 400);
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10, onError });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
@@ -91,5 +91,45 @@ describe('PptxScrollViewer.load() — concurrent-load latch', () => {
 
     v.destroy();
     expect(b.destroyed).toBe(true);
+  });
+
+  it('does not report an old slot render rejected while a successful reload recycles it', async () => {
+    const onError = vi.fn();
+    const { v } = build(onError);
+    const old = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const next = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    vi.spyOn(PptxPresentation, 'load')
+      .mockResolvedValueOnce(old.asPres())
+      .mockResolvedValueOnce(next.asPres());
+
+    await v.load('old.pptx');
+    const internals = v as unknown as {
+      _slots: Map<number, { renderedSlide: number }>;
+      _renderSlot(index: number, slot: { renderedSlide: number }): void;
+    };
+    const [entry] = internals._slots.entries();
+    expect(entry).toBeDefined();
+    const [index, slot] = entry as [number, { renderedSlide: number }];
+    (old as unknown as { deferred: boolean }).deferred = true;
+    slot.renderedSlide = -1;
+    internals._renderSlot(index, slot);
+    const staleCall = old.renderCalls.at(-1);
+
+    await v.load('next.pptx');
+    staleCall?.reject(new Error('old worker terminated'));
+    await Promise.resolve();
+
+    expect(old.destroyed).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    v.destroy();
+  });
+
+  it('rejects load after destroy without acquiring a presentation', async () => {
+    const { v } = build();
+    const load = vi.spyOn(PptxPresentation, 'load');
+    v.destroy();
+
+    await expect(v.load('late.pptx')).rejects.toThrow('PptxScrollViewer is destroyed');
+    expect(load).not.toHaveBeenCalled();
   });
 });

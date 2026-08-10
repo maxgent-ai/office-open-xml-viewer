@@ -34,15 +34,21 @@ have one owner. The PR is therefore complementary prior art rather than a patch
 to stack or copy; its currently conflicting format-local wiring is superseded
 by the shared control plane here.
 
-Two proposed public-policy details are intentionally not copied from #1119.
-Archive entry count is protected by a non-configurable hard ceiling rather than
-another user-tuned option, because it is an implementation-complexity guard for
-which ordinary applications have no stable calibration signal. Aggregate
-declared inflated bytes are recorded for diagnostics but do not reject a package:
+One proposed public-policy detail is intentionally not copied from #1119.
+Aggregate declared inflated bytes are recorded for diagnostics but do not reject a package:
 central-directory declarations are untrusted, and charging entries that a lazy
 viewer never reads would make the public policy depend on unused media. The
 public aggregate limit therefore uses actual bytes observed across distinct
 visited entries; actual decompressor output remains authoritative.
+
+Archive entry count uses two distinct admission layers. The public
+`resourceLimits.maxArchiveEntries` policy defaults to the calibrated standard
+limit, accepts a lower positive limit, and can be disabled with `null`. A
+separate implementation hard ceiling remains non-configurable and cannot be
+disabled. ECMA-376 Part 2 §7.3 and Annex B define the ZIP-backed OPC package
+model and its format constraints, but do not prescribe either of these lower
+resource-safety limits; both are implementation admission policy rather than
+OOXML conformance rules.
 
 PR #1124 closes a separate ownership leak: XLSX and PPTX workers survived some
 rejected loads. This branch adopts that behavior through the shared
@@ -166,9 +172,9 @@ it bounded.
   unbounded cell/object/index amplification path.
 - Add an explicitly owned Node workbook session: `openXlsxWorkbook()` retains
   the validated index and archive, `worksheetRows()` yields the same bounded row
-  batches, and `close()` releases the session. Keep `parseXlsx`,
-  `parseXlsxSheet`, and `parseXlsxAllSheets` as synchronous, materializing
-  compatibility helpers. The browser compatibility adapter owns provisional-row
+  batches, and `close()` releases the session. Async `materializeXlsxWorkbookIndex`,
+  `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` consume that same
+  owned path when caller-owned materialization is required. The browser compatibility adapter owns provisional-row
   rollback. Lower-level Node session consumers see those batches directly and
   must discard them if the terminal worksheet is a `parseError` placeholder.
 
@@ -182,8 +188,8 @@ at deterministic limits, and show a measured reduction in transient peak usage.
 - Make navigation, media leases, cleanup, and resource failures consistent with
   the common session contract.
 - Add a Node presentation session that opens shared dependencies once and pulls
-  one slide/resource unit at a time; retain `parsePptx` and extraction helpers as
-  materializing compatibility APIs with corrected policy documentation.
+  one slide/resource unit at a time; `materializePptxPresentation` consumes that
+  producer, while image/media extraction remains owned by the open session.
 - Give image and media paths one count- and byte-bounded raw OPC-part owner per
   realm. Decoded bitmap/GPU caches remain separate because they own a different
   representation and lifetime.
@@ -229,8 +235,8 @@ bounded transient retention, and cleanup on rejection, reload, and destroy.
   readiness do not permit random page access or final page metadata before the
   complete required part has been validated.
 - Let Node build and paginate the same sealed source through an asynchronous
-  document session. Existing `parseDocx` remains materializing; server rendering
-  can pull completed page render inputs only after the same Viewer readiness
+  document session. `materializeDocxDocument` consumes the canonical coordinator
+  into a caller-owned model; server rendering can pull completed page render inputs only after the same Viewer readiness
   barrier, without a browser Worker and without a second semantic pipeline.
 - Preserve source compatibility for lower-level APIs that synchronously expose
   a complete document model by materializing their stream. Such adapters do not
@@ -293,6 +299,12 @@ decision.
 
 The public Viewer surface is the compatibility boundary:
 
+> Version note: the error-delivery statements and table in this section record
+> the 0.76 contract in effect when resource governance was introduced. Version
+> 0.77 supersedes that contract: every awaitable Viewer operation rejects on
+> failure regardless of `onError`. See
+> [the 0.77 error migration](migration-viewer-errors-0.77.md).
+
 ```ts
 new DocxViewer(canvas, options).load(source)
 new XlsxViewer(container, options).load(source)
@@ -353,6 +365,9 @@ export interface OoxmlResourceLimits {
 
   /** Sum of actual inflated bytes across distinct entries in one session. */
   maxTotalInflatedBytes?: OoxmlResourceLimit;
+
+  /** Archive central-directory entries admitted before index allocation. */
+  maxArchiveEntries?: OoxmlResourceLimit;
 }
 
 export interface LoadOptions {
@@ -368,7 +383,8 @@ export interface LoadOptions {
 Semantics:
 
 - `undefined` selects the library's standard default.
-- A positive safe integer overrides that default in bytes.
+- A positive safe integer overrides that default. Byte-limit fields use bytes;
+  `maxArchiveEntries` uses an entry count.
 - `null` disables that configurable policy limit only. It does not disable
   non-configurable hard safety quotas.
 - Invalid values in `resourceLimits` reject before a worker is created.
@@ -386,8 +402,8 @@ entry and sums those maxima. Re-reading an entry does not consume this public
 budget again. Repeated-inflation work and per-structured-part amplification are
 measured separately and protected by internal operation/unit quotas.
 
-The calibrated standard defaults are 128 MiB per archive entry and 256 MiB
-total; the evidence and its corpus limitations are recorded separately. They
+The calibrated standard defaults are 128 MiB per archive entry, 256 MiB total,
+and 4,096 archive entries; the evidence and its corpus limitations are recorded separately. They
 are not memory guarantees. Adopting defaults below the old
 512 MiB per-entry default intentionally narrows the set of documents that load
 without overrides: source compatibility is preserved, but behavioral

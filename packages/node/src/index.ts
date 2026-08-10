@@ -1,32 +1,32 @@
 export {
-  parsePptx,
+  materializePptxPresentation,
   openPptxPresentation,
-  extractMedia as extractPptxMedia,
-  extractImage as extractPptxImage,
   type OpenPptxPresentationOptions,
   type PptxPresentationSession,
   type PptxSessionRenderOptions,
 } from './pptx';
 export {
+  materializeDocxDocument,
   openDocxDocument,
-  parseDocx,
   type DocxDocumentSession,
   type DocxPageRenderOptions,
   type DocxRenderedPage,
   type OpenDocxDocumentOptions,
 } from './docx';
 export {
+  materializeXlsxWorkbook,
+  materializeXlsxWorkbookIndex,
+  materializeXlsxWorksheet,
   openXlsxWorkbook,
-  parseXlsx,
-  parseSheet as parseXlsxSheet,
-  parseXlsxAllSheets,
   type OpenXlsxWorkbookOptions,
+  type DeepReadonly,
+  type MaterializedXlsxWorkbook,
+  type ReadonlyParsedWorkbook,
   type XlsxWorkbookSession,
   type XlsxWorksheetRowChunk,
 } from './xlsx';
 export {
   renderSlideNode,
-  makeSourceBufferFetchImage,
   installImageBitmapShim,
   installOffscreenCanvasShim,
   type NodeCanvasLike,

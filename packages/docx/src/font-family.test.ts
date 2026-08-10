@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeFontFamily, normalizeFontFamilyUncached } from './line-layout.js';
 
-describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.29)', () => {
+describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.14)', () => {
   it('keeps a variable-pitch modern face on the Meiryo/CJK-sans path', () => {
     const chain = normalizeFontFamilyUncached(
       'Meiryo UI',
@@ -21,6 +21,21 @@ describe('normalizeFontFamily — modern family respects w:pitch (§17.8.3.29)',
     );
 
     expect(chain).toContain('"Courier New", monospace');
+  });
+
+  it('keeps a CJK fallback ahead of Latin monospace for fixed East Asian faces', () => {
+    const chain = normalizeFontFamilyUncached(
+      'ＭＳ ゴシック',
+      { 'ＭＳ ゴシック': 'modern' },
+      { 'ＭＳ ゴシック': 'fixed' },
+    );
+
+    // East-Asia-hinted ambiguous glyphs such as U+25A1 must retain the
+    // full-width glyph of the authored CJK face when that face is unavailable;
+    // Courier's narrow square must not capture them first.
+    expect(chain).toContain('"Yu Gothic"');
+    expect(chain.indexOf('"Yu Gothic"')).toBeLessThan(chain.indexOf('"Courier New"'));
+    expect(chain).toContain('monospace');
   });
 
   it('does not assume an omitted pitch is fixed', () => {

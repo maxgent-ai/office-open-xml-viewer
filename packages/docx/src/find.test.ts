@@ -136,6 +136,28 @@ describe('DocxFindController.pageHighlights', () => {
 });
 
 describe('DocxFindController.invalidate', () => {
+  it('suppresses a rejected collection after it becomes stale', async () => {
+    let rejectRuns!: (reason: Error) => void;
+    const c = new DocxFindController(
+      () => 1,
+      () => new Promise((_resolve, reject) => { rejectRuns = reject; }),
+    );
+    const pending = c.find('a');
+
+    c.invalidate();
+    rejectRuns(new Error('old document closed'));
+
+    await expect(pending).resolves.toEqual([]);
+  });
+
+  it('propagates a rejected collection for the current query', async () => {
+    const c = new DocxFindController(
+      () => 1,
+      () => Promise.reject(new Error('current document failed')),
+    );
+    await expect(c.find('a')).rejects.toThrow('current document failed');
+  });
+
   it('drops matches and cached runs', async () => {
     const c = controllerFor([[run('a')]]);
     await c.find('a');

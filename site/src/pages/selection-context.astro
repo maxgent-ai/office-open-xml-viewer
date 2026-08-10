@@ -1,0 +1,480 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import FormatTabs from '../components/FormatTabs.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import { codeThemes } from '../lib/code-theme';
+
+const browserIntegrationSnippet = `const document = new DocxViewer(canvas, {
+  enableTextSelection: true,
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    updateAskAiButton(context);
+  },
+});
+
+const workbook = new XlsxViewer(container, {
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    updateAskAiButton(context);
+  },
+});
+
+const slides = new PptxViewer(canvas, {
+  enableTextSelection: true,
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    updateAskAiButton(context);
+  },
+});`;
+
+const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
+  enableElementSelection: true,
+  onContextMenu: async ({ originalEvent, getContext }) => {
+    // Suppress the browser menu before the first await.
+    originalEvent.preventDefault();
+    const { clientX, clientY } = originalEvent;
+    const context = await getContext();
+    openContextMenu({ clientX, clientY, context });
+  },
+});`;
+---
+
+<Base
+  title="Selection Context for AI and MCP | @silurus/ooxml"
+  description="Use bounded, read-only DOCX, XLSX and PPTX selection context with AI assistants, MCP tools and other external integrations."
+  canonicalPath="/selection-context/"
+>
+  <Nav />
+
+  <header class="guide-hero">
+    <div class="wrap">
+      <a class="back" href="/">← Documentation</a>
+      <p class="eyebrow">Read-only interaction</p>
+      <h1>Turn the user’s focus into useful context.</h1>
+      <p class="lead">
+        Every Viewer exposes one bounded, serializable selection-context API for “explain this”,
+        “evaluate these cells”, and similar external actions. It does not edit the Office file or
+        expose a mutable document model.
+      </p>
+    </div>
+  </header>
+
+  <main class="wrap guide-main">
+    <section class="guide-section two-up" aria-labelledby="choose-surface">
+      <div class="section-heading">
+        <p class="eyebrow">Two different jobs</p>
+        <h2 id="choose-surface">Keep UI state and content handoff separate.</h2>
+      </div>
+      <article>
+        <p class="step">01 · Control the selection</p>
+        <h3>Selection state is the UI authority.</h3>
+        <p>
+          For XLSX, use <code>selectionState</code>, <code>setSelection()</code>, and
+          <code>onSelectionStateChange</code> to control geometry, ActiveCell, the Shift-extension
+          anchor, and multiple areas. These APIs describe what the Viewer has selected.
+        </p>
+      </article>
+      <article>
+        <p class="step">02 · Read useful content</p>
+        <h3>Selection context is a detached snapshot.</h3>
+        <p>
+          Call <code>getSelectionContext()</code> when an external tool needs selected text, cells,
+          formulas, or a clicked document object. Every format also exposes
+          <code>onSelectionContextChange</code> as an optional notification; the getter remains the
+          authoritative read. Set <code>enableTextSelection: true</code> for DOCX/PPTX text context,
+          and explicitly set <code>enableElementSelection: true</code> for chart, picture, or
+          shape clicks in any format. The focused object receives a non-editable outline; the
+          callback alone does not enable object hit-testing.
+        </p>
+      </article>
+    </section>
+
+    <section class="guide-section live-context-demo" data-selection-context-demo aria-labelledby="live-context-title">
+      <div class="section-heading">
+        <p class="eyebrow">Try the handoff</p>
+        <h2 id="live-context-title">See exactly what an external tool would receive.</h2>
+        <p>
+          Select cells or text—or click a chart, picture, or shape—and watch the bounded, detached snapshot
+          update alongside it. The demo does not call an AI service or send data anywhere.
+        </p>
+      </div>
+      <div class="context-demo-formats">
+        <FormatTabs selected="xlsx" label="Selection context demo format" />
+      </div>
+      <div class="context-demo-grid">
+        <div class="context-demo-viewer">
+          <div class="context-demo-toolbar">
+            <span data-context-file>sample-1.xlsx</span>
+            <span class="context-demo-action" data-context-action>Select cells or click an object</span>
+          </div>
+          <div class="context-demo-canvas" data-context-viewer>
+            <p>Loading workbook…</p>
+          </div>
+        </div>
+        <aside class="context-demo-output-panel">
+          <div class="context-demo-output-head">
+            <p class="step">No AI required</p>
+            <h3>Selection context snapshot</h3>
+            <p class="context-demo-status" data-context-status aria-live="polite">Preparing the Viewer…</p>
+          </div>
+          <pre class="context-demo-output" data-selection-context-output>Loading the bounded snapshot…</pre>
+        </aside>
+      </div>
+    </section>
+
+    <section class="guide-section" aria-labelledby="context-shapes">
+      <div class="section-heading">
+        <p class="eyebrow">One extensible family</p>
+        <h2 id="context-shapes">Narrow on <code>format</code> and <code>kind</code>.</h2>
+        <p>All results are plain, detached data. Each format adds only the facts an assistant can use.</p>
+      </div>
+      <div class="context-table-wrap">
+        <table class="context-table">
+          <thead><tr><th>Context</th><th>What the user focused</th><th>What the snapshot adds</th></tr></thead>
+          <tbody>
+            <tr><th><code>docx / text</code></th><td>Browser-native text selection</td><td>Selected text and page, paragraph, and run locators</td></tr>
+            <tr><th><code>docx / element</code></th><td>Clicked topmost picture, chart, or shape</td><td>Element type, page bounds, and structural source locator for inline or floating content</td></tr>
+            <tr><th><code>xlsx / range</code></th><td>Cells, rows, columns, sheet, or multiple areas</td><td>Canonical selection state, sheet identity, formulas, display text, and populated cells</td></tr>
+            <tr><th><code>xlsx / element</code></th><td>Clicked topmost worksheet object</td><td>Chart, picture, or shape type, sheet anchor, and bounded descriptive text</td></tr>
+            <tr><th><code>pptx / text</code></th><td>Browser-native text selection</td><td>Selected text and slide, shape, and run locators</td></tr>
+            <tr><th><code>pptx / element</code></th><td>Clicked topmost slide element</td><td>Type, provenance, bounds, identifiers, and bounded descriptive text</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="priority-note">
+        In DOCX and PPTX, a live text selection takes precedence over element focus. Selecting text clears an
+        earlier element focus, so collapsing the browser selection does not resurrect a stale click.
+      </p>
+    </section>
+
+    <section class="guide-section code-section" aria-labelledby="browser-example">
+      <div class="section-heading">
+        <p class="eyebrow">Browser integration</p>
+        <h2 id="browser-example">Ask for only the context you can consume.</h2>
+      </div>
+      <Code
+        code={browserIntegrationSnippet}
+        lang="ts"
+        themes={codeThemes}
+        defaultColor={false}
+      />
+      <p>
+        The callbacks report semantic changes, not assistant actions. Your application decides
+        whether the action is explain, summarize, compare, evaluate, or something else; the Viewer
+        does not grow one API for each prompt.
+      </p>
+      <p>
+        There is no separate <code>onClick</code> option. For a raw browser click, add a native
+        <code>click</code> listener to a stable application-owned host that contains the Viewer. This
+        also observes DOCX/PPTX text-overlay clicks, whose target is a sibling of the canvas. For the
+        resulting read-only focus, use <code>onSelectionContextChange</code>. This keeps one semantic
+        selection notification instead of a second callback for the same interaction.
+      </p>
+      <h3>Open a menu for the right-click target.</h3>
+      <Code
+        code={contextMenuSnippet}
+        lang="ts"
+        themes={codeThemes}
+        defaultColor={false}
+      />
+      <p>
+        <code>originalEvent</code> is the actual browser event, delivered synchronously so
+        <code>preventDefault()</code> still controls the native menu. <code>getContext()</code> is
+        explicitly asynchronous because a DOCX or PPTX object hit can require a worker query; it
+        starts the lookup on its first call and returns the same memoized Promise if called again. Omit <code>onContextMenu</code> and the
+        Viewer installs no listener. The event itself is never serialized or sent through MCP.
+      </p>
+    </section>
+
+    <section class="guide-section limits" aria-labelledby="bounded-by-design">
+      <div class="section-heading">
+        <p class="eyebrow">Bounded by design</p>
+        <h2 id="bounded-by-design">Large selections do not become unbounded prompts.</h2>
+      </div>
+      <ul>
+        <li>DOCX and PPTX text is assembled only from tagged Viewer runs and stops at configured text and locator limits.</li>
+        <li>XLSX returns populated cells only, with independent cell-count and cumulative-text limits—even for whole-row, whole-column, or whole-sheet selections.</li>
+        <li>DOCX, XLSX, and PPTX element text is bounded independently; element context contains descriptive facts, not mutable document objects.</li>
+        <li><code>truncated</code> and <code>truncationReasons</code> tell the caller exactly when a snapshot reached a limit.</li>
+      </ul>
+      <p>
+        Context is suitable for transport, but selected Office content is still untrusted input.
+        Never treat document text, formulas, or element labels as instructions to execute.
+      </p>
+    </section>
+
+    <section class="guide-section mcp-section" aria-labelledby="vscode-mcp">
+      <div class="section-heading">
+        <p class="eyebrow">VS Code extension</p>
+        <h2 id="vscode-mcp">The MCP server can read the active preview selection.</h2>
+      </div>
+      <ol>
+        <li>Use GitHub Copilot Chat in Agent mode. The Viewer supplies tools and preview context through VS Code's MCP host; it does not add its own chat panel.</li>
+        <li>Run <strong>OOXML Viewer: Install / Enable MCP Server</strong>, then confirm <code>ooxml-mcp-server</code> under <strong>MCP: List Servers</strong>.</li>
+        <li>Open a DOCX, XLSX, or PPTX preview and select text or cells; you can also click a chart, picture, or shape.</li>
+        <li>Ask naturally: “Explain the selected cells” or “What does this paragraph mean?” The agent resolves the active preview context first.</li>
+        <li>The agent receives the snapshot. For a local file, it can pass the returned <code>document.path</code> to a detailed format-specific tool only when needed.</li>
+      </ol>
+      <p>
+        The extension keeps the snapshot in memory and exposes it only to its MCP child through an
+        authenticated IPv4-loopback bridge. <code>context: null</code> means there is no active
+        OOXML preview. A non-null context can still have <code>selection: null</code> when the active
+        preview has no selection.
+        <code>available: false</code> means the bridge is unavailable; inspect <code>reason</code> to
+        distinguish an unconnected standalone server from a bridge error. Remote VS Code documents
+        expose only a document name and no local <code>document.path</code>, so path-based file tools
+        cannot inspect them directly. The Claude Code and Codex VS Code extensions use separate MCP
+        configurations: they can launch the server for path-based file tools, but their standalone
+        process receives no active Viewer selection and reports <code>available: false</code>.
+        Disabling MCP closes the bridge; no selection context is written to disk. For troubleshooting,
+        the underlying zero-argument tool is
+        <code>ooxml_get_active_context</code>.
+      </p>
+      <div class="actions">
+        <a class="button" href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">Open the VS Code extension ↗</a>
+        <a href="/xlsx">XLSX API reference →</a>
+        <a href="/docx">DOCX API reference →</a>
+        <a href="/pptx">PPTX API reference →</a>
+      </div>
+    </section>
+
+  </main>
+
+  <SiteFooter />
+</Base>
+
+<script>
+  import { DocxScrollViewer } from '@silurus/ooxml-docx';
+  import { PptxScrollViewer } from '@silurus/ooxml-pptx';
+  import { XlsxViewer } from '@silurus/ooxml-xlsx';
+  import { selectionContextDemoStatus } from '../lib/selection-context-demo';
+
+  type DemoFormat = 'xlsx' | 'docx' | 'pptx';
+  type DemoContext =
+    | ReturnType<XlsxViewer['getSelectionContext']>
+    | ReturnType<DocxScrollViewer['getSelectionContext']>
+    | ReturnType<PptxScrollViewer['getSelectionContext']>;
+
+  const demo = document.querySelector<HTMLElement>('[data-selection-context-demo]');
+  const viewerHost = demo?.querySelector<HTMLElement>('[data-context-viewer]');
+  const status = demo?.querySelector<HTMLElement>('[data-context-status]');
+  const output = demo?.querySelector<HTMLElement>('[data-selection-context-output]');
+  const fileLabel = demo?.querySelector<HTMLElement>('[data-context-file]');
+  const actionLabel = demo?.querySelector<HTMLElement>('[data-context-action]');
+  const formatButtons = Array.from(
+    demo?.querySelectorAll<HTMLButtonElement>('[data-format-tab]') ?? [],
+  );
+
+  if (demo && viewerHost && status && output && fileLabel && actionLabel) {
+    const base = import.meta.env.BASE_URL;
+    const sampleUrl = (format: DemoFormat) =>
+      `${base}samples/sample-1.${format}`.replace(/([^:])\/\/+/g, '$1/');
+    const labels: Record<DemoFormat, { action: string; empty: string; loading: string }> = {
+      xlsx: {
+        action: 'Select cells or click an object',
+        empty: 'Select cells or click a chart, picture, or shape.',
+        loading: 'Loading workbook…',
+      },
+      docx: {
+        action: 'Select text or click an object',
+        empty: 'Select text or click a picture, chart, or shape.',
+        loading: 'Loading document…',
+      },
+      pptx: {
+        action: 'Select text or click an element',
+        empty: 'Select slide text or click a slide element.',
+        loading: 'Loading presentation…',
+      },
+    };
+    let latestContext: DemoContext = null;
+    let activeFormat: DemoFormat = 'xlsx';
+    let loadGeneration = 0;
+    let destroyViewer: (() => void) | null = null;
+
+    const renderContext = () => {
+      output.textContent = latestContext
+        ? JSON.stringify(latestContext, null, 2)
+        : labels[activeFormat].empty;
+    };
+
+    const updateContext = (context: DemoContext) => {
+      latestContext = context;
+      if (!context) {
+        status.textContent = labels[activeFormat].empty;
+      } else {
+        status.textContent = selectionContextDemoStatus(context);
+      }
+      renderContext();
+    };
+
+    const showFormat = async (format: DemoFormat): Promise<void> => {
+      const generation = ++loadGeneration;
+      destroyViewer?.();
+      destroyViewer = null;
+      activeFormat = format;
+      latestContext = null;
+      for (const button of formatButtons) {
+        button.setAttribute('aria-selected', String(button.dataset.formatTab === format));
+      }
+      fileLabel.textContent = `sample-1.${format}`;
+      actionLabel.textContent = labels[format].action;
+      status.textContent = labels[format].loading;
+      output.textContent = labels[format].loading;
+      viewerHost.dataset.format = format;
+      const loading = document.createElement('p');
+      loading.textContent = labels[format].loading;
+      viewerHost.replaceChildren(loading);
+
+      const isCurrent = () => generation === loadGeneration;
+      try {
+        if (format === 'xlsx') {
+          viewerHost.replaceChildren();
+          let viewer: XlsxViewer | null = null;
+          viewer = new XlsxViewer(viewerHost, {
+            showZoomSlider: false,
+            enableElementSelection: true,
+            onSelectionContextChange(context) {
+              if (isCurrent()) updateContext(context);
+            },
+          });
+          destroyViewer = () => {
+            viewer?.destroy();
+            viewer = null;
+          };
+          await viewer.load(sampleUrl(format));
+          if (!isCurrent() || !viewer) return;
+          updateContext(null);
+          return;
+        }
+
+        viewerHost.replaceChildren();
+        if (format === 'docx') {
+          let viewer: DocxScrollViewer | null = null;
+          const refresh = () => {
+            if (!isCurrent()) return;
+            updateContext(viewer?.getSelectionContext({
+              maxTextCharacters: 4_096,
+              maxRunLocators: 25,
+            }) ?? null);
+          };
+          viewer = new DocxScrollViewer(viewerHost, {
+            enableTextSelection: true,
+            enableElementSelection: true,
+            onSelectionContextChange: refresh,
+            pageShadow: false,
+            background: '#eef2f7',
+          });
+          destroyViewer = () => {
+            viewer?.destroy();
+            viewer = null;
+          };
+          await viewer.load(sampleUrl(format));
+          if (!isCurrent() || !viewer) return;
+          updateContext(null);
+          return;
+        }
+
+        let viewer: PptxScrollViewer | null = null;
+        const refresh = () => {
+          if (!isCurrent()) return;
+          updateContext(viewer?.getSelectionContext({
+            maxTextCharacters: 4_096,
+            maxRunLocators: 25,
+          }) ?? null);
+        };
+        viewer = new PptxScrollViewer(viewerHost, {
+          enableTextSelection: true,
+          enableElementSelection: true,
+          onSelectionContextChange: refresh,
+          pageShadow: false,
+          background: '#eef2f7',
+        });
+        destroyViewer = () => {
+          viewer?.destroy();
+          viewer = null;
+        };
+        await viewer.load(sampleUrl(format));
+        if (!isCurrent() || !viewer) return;
+        updateContext(null);
+      } catch (error: unknown) {
+        if (!isCurrent()) return;
+        status.textContent = error instanceof Error
+          ? error.message
+          : `Could not load sample-1.${format}.`;
+        output.textContent = 'The sample could not be loaded.';
+      }
+    };
+
+    for (const button of formatButtons) {
+      button.addEventListener('click', () => {
+        const format = button.dataset.formatTab as DemoFormat | undefined;
+        if (format && format !== activeFormat) void showFormat(format);
+      });
+    }
+
+    void showFormat('xlsx');
+
+    window.addEventListener('pagehide', () => {
+      loadGeneration++;
+      destroyViewer?.();
+      destroyViewer = null;
+    }, { once: true });
+  }
+</script>
+
+<style>
+  .guide-hero { padding: 56px 0 52px; border-bottom: 1px solid var(--border); }
+  .back { color: var(--text-faint); font-size: 13px; }
+  .guide-hero .eyebrow { margin-top: 28px; }
+  h1 { max-width: 900px; margin: 12px 0 0; font-size: clamp(40px, 7vw, 76px); line-height: 1; letter-spacing: -.045em; }
+  .lead { max-width: 76ch; margin: 22px 0 0; color: var(--text-dim); font-size: 18px; }
+  .guide-main { padding-bottom: 40px; }
+  .guide-section { padding: 60px 0; border-bottom: 1px solid var(--border); }
+  .section-heading { max-width: 820px; }
+  .section-heading h2 { margin: 12px 0 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.08; letter-spacing: -.035em; }
+  .section-heading > p:last-child { margin: 14px 0 0; color: var(--text-dim); }
+  code { font-family: var(--mono); font-size: .9em; }
+  .two-up { display: grid; grid-template-columns: repeat(12, 1fr); gap: 28px; }
+  .two-up .section-heading { grid-column: 1 / 13; }
+  .two-up article { grid-column: span 6; padding: 28px; border: 1px solid var(--border); background: var(--bg-elev); }
+  .two-up h3 { margin: 10px 0 0; font-size: 22px; }
+  .two-up article > p:last-child { margin: 12px 0 0; color: var(--text-dim); }
+  .step { margin: 0; color: var(--accent); font: 600 11px var(--mono); text-transform: uppercase; }
+  .context-table-wrap { margin-top: 30px; overflow-x: auto; border: 1px solid var(--border); }
+  .context-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 14px; }
+  .context-table th, .context-table td { padding: 14px 16px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
+  .context-table thead th { border-top: 0; background: var(--code-bg); }
+  .context-table tbody th { color: var(--accent); white-space: nowrap; }
+  .context-table td { color: var(--text-dim); }
+  .priority-note { max-width: 88ch; margin: 18px 0 0; color: var(--text-dim); }
+  .context-demo-formats { margin-top: 30px; }
+  .context-demo-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 24px; margin-top: 14px; align-items: stretch; }
+  .context-demo-viewer { min-width: 0; overflow: hidden; border: 1px solid var(--border); background: var(--bg-elev); box-shadow: var(--document-shadow); }
+  .context-demo-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+  .context-demo-toolbar span { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); font: 12px var(--mono); white-space: nowrap; }
+  .context-demo-toolbar .context-demo-action { flex: 0 0 auto; color: var(--accent); font-weight: 700; }
+  .context-demo-canvas { width: 100%; height: 460px; background: #fff; }
+  .context-demo-canvas > p { display: grid; min-height: 100%; margin: 0; place-items: center; color: #526174; font: 12px var(--mono); }
+  .context-demo-output-panel { min-width: 0; height: 504px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); background: var(--bg-elev); }
+  .context-demo-output-head { padding: 18px; border-bottom: 1px solid var(--border); }
+  .context-demo-output-head h3 { margin: 10px 0 0; font-size: 21px; }
+  .context-demo-status { margin: 10px 0 0; color: var(--accent); font: 600 11px/1.55 var(--mono); }
+  .context-demo-output { min-width: 0; min-height: 0; margin: 0; padding: 16px; overflow: auto; background: var(--code-bg); color: var(--code-fg); font: 11px/1.55 var(--mono); white-space: pre; }
+  .code-section :global(pre) { margin: 28px 0 0; padding: 22px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg) !important; font-size: 13px; line-height: 1.6; }
+  .code-section :global(code) { font-family: var(--mono); }
+  .code-section > p { max-width: 88ch; margin: 18px 0 0; color: var(--text-dim); }
+  .limits ul, .mcp-section ol { max-width: 900px; margin: 28px 0 0; padding-left: 24px; color: var(--text-dim); }
+  .limits li + li, .mcp-section li + li { margin-top: 10px; }
+  .limits > p, .mcp-section > p { max-width: 90ch; margin: 20px 0 0; color: var(--text-dim); }
+  .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 18px 24px; margin-top: 26px; }
+  .actions a { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+  .actions .button { padding: 11px 15px; border: 1px solid var(--accent); text-decoration: none; }
+  @media (max-width: 760px) {
+    .two-up article { grid-column: span 12; }
+    .context-demo-grid { grid-template-columns: 1fr; }
+    .context-demo-canvas { height: 400px; }
+    .context-demo-output-panel { height: 420px; }
+  }
+</style>

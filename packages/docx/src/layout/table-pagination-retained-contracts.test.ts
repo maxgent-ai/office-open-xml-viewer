@@ -323,8 +323,8 @@ describe('retained table pagination contracts', () => {
     expect(fragments).toHaveLength(3);
     for (const fragment of fragments) {
       expect(fragment.rows).toHaveLength(1);
-      expect(fragment.rows[0]?.heightPt).toBe(20);
-      expect(fragment.advancePt).toBe(20);
+      expect(fragment.rows[0]?.heightPt).toBe(24);
+      expect(fragment.advancePt).toBe(24);
       expect(fragment.borders.filter((border) => border.edge === 'top')).toEqual([
         expect.objectContaining({ widthPt: 4 }),
       ]);
@@ -336,7 +336,7 @@ describe('retained table pagination contracts', () => {
     }
   });
 
-  it('keeps thick collapsed outer border ink outside mixed row-track allocation', () => {
+  it('charges thick collapsed outer half-rules only to page-local non-exact tracks', () => {
     const outer = singleBorder(12);
     const source = table(
       [
@@ -367,14 +367,13 @@ describe('retained table pagination contracts', () => {
     const fragments = retainedTopLevelTables(
       layoutDocument(documentModel([source as unknown as BodyElement], 52)),
     );
-
-    expect(fragments).toHaveLength(1);
-    const [fragment] = fragments;
-    expect(fragment?.rows.map((fragmentRow) => fragmentRow.heightPt)).toEqual([10, 1, 10, 1, 10]);
-    expect(fragment?.advancePt).toBe(32);
-    expect(fragment?.flowBounds.heightPt).toBe(32);
-    expect(fragment?.inkBounds.yPt).toBeCloseTo((fragment?.flowBounds.yPt ?? 0) - 6, 6);
-    expect(fragment?.inkBounds.heightPt).toBe(44);
+    expect(fragments).toHaveLength(2);
+    expect(fragments.map((fragment) => fragment.rows.map((row) => row.logicalRowIndex)))
+      .toEqual([[0, 1, 2, 3], [4]]);
+    expect(fragments.map((fragment) => fragment.rows.map((row) => row.heightPt)))
+      .toEqual([[16, 1, 10, 1], [22]]);
+    expect(fragments.map((fragment) => fragment.advancePt)).toEqual([28, 22]);
+    expect(fragments.map((fragment) => fragment.inkBounds.heightPt)).toEqual([40, 34]);
   });
 
   it('re-resolves repeated atLeast header boundaries and row tracks on every slice', () => {
@@ -405,7 +404,8 @@ describe('retained table pagination contracts', () => {
 
     expect(fragments).toHaveLength(3);
     for (const [index, fragment] of fragments.entries()) {
-      expect(fragment.rows.map((fragmentRow) => fragmentRow.heightPt)).toEqual([20, 20]);
+      expect(fragment.rows.map((fragmentRow) => fragmentRow.heightPt)).toEqual([22.5, 22.5]);
+      expect(fragment.advancePt).toBe(45);
       expect(fragment.rows[0]?.ownership).toBe(index === 0 ? 'source' : 'repeated-header');
       expect(fragment.borders.filter((border) => border.edge === 'top')).toEqual([
         expect.objectContaining({ widthPt: 4 }),
@@ -419,7 +419,7 @@ describe('retained table pagination contracts', () => {
     }
   });
 
-  it('fits body rows against the repeated header interior boundary, not an outer bottom', () => {
+  it('reserves the repeated header outer half-rule before admitting exact body rows', () => {
     const outer = singleBorder(4);
     const inside = singleBorder(1);
     const source = table(
@@ -444,15 +444,12 @@ describe('retained table pagination contracts', () => {
     const fragments = retainedTopLevelTables(
       layoutDocument(documentModel([source as unknown as BodyElement], 80)),
     );
-
-    expect(fragments).toHaveLength(2);
-    expect(fragments.map((fragment) => fragment.rows.length)).toEqual([3, 3]);
-    expect(fragments.map((fragment) => fragment.advancePt)).toEqual([60, 60]);
-    for (const fragment of fragments) {
-      expect(fragment.rows.map((fragmentRow) => fragmentRow.logicalRowIndex)).toEqual(
-        fragment === fragments[0] ? [0, 1, 2] : [0, 3, 4],
-      );
-      expect(fragment.borders.filter((border) => border.edge === 'between')).toHaveLength(2);
+    expect(fragments).toHaveLength(4);
+    expect(fragments.map((fragment) => fragment.rows.length)).toEqual([2, 2, 2, 2]);
+    expect(fragments.map((fragment) => fragment.advancePt)).toEqual([42.5, 42.5, 42.5, 42.5]);
+    for (const [index, fragment] of fragments.entries()) {
+      expect(fragment.rows.map((fragmentRow) => fragmentRow.logicalRowIndex)).toEqual([0, index + 1]);
+      expect(fragment.borders.filter((border) => border.edge === 'between')).toHaveLength(1);
       expect(fragment.borders.filter((border) => border.edge === 'bottom')).toEqual([
         expect.objectContaining({ widthPt: 4 }),
       ]);
@@ -485,7 +482,7 @@ describe('retained table pagination contracts', () => {
       const fragmentRow = fragment.rows[0];
       expect(fragmentRow?.logicalRowIndex).toBe(0);
       expect(fragmentRow?.fragmentIndex).toBe(fragmentIndex);
-      expect(fragment.advancePt).toBeCloseTo(fragmentRow?.contentHeightPt ?? 0, 8);
+      expect(fragment.advancePt).toBeCloseTo((fragmentRow?.contentHeightPt ?? 0) + 4, 8);
       expect(fragment.flowBounds.heightPt).toBeCloseTo(fragment.advancePt, 8);
       expect(fragment.borders.filter((border) => border.edge === 'top')).toEqual([
         expect.objectContaining({ widthPt: 4 }),
@@ -508,7 +505,7 @@ describe('retained table pagination contracts', () => {
       expect(lineRanges[index]?.lineStart).toBe(lineRanges[index - 1]?.lineEnd);
     }
     expect(fragments.reduce((sum, fragment) => sum + fragment.advancePt, 0)).toBeCloseTo(
-      fragments.reduce((sum, fragment) => sum + (fragment.rows[0]?.contentHeightPt ?? 0), 0),
+      fragments.reduce((sum, fragment) => sum + (fragment.rows[0]?.contentHeightPt ?? 0) + 4, 0),
       8,
     );
   });

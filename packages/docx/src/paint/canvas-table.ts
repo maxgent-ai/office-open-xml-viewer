@@ -11,7 +11,11 @@ import {
   scaleAffine,
   translationAffine,
 } from './affine.js';
-import { oneDevicePixelCssWidth, paintStrokeSegment } from './canvas-border.js';
+import {
+  oneDevicePixelCssWidth,
+  paintCompoundBorderFrame,
+  paintStrokeSegment,
+} from './canvas-border.js';
 import { paintParagraphLayout } from './canvas-text.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import type { CanvasPaintContext } from './types.js';
@@ -98,9 +102,16 @@ function paintTableBorders(node: TableLayout, context: CanvasPaintContext): void
   // hairline with at least one device pixel of coverage. Keep that distinction
   // in paint so layout/conflict resolution continues to use the OOXML width.
   const minimumCssWidthPx = oneDevicePixelCssWidth(context);
-  for (const border of node.borders) {
-    paintStrokeSegment(border, context, minimumCssWidthPx);
+  const framedSegments = new Set<number>();
+  for (const frame of node.compoundBorderFrames ?? []) {
+    if (paintCompoundBorderFrame(frame.bounds, frame.border, context)) {
+      frame.segmentIndexes.forEach((index) => framedSegments.add(index));
+    }
   }
+  node.borders.forEach((border, index) => {
+    if (framedSegments.has(index)) return;
+    paintStrokeSegment(border, context, minimumCssWidthPx);
+  });
 }
 
 function paintPlacedTableBorders(

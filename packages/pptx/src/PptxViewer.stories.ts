@@ -1,7 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { PptxViewer } from './viewer';
-import init, { parse_pptx } from './wasm/pptx_parser.js';
-import wasmUrl from './wasm/pptx_parser_bg.wasm?url';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
 // In the monorepo the stories build the same MathRenderer from the core engine.
 import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
@@ -132,68 +130,6 @@ export function createCanvasSpinner(): HTMLElement {
   }
   return el;
 }
-
-// ---------------------------------------------------------------------------
-// Debug: raw JSON from WASM parser (helps diagnose blank output)
-// ---------------------------------------------------------------------------
-export const DebugJson: Story = {
-  name: 'Debug – raw parse JSON',
-  args: { width: 960 },
-  render(_args) {
-    const root = document.createElement('div');
-    root.style.cssText = 'font-family:sans-serif;padding:16px;';
-
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.pptx';
-
-    const pre = document.createElement('pre');
-    pre.style.cssText =
-      'font-size:11px;line-height:1.4;max-height:600px;overflow:auto;' +
-      'background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;';
-    pre.textContent = 'Load a .pptx to see the parsed JSON here.';
-
-    root.append(fileInput, pre);
-
-    // Kick off wasm init eagerly so it overlaps with the user picking a file.
-    // The change handler also awaits the same promise — wasm-pack's init() is
-    // idempotent and cached, so the second await resolves instantly. This
-    // closes the race where picking a file before init resolved would silently
-    // return without ever updating the pre.
-    const wasmReady = init({ module_or_path: wasmUrl });
-
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files?.[0];
-      if (!file) return;
-      pre.textContent = `Parsing ${file.name}…`;
-      try {
-        await wasmReady;
-        const buf = await file.arrayBuffer();
-        // `parse_pptx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>);
-        // decode + parse to inspect the model.
-        const json = parse_pptx(new Uint8Array(buf));
-        const parsed = JSON.parse(new TextDecoder().decode(json));
-        // Print summary: slide count, element count per slide
-        const summary = {
-          slideWidth: parsed.slideWidth,
-          slideHeight: parsed.slideHeight,
-          slideCount: parsed.slides.length,
-          slides: (parsed.slides as Array<{ elements: unknown[] }>).map((s, i) => ({
-            slideIndex: i,
-            elementCount: s.elements.length,
-            elements: s.elements,
-          })),
-        };
-        pre.textContent = JSON.stringify(summary, null, 2);
-        console.log('[pptx debug] full JSON:', parsed);
-      } catch (err) {
-        pre.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    });
-
-    return root;
-  },
-};
 
 // ---------------------------------------------------------------------------
 // File-upload viewer

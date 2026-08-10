@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { PptxViewer } from './viewer.js';
-import { installDom, makeEl, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeEl, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -97,5 +97,29 @@ describe('PptxViewer.destroy() — canvas reparent return', () => {
     expect(() => v.destroy()).not.toThrow();
     expect(canvas.parentElement).toBe(parent);
     expect(parent.children).toEqual([before, canvas]);
+  });
+
+  it('borrows a presentation through fromPresentation() with the same lifecycle contract as the scroll viewer', async () => {
+    const { canvas } = mount();
+    const engine = new FakePptxEngine(2, 9144000, 5143500);
+    const viewer = PptxViewer.fromPresentation(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asPres(),
+    );
+    expect(viewer.slideCount).toBe(2);
+    await expect((viewer as PptxViewer).load('x.pptx')).rejects.toThrow(/fromPresentation/);
+    viewer.destroy();
+    expect(engine.destroyed).toBe(false);
+  });
+
+  it('rejects a borrowed mode conflict before reparenting the canvas', () => {
+    const { parent, canvas } = mount();
+    const engine = new FakePptxEngine(1, 9144000, 5143500, 'worker');
+    expect(() => PptxViewer.fromPresentation(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asPres(),
+      { mode: 'main' } as never,
+    )).toThrow(/opts\.mode='main'.*mode='worker'/);
+    expect(parent.children).toContain(canvas);
   });
 });

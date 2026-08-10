@@ -6,6 +6,7 @@ import {
   installDom,
   makeEl,
   makeContainer,
+  makeBorrowedPptxScrollViewer,
   FakePptxEngine,
   type FakeEl,
 } from './scroll-viewer-test-dom.js';
@@ -164,7 +165,7 @@ async function setupScroll(
   const container = makeContainer(200, 400);
   const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, mode);
   engine.feedTextRuns = [linkRun(hyperlink)];
-  const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+  const v = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
     presentation: engine.asPres(),
     gap: 10,
     overscan: 1,

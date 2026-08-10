@@ -1,8 +1,259 @@
 # Changelog
 
 All notable changes to @silurus/ooxml are documented here. The project follows
-semantic versioning; minor releases add spec-compliant features or behavior
-changes that remain compatible with existing API surfaces.
+semantic versioning. While the major version is zero, minor releases may contain
+explicitly documented breaking changes; patch releases remain compatible with
+the corresponding minor release.
+
+## 0.77.0 — 2026-08-10
+
+Breaking minor release. Unifies read-only selection and integration context
+across DOCX, XLSX, and PPTX; lets applications identify selected document
+elements and context-menu targets; and connects the active VS Code preview to
+the OOXML MCP server. See the
+[v0.77 migration guide](https://ooxml.silurus.dev/announcements/v077-migration-guide/)
+for every removed or renamed API.
+
+- **Excel-compatible XLSX selection:** replace the lossy range-only
+  compatibility API with `setSelection()`, `selectionState`, and
+  `onSelectionStateChange()`. The canonical state keeps selected areas,
+  ActiveCell, and the Shift-extension anchor separate, supports multiple areas,
+  and preserves row, column, whole-sheet, RTL, clipboard, keyboard, pointer,
+  and programmatic behavior. (#1176)
+- **cross-format selection context:** expose bounded, detached text, cell-range,
+  and chart/picture/shape context through `getSelectionContext()` and the common
+  `onSelectionContextChange` callback. Optional `enableElementSelection` adds
+  read-only object selection with a visible outline in DOCX, XLSX, and PPTX;
+  `onContextMenu` provides the original browser event plus a lazy asynchronous
+  target lookup. The official site includes matching three-format demos and
+  browser-integration guidance. (#1181, #1182)
+- **VS Code and MCP integration:** add an authenticated loopback bridge from the
+  active OOXML preview to one `ooxml_get_active_context` tool, including local
+  document identity and bounded selected content. Consolidate strict-subset
+  DOCX, XLSX, and PPTX tools, validate the bridge payload and lifecycle, and
+  document the Copilot-specific active-context path separately from standalone
+  path-based MCP use. (#1182)
+- **predictable asynchronous errors:** Promise-returning Viewer and headless
+  operations now reject their Promise on failure even when `onError` is set;
+  `onError` remains for later Viewer-managed work that has no Promise to await.
+  Initial scroll-window and presentation-media work follows the same rule.
+  (#1182)
+- **public API cleanup:** remove the legacy XLSX selection names, no-op rendering
+  options, internal worker transport types, and exact aliases that duplicated a
+  canonical type. Narrow borrowed and operation-specific options, export every
+  reachable public type, forward Viewer passwords correctly, and align the Node
+  and Markdown input contracts with their documented binary inputs. Migration
+  tables cover each source change without temporary duplicate APIs. (#1182)
+- **package guidance and regression evidence:** clarify npm unpacked size versus
+  the assets reachable from each format entry, keep the optional MathJax engine
+  separately lazy-loaded, and verify the complete private DOCX/XLSX/PPTX corpus
+  against the previous renderer with pixel-identical output. (#1180, #1182)
+
+## 0.76.2 — 2026-08-08
+
+Patch. Improves Word-compatible text and table layout, extends spreadsheet
+selection beyond the visible viewport, and hardens packaging and public demos
+without changing the 0.76 public API.
+
+- **docx typography and tabs:** implement document-grid character pitch,
+  tab-stop, decimal-tab fallback, and right-indent adjustment through the
+  canonical retained layout pipeline; retain Normal-style typography and font
+  alternate-name metadata; and honor `balanceSingleByteDoubleByteWidth` for the
+  specification-defined single/double-byte ratio plus narrowly registered
+  Office behavior for ASCII/CJK grid deltas and authored space sequences.
+  Measurement, wrapping, intrinsic sizing, selection geometry, RTL placement,
+  and paint now consume the same retained width authority. (ECMA-376
+  §§17.3.1.1, 17.3.1.37, 17.6.5, 17.8.3.1 and 17.15.3.3; MS-OI29500
+  §§2.1.534 and 2.1.556; MS-OE376 §2.1.236; #1177, #1178)
+- **docx retained layout:** finalize bookmark metadata only after every page
+  story joins the retained graph, and preserve signed table-indent spill while
+  exact row height clips only the block axis. (§§17.4.50, 17.4.80 and
+  17.13.6.2; #1174, #1175)
+- **xlsx interaction:** show overflowing worksheet scrollbars by default, allow
+  pointer drag selections to auto-scroll beyond the visible viewport, preserve
+  RTL and row/column selection semantics, and bind deferred selection updates to
+  the initiating pointer. The multi-window public demo now follows the parent
+  light/dark theme. (#1170, #1172, #1173)
+- **VS Code packaging:** exclude stale source maps at the VSIX package boundary
+  so reused development output cannot unexpectedly double the published
+  extension size. (#1171)
+
+## 0.76.1 — 2026-08-07
+
+Patch. Improves Word-compatible legacy layout, stabilizes public-site demos,
+and repairs the release workflows without changing the 0.76 public API.
+
+- **docx fidelity:** retain section properties on break-only paragraphs; resolve
+  the complete DrawingML style-matrix color choice; preserve absolute VML image
+  anchors, CSS declaration precedence, wrap distances, coordinate ownership,
+  and signed stacking; render legacy form-checkbox state and sizing; and allow
+  authored fixed nested tables to overflow a containing cell when Word does.
+  (ECMA-376 §§17.16.29–30, 17.18.87, 19.1.2.19, 20.1.4.1.7 and
+  20.1.4.1.30; MS-OE376 §§2.1.505, 2.1.1692, 2.1.1701 and 2.1.1710;
+  #1167, #1168)
+- **viewer and website stability:** keep the first-page leading padding while
+  paginated DOCX/PPTX demos start at scroll position zero, restore homepage
+  viewers after browser history navigation, normalize external-link arrows on
+  mobile, prevent announcement pages from causing horizontal overflow, and
+  document that loading ownership and main/worker execution mode are independent
+  choices. (#1164, #1165, #1166)
+- **release infrastructure:** isolate VS Code extension package builds from stale
+  workspace output and update the GitHub Pages artifact upload action for the
+  current runner runtime. (#1162, #1163)
+
+## 0.76.0 — 2026-08-06
+
+Breaking minor release. Unifies Browser Viewer ownership, replaces the legacy
+synchronous Node parser helpers with one bounded asynchronous pipeline, and adds
+an independently mountable XLSX sheet surface without changing the ordinary
+Browser `new Viewer(target)` plus `await viewer.load(source)` flow. See the
+[0.75 to 0.76 migration guide](docs/migration-0.76.md).
+
+- **browser Viewer architecture:** add `XlsxSheetViewer`, a caller-canvas active
+  worksheet viewport with selection, search, zoom, logical scrolling, and
+  independent sheet navigation. The existing `XlsxViewer` retains its complete
+  workbook UI and now composes the same acquisition, geometry, viewport,
+  selection, render-dispatch, and surface implementation. DOCX and PPTX single
+  and scroll Viewers likewise share the same Canvas lifecycle and static render
+  dispatch mechanics without merging their format-specific layout semantics.
+  (#1155, #1159)
+- **explicit engine reuse:** replace Viewer constructor-option injection with
+  synchronous named factories: `fromDocument()`, `fromPresentation()`, and
+  `fromWorkbook()`. The normal `viewer.load(source)` path remains the simple,
+  Viewer-owned default; factories provide an explicit caller-owned path for
+  master/detail, multi-pane, and multi-window rendering. Factory return types
+  omit `load()`, conflicting load options are rejected, and borrowed engines are
+  never destroyed by their Viewers. A declaration-level symmetry check guards
+  these ownership and naming contracts across DOCX, PPTX, and XLSX. (#1160)
+- **node parser API:** remove the synchronous `parseDocx()`, `parsePptx()`,
+  `parseXlsx()`, `parseXlsxSheet()`, `parseXlsxAllSheets()`, and standalone PPTX
+  media extraction compatibility paths. New `materialize*()` helpers preserve
+  convenient caller-owned results, while `openDocxDocument()`,
+  `openPptxPresentation()`, and `openXlsxWorkbook()` provide bounded sequential
+  sessions with cancellation, metrics, archive reuse, deterministic cleanup,
+  and runtime recovery through the same canonical acquisition pipeline used by
+  Browser rendering. (#1134, #1155)
+- **resource governance:** add the shared `resourceLimits.maxArchiveEntries`
+  admission policy across Browser main mode, workers, and Node sessions. The
+  calibrated default is 4,096 entries, `null` disables only the configurable
+  limit, and the non-configurable 20,000-entry structural ceiling remains in
+  force. Violations use the existing typed resource-limit error and metrics
+  vocabulary. (#1133, #1155)
+- **xlsx fidelity and interaction:** localize the built-in short-date format,
+  reuse date formatters and streamed worksheet metrics, center wrapped values
+  that remain one rendered line, and mirror text overflow, footer controls, and
+  sheet-tab ordering/alignment for RTL workbooks. The public site demonstrates
+  one parsed workbook rendered as independently scrollable sheets, including
+  same-origin popup windows. (#1156, #1157, #1158, #1159)
+- **tooling and documentation:** build the libraries with TypeScript 7 while
+  isolating the temporary TypeScript 6 Compiler API dependency used by
+  declaration tooling. Publish English and Japanese architecture baselines, a
+  complete migration guide and site announcement, JavaScript Office Viewer SEO
+  metadata, sitemap and robots endpoints, refreshed public API references, and
+  updated README screenshots. (#1154, #1155, #1160)
+
+## 0.75.5 — 2026-08-05
+
+Patch. Improves Word-compatible paragraph layout and makes framework examples
+usable as both embedded source references and top-level live projects.
+
+- **docx pagination:** carry an explicit `splittable` / `indivisible`
+  fragmentation contract from paragraph acquisition through page selection.
+  Marker-only and otherwise indivisible paragraphs now paginate atomically,
+  while incomplete retained line boundaries fail closed instead of being
+  guessed by the renderer. (#1151)
+- **docx text:** resolve numbering marker fonts and colours once from numbering
+  level and paragraph-mark properties for both body text and text boxes; retain
+  the selected font geometry for run highlights; and give positive authored
+  character spacing precedence over document-level punctuation compression.
+  (§§17.3.2.15, 17.3.2.23, 17.9.24, 17.15.1.18; observed Word inheritance and
+  pitch precedence; #1151)
+- **website / examples:** present embedded StackBlitz projects as code browsers
+  without auto-starting WebContainers, keep top-level links runnable, and use
+  the standard shared footer on the framework chooser, framework guides, and
+  format pages. (#1150)
+
+## 0.75.4 — 2026-08-04
+
+Patch. Improves Word DrawingML fidelity, safely handles malformed style
+inheritance, and adds runnable TypeScript integration guides.
+
+- **docx DrawingML:** preserve inline WordprocessingShape objects through
+  parsing, immutable layout, pagination, and paint; retain authored image fills
+  through the shared DrawingML fill model; and carry signed run positioning and
+  resolved page-field metrics without paint-time inference. (§§20.4.2.7–8,
+  20.1.8.14; #1146)
+- **docx styles:** detect circular `basedOn` inheritance by style ID and apply
+  every unique style once before terminating a malformed revisiting edge. Valid
+  paragraph, character, and table style chains remain unbounded by arbitrary
+  depth caps, while invalid input can no longer overflow the WASM stack.
+  (§17.7.4.3; MS-OI29500 §2.1.233; #1148)
+- **website / examples:** publish isolated TypeScript projects and independent,
+  search-oriented StackBlitz guides for React, Vue, Svelte, and Solid. The
+  public navigation now points to one framework chooser, redundant per-format
+  snippets and Storybook links are removed, DOCX teardown guidance uses the
+  current `destroy()` lifecycle, and npm discovery includes `office-viewer` and
+  `office` keywords. (#1146, #1147)
+
+## 0.75.3 — 2026-08-04
+
+Patch. Restores Word-compatible DOCX pagination at signed `atLeast` spacing
+boundaries and keeps scheduled ZIP extraction fuzzing buildable.
+
+- **docx layout:** preserve Word's signed `atLeast` boundary for content-less
+  paragraph marks when Far East layout is enabled on an active document grid.
+  Negative values retain their authored magnitude, zero follows ordinary
+  `atLeast` spacing, and positive values continue to allocate whole grid cells,
+  without changing non-grid or `snapToGrid=false` layout. (§§17.3.1.33,
+  17.6.5; observed Word behavior; #1144)
+- **fuzzing:** align the independent ZIP extraction fuzz target with the
+  resource-governed package API, retain the package handle for entry reads, and
+  add ordinary CI format and Clippy gates so parser API drift is detected before
+  scheduled campaigns. (#1143)
+
+## 0.75.2 — 2026-08-04
+
+Patch. Improves Word-compatible DOCX text metrics, anchored drawing flow,
+table pagination, and compound border rendering.
+
+- **docx text:** retain underline decoration across tab advances, preserve CJK
+  fallback for fixed-pitch East Asian faces, and resolve Far East layout-grid
+  metrics from the East Asia font axis for empty paragraph marks and visible
+  Latin or CJK text. (§§17.3.1.37, 17.6.5; observed Word `useFELayout`
+  behavior; #1141)
+- **docx tables / drawings:** keep overlap-permitted, non-wrapping in-cell
+  drawings out of automatic row containment, include winning collapsed-border
+  half-rules in non-exact row tracks, and reserve page-local boundary rules
+  when selecting split rows. (§§17.4.43, 17.4.66, 17.4.80, 20.4.2.3;
+  observed Word row-footprint behavior; #1141)
+- **docx borders:** retain compound `ST_Border` rails and paint table outer
+  borders as joined closed frames, including continuous corner connections,
+  without inferring table structure during the paint pass. (§17.18.2; #1141)
+
+## 0.75.1 — 2026-08-03
+
+Patch. Improves PowerPoint chart and text layout fidelity, keeps spreadsheet
+footer navigation stable across zoom levels, and refines the website preview
+experience.
+
+- **pptx / charts:** honor authored inner manual plot rectangles instead of
+  clamping them to automatic chart gutters, and use PowerPoint's default
+  automatic scale target for a deleted value axis whose ticks are not visible.
+  This keeps stacked horizontal bars aligned with separately authored labels
+  and other slide content. (§21.2.2.89; observed PowerPoint scale behavior;
+  #1136, #1138)
+- **pptx text:** inherit placeholder text insets from layouts and masters
+  attribute by attribute, and exclude a final paragraph's trailing spacing from
+  the multi-column overflow decision. This preserves authored page margins,
+  wrapping, and column placement. (§21.1.2.1.1; Annex L.3.2.3; #1136)
+- **xlsx:** keep the sheet-tab previous/next navigation area at its 100% row
+  header width, independently of the worksheet cell zoom. (#1137)
+- **website:** retain preloaded home-page viewers across format switches, add
+  selectable DOCX/PPTX text layers, keep preview frames and wide content
+  responsive, avoid unrelated font downloads during parser prewarming, and
+  improve progress feedback and mobile alignment. (#1135) The stacked mobile
+  hero icon also retains its full colour in light mode instead of inheriting
+  the tablet-layout translucency.
 
 ## 0.75.0 — 2026-08-03
 

@@ -1,12 +1,10 @@
 ---
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
-import FrameworkSection from '../components/FrameworkSection.astro';
 import ApiReference from '../components/ApiReference.astro';
 import { pptxSnippets } from '../lib/demo-snippets';
 ---
-<FormatPage format="pptx" name="PPTX" ext=".pptx"
-  tagline="Render .pptx decks to Canvas.">
+<FormatPage format="pptx" name="PPTX" ext=".pptx">
   <DemoBlock
     format="pptx" kind="demo" badge="Story · Demo"
     title="Single viewer with navigation"
@@ -31,6 +29,5 @@ import { pptxSnippets } from '../lib/demo-snippets';
     description="Combine both: a PptxPresentation for the thumbnail rail and a PptxViewer for the detail pane. Click a thumbnail to jump the preview with goToSlide()."
     code={pptxSnippets.masterdetail}
   />
-  <FrameworkSection format="pptx" />
   <ApiReference format="pptx" />
 </FormatPage>

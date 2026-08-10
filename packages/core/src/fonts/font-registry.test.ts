@@ -80,6 +80,20 @@ describe('retainFace', () => {
     expect(rb.face).not.toBe(ra.face);
     expect(facesB).toHaveLength(1);
   });
+
+  it('keeps same-signature registrations independent across document sets', () => {
+    const { set: setA, faces: facesA } = makeSet();
+    const { set: setB, faces: facesB } = makeSet();
+    const faceA = retainFace('sig-a', setA, creator(setA, 'A').create).face;
+    const faceB = retainFace('sig-a', setB, creator(setB, 'A').create).face;
+
+    releaseFaces([faceB]);
+    expect(facesB).toHaveLength(0);
+    expect(facesA).toEqual([faceA as unknown as FakeFace]);
+
+    releaseFaces([faceA]);
+    expect(facesA).toHaveLength(0);
+  });
 });
 
 describe('releaseFaces', () => {

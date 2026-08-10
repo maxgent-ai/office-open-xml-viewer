@@ -5,12 +5,17 @@ const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf
 const nav = read('./components/Nav.astro');
 const base = read('./layouts/Base.astro');
 const footerSurfaces = [
-  read('./layouts/FormatPage.astro'),
   read('./pages/index.astro'),
   read('./pages/try.astro'),
-  read('./pages/deprecations.astro'),
   read('./pages/errors.astro'),
   read('./pages/announcements/index.astro'),
+];
+const sharedFooter = read('./components/SiteFooter.astro');
+const sharedFooterSurfaces = [
+  read('./layouts/FormatPage.astro'),
+  read('./components/FrameworkGuide.astro'),
+  read('./pages/frameworks/index.astro'),
+  read('./pages/announcements/[slug].astro'),
 ];
 
 describe('official-site brand icon', () => {
@@ -19,6 +24,11 @@ describe('official-site brand icon', () => {
     expect(nav).not.toContain('nav-mark');
     for (const source of footerSurfaces) {
       expect(source).toContain('<BrandIcon />');
+      expect(source).not.toContain('nav-mark');
+    }
+    expect(sharedFooter).toContain('<BrandIcon />');
+    for (const source of sharedFooterSurfaces) {
+      expect(source).toContain('<SiteFooter />');
       expect(source).not.toContain('nav-mark');
     }
   });

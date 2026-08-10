@@ -20,6 +20,37 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::io::Cursor;
 
+fn parse_xdr_col(value: &str) -> u32 {
+    parse_xdr_index(value)
+}
+
+fn parse_xdr_row(value: &str) -> u32 {
+    parse_xdr_index(value)
+}
+
+/// ST_ColID / ST_RowID are non-negative `xsd:int` values. They are not bounded
+/// by the worksheet grid in the DrawingML schema, so preserve every conforming
+/// off-grid marker as an acquisition fact. Geometry code performs O(log k)
+/// culling without materializing intervening cells. Invalid lexical/range
+/// values retain the parser's established zero fallback.
+fn parse_xdr_index(value: &str) -> u32 {
+    value
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|value| *value >= 0)
+        .map(|value| value as u32)
+        .unwrap_or(0)
+}
+
+fn vml_xdr_index(value: i64) -> u32 {
+    i32::try_from(value)
+        .ok()
+        .filter(|value| *value >= 0)
+        .map(|value| value as u32)
+        .unwrap_or(0)
+}
+
 /// ECMA-376 Part 3 §9.3 "given application configuration" for the xlsx parser:
 /// the Microsoft 2010 drawing extensions (a14 — wraps ordinary shapes/charts and
 /// OMML `a14:m` equations) and the 2009/9 spreadsheet extensions (x14 — slicers
@@ -118,9 +149,9 @@ pub(crate) fn parse_drawing_anchors(
                     let mut row_off: i64 = 0;
                     for c in child.children() {
                         match (c.tag_name().name(), c.text()) {
-                            ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
+                            ("col", Some(t)) => col = parse_xdr_col(t),
                             ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
-                            ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
+                            ("row", Some(t)) => row = parse_xdr_row(t),
                             ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
                             _ => {}
                         }
@@ -1329,9 +1360,9 @@ pub(crate) fn parse_shape_anchors(
                 let mut row_off: i64 = 0;
                 for cc in c.children() {
                     match (cc.tag_name().name(), cc.text()) {
-                        ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
+                        ("col", Some(t)) => col = parse_xdr_col(t),
                         ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
-                        ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
+                        ("row", Some(t)) => row = parse_xdr_row(t),
                         ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
                         _ => {}
                     }
@@ -1701,9 +1732,9 @@ fn parse_two_cell_marker(anchor: &roxmltree::Node) -> AnchorRect {
         let (mut col, mut col_off, mut row, mut row_off) = (0u32, 0i64, 0u32, 0i64);
         for c in marker.children() {
             match (c.tag_name().name(), c.text()) {
-                ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
+                ("col", Some(t)) => col = parse_xdr_col(t),
                 ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
-                ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
+                ("row", Some(t)) => row = parse_xdr_row(t),
                 ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
                 _ => {}
             }
@@ -1748,13 +1779,13 @@ fn parse_vml_client_anchor(client_data: &roxmltree::Node) -> Option<AnchorRect> 
         return None;
     }
     Some(AnchorRect {
-        from_col: vals[0].max(0) as u32,
+        from_col: vml_xdr_index(vals[0]),
         from_col_off: vals[1].saturating_mul(EMU_PER_PX_96DPI),
-        from_row: vals[2].max(0) as u32,
+        from_row: vml_xdr_index(vals[2]),
         from_row_off: vals[3].saturating_mul(EMU_PER_PX_96DPI),
-        to_col: vals[4].max(0) as u32,
+        to_col: vml_xdr_index(vals[4]),
         to_col_off: vals[5].saturating_mul(EMU_PER_PX_96DPI),
-        to_row: vals[6].max(0) as u32,
+        to_row: vml_xdr_index(vals[6]),
         to_row_off: vals[7].saturating_mul(EMU_PER_PX_96DPI),
     })
 }
@@ -3865,6 +3896,26 @@ mod ole_object_tests {
         );
         // The other (well-behaved) offsets are unaffected.
         assert_eq!(anchor.to_col_off, 0);
+    }
+
+    #[test]
+    fn drawing_marker_indices_preserve_conforming_off_grid_xsd_int_values() {
+        assert_eq!(parse_xdr_col("16384"), 16_384);
+        assert_eq!(parse_xdr_row("1048576"), 1_048_576);
+        assert_eq!(parse_xdr_col(&i32::MAX.to_string()), i32::MAX as u32);
+        assert_eq!(parse_xdr_row("-1"), 0);
+        assert_eq!(parse_xdr_col("2147483648"), 0);
+    }
+
+    #[test]
+    fn vml_anchor_preserves_conforming_off_grid_indices_without_wrapping() {
+        let xml = r#"<x:ClientData xmlns:x="urn:schemas-microsoft-com:office:excel" ObjectType="Pict">
+          <x:Anchor>16384, 0, 1048576, 0, 20000, 0, 2000000, 0</x:Anchor>
+        </x:ClientData>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let anchor = parse_vml_client_anchor(&doc.root_element()).unwrap();
+        assert_eq!((anchor.from_col, anchor.from_row), (16_384, 1_048_576));
+        assert_eq!((anchor.to_col, anchor.to_row), (20_000, 2_000_000));
     }
 
     /// The `<objectPr><anchor>` two-cell markers (EMU, exact) win over the VML

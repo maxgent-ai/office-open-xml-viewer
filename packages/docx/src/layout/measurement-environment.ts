@@ -7,7 +7,10 @@ import {
   type LayoutSeg,
   type LineLayoutEnvironment,
 } from '../line-layout.js';
-import type { ParagraphMeasurementEnvironment } from '../paragraph-measure.js';
+import {
+  paragraphCharacterGrid,
+  type ParagraphMeasurementEnvironment,
+} from '../paragraph-measure.js';
 import type { ParagraphLayoutContext, StoryContext } from '../layout-context.js';
 import type { BodyMeasurementContext } from './acquisition-context.js';
 import { writingModeFromTextDirection } from './coordinate-space.js';
@@ -80,6 +83,8 @@ export function paragraphMeasurementEnvironment(
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
     useFeLayout: state.layoutSettings.compat.useFeLayout,
+    balanceSingleByteDoubleByteWidth:
+      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
@@ -93,11 +98,14 @@ export function segmentEnvironmentOf(
   state: BodyMeasurementContext,
 ): LineLayoutEnvironment {
   if (!state.verticalAllRotated
-    && state.layoutSettings.characterSpacingControl === undefined) return state;
+    && state.layoutSettings.characterSpacingControl === undefined
+    && !state.layoutSettings.compat.balanceSingleByteDoubleByteWidth) return state;
   return {
     ...state,
     ...(state.verticalAllRotated ? { verticalCJK: false } : {}),
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
+    balanceSingleByteDoubleByteWidth:
+      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
   };
 }
 
@@ -120,11 +128,13 @@ export function gridForParagraphContext(
   state: Pick<BodyMeasurementContext, 'sectionLayout'>,
   context: ParagraphLayoutContext,
 ): DocGridCtx {
+  const characterGrid = paragraphCharacterGrid(context);
   return {
-    type: state.sectionLayout.grid.kind === 'none'
-      ? null
-      : state.sectionLayout.grid.kind,
+    type: characterGrid
+      ? characterGrid.type
+      : context.lineGrid.active ? state.sectionLayout.grid.kind : null,
     linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
-    charSpacePt: context.characterGrid.active ? context.characterGrid.deltaPt : null,
+    characterPitchPt: characterGrid?.characterPitchPt ?? null,
+    charSpacePt: characterGrid?.charSpacePt ?? null,
   };
 }

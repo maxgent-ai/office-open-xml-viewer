@@ -1,0 +1,24 @@
+import { PT_TO_PX } from '@silurus/ooxml-core';
+
+/** ECMA-376 §18.3.1.13 fallback when Normal-style MDW is unavailable. */
+export const MDW_FALLBACK = 8;
+
+/** Convert an OOXML column width (maximum-digit-width units) to CSS pixels. */
+export function colWidthToPx(width: number, mdw: number = MDW_FALLBACK): number {
+  return Math.trunc(((256 * width + Math.trunc(128 / mdw)) / 256) * mdw);
+}
+
+/** In-memory inverse used by the viewer's resize interaction. */
+export function pxToColWidth(px: number, mdw: number = MDW_FALLBACK): number {
+  return px / mdw;
+}
+
+/** Convert OOXML row height points to CSS pixels at 96 DPI. */
+export function rowHeightToPx(heightPt: number): number {
+  return Math.round(heightPt * PT_TO_PX);
+}
+
+/** In-memory inverse used by the viewer's resize interaction. */
+export function pxToRowHeight(px: number): number {
+  return px / PT_TO_PX;
+}

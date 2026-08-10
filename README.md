@@ -30,7 +30,7 @@ So I'm building this library with AI coding agents, spec-first, and keeping it f
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
-Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev/storybook/).
+Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
 
 ## Project scope: read-only viewing
 
@@ -45,6 +45,11 @@ npm install @silurus/ooxml
 # or
 pnpm add @silurus/ooxml
 ```
+
+> Upgrading from v0.76? Review the
+> [v0.77 migration guide](https://ooxml.silurus.dev/announcements/v077-migration-guide/)
+> for the XLSX selection, selection-context, MCP-tool, option/type, and Viewer
+> error-handling changes.
 
 > **Bundler note**: the Rust parsers ship as real `.wasm` asset files next to the
 > JavaScript, referenced with the standard `new URL('…', import.meta.url)` form
@@ -61,8 +66,9 @@ pnpm add @silurus/ooxml
 >   `new URL` asset references are not processed
 >   ([esbuild#795](https://github.com/evanw/esbuild/issues/795)). Copy the
 >   `.wasm` into your served output and point the viewer at it with the
->   `wasmUrl` load option — see the [Angular example](#framework-examples) for
->   the two-step setup.
+>   `wasmUrl` load option. For Angular CLI, copy the required
+>   `*_parser_bg.wasm` asset from `node_modules/@silurus/ooxml/dist` into the
+>   served output and pass its public URL to the viewer.
 >
 > `wasmUrl` also serves the parser WASM from a CDN or any path you control:
 >
@@ -70,7 +76,31 @@ pnpm add @silurus/ooxml
 > new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });
 > ```
 
-> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math asset (`mathjax-stix2.js`, ~3 MB) that ships in the tarball, so the reported figure is much larger than any single app build. What actually lands in your app is smaller on two counts: import only the format you need (e.g. `@silurus/ooxml/pptx`), and the math engine is a **separate entry** (`@silurus/ooxml/math`). Its main-thread chunk is a ~1 KB loader that references the ~3 MB engine asset as a **sibling file** (not an inline data URL): the engine is fetched **lazily, only when a document actually contains equations** — and only if you imported `@silurus/ooxml/math` and passed it to a viewer in the first place (see [Rendering equations](#rendering-equations)). Never import the `math` entry and the loader chunk never enters your graph at all.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
+> Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
+> asset, so the reported figure is much larger than any single app build. For
+> v0.77.0, the complete npm package is approximately 11.3 MB unpacked (3.8 MB
+> as the downloaded tarball), while a format-specific application graph is
+> approximately:
+>
+> | Imported entry | Reachable assets | gzip | Includes |
+> |---|---:|---:|---|
+> | `@silurus/ooxml/docx` | 4.0 MB | 1.2 MB | DOCX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/xlsx` | 2.6 MB | 0.82 MB | XLSX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/pptx` | 2.5 MB | 0.78 MB | PPTX renderer, parser WASM, and lazy worker |
+> | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
+>
+> These are production-artifact estimates, not initial-load figures: each row
+> sums all assets reachable from that entry, including parser WASM and worker
+> chunks loaded on demand. Exact output varies by bundler and compression. Import
+> only the format you need (for example, `@silurus/ooxml/pptx`) so the other
+> formats can be tree-shaken. The math engine is a **separate entry** whose
+> main-thread chunk is a ~1 KB loader referencing the ~3 MB engine as a
+> **sibling file**, not an inline data URL. The engine is fetched lazily, only
+> when a document contains equations, and only if you imported
+> `@silurus/ooxml/math` and passed it to a viewer (see
+> [Rendering equations](#rendering-equations)). Never import the `math` entry
+> and the loader chunk never enters your graph at all.
 
 ---
 
@@ -78,12 +108,12 @@ pnpm add @silurus/ooxml
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
-import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { XlsxSheetViewer, XlsxViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
 // DOCX — caller provides the <canvas>
-const canvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
-const docx = new DocxViewer(canvas);
+const docxCanvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
+const docx = new DocxViewer(docxCanvas);
 await docx.load('/document.docx');
 docx.nextPage();
 
@@ -91,10 +121,50 @@ docx.nextPage();
 const container = document.getElementById('xlsx-container') as HTMLElement;
 const xlsx = new XlsxViewer(container);
 await xlsx.load('/workbook.xlsx');
+xlsx.setSelection('B2:D5'); // A1 strings describe geometry; the normalized upper-left is ActiveCell
+
+// Excel keeps Selection and ActiveCell separate. Use structured state when the
+// active cell or Shift-extension anchor is not the area's upper-left cell.
+xlsx.setSelection({
+  areas: [{ kind: 'cells', top: 2, left: 2, bottom: 5, right: 4 }],
+  activeAreaIndex: 0,
+  activeCell: { row: 3, col: 3 },
+  extensionAnchor: { row: 2, col: 2 },
+});
+
+// Read-only, serializable context for an AI/MCP request. Populated cells are
+// bounded and detached; formulas and Viewer-formatted display text are retained.
+const context = xlsx.getSelectionContext({
+  maxCells: 1_000,
+  maxTextCharacters: 1_048_576,
+});
+
+// XLSX active-sheet surface only — caller provides the <canvas>
+const sheetCanvas = document.getElementById('xlsx-canvas') as HTMLCanvasElement;
+const sheet = new XlsxSheetViewer(sheetCanvas);
+await sheet.load('/workbook.xlsx');
+await sheet.goToSheet(1);
+
+// Share one parsed workbook across independently scrollable sheet canvases,
+// including canvases created in same-origin popup windows.
+const workbook = await XlsxWorkbook.load('/workbook.xlsx');
+const firstCanvas = document.getElementById('xlsx-first-canvas') as HTMLCanvasElement;
+const secondCanvas = document.getElementById('xlsx-second-canvas') as HTMLCanvasElement;
+const firstSheet = XlsxSheetViewer.fromWorkbook(firstCanvas, workbook);
+const secondSheet = XlsxSheetViewer.fromWorkbook(secondCanvas, workbook);
+await Promise.all([
+  firstSheet.goToSheet(0),
+  secondSheet.goToSheet(1),
+]);
+
+// Each viewer borrows the workbook; the caller closes it after the viewers.
+firstSheet.destroy();
+secondSheet.destroy();
+workbook.destroy();
 
 // PPTX — caller provides the <canvas>
-const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
-const pptx = new PptxViewer(canvas);
+const pptxCanvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+const pptx = new PptxViewer(pptxCanvas);
 await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```
@@ -202,7 +272,7 @@ The container must have a bounded height (e.g. `height: 100vh` or a flex child)
 so the viewer can size its scroll host to it. Base zoom fits the first page/slide
 width to the container width and re-fits on resize; a `0`-width container defers
 layout until it has width. Call `destroy()` to tear down (a self-loaded engine is
-destroyed with it; an injected one is not — see below).
+destroyed with it; a borrowed one is not — see below).
 
 Pass `refitOnResize: false` when the viewport must not determine the document's
 physical display size. An explicit pre-load `setScale(1)` then keeps the same
@@ -242,6 +312,74 @@ slides outside the mounted window. Set `findHighlightColors: { match, active }`
 on any viewer to override the two overlay backgrounds with CSS colors; use an
 alpha color when the canvas text should remain visible through the highlight.
 
+**Selection context for AI/MCP.** Every Viewer exposes one read-only query,
+`getSelectionContext()`, for handing the user's current focus to an external
+assistant. The result is a detached, JSON-serializable snapshot discriminated by
+`format` and `kind`; it never exposes a mutable document model or sends data over
+the network. Text, run locators, and populated XLSX cells have hard resource
+limits. Check `truncated` / `truncationReasons` before building a prompt.
+
+```typescript
+const docx = new DocxViewer(docxCanvas, {
+  enableTextSelection: true,
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    // kind === 'text' or 'element': selected text or a clicked drawing
+    updateAskAiButton(context);
+  },
+});
+
+const pptx = new PptxViewer(pptxCanvas, {
+  enableTextSelection: true,
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    // Text selection wins while it exists; otherwise a slide-element click
+    // yields kind === 'element' with compact bounds, provenance and content.
+    updateAskAiButton(context);
+  },
+});
+
+const spreadsheet = new XlsxViewer(container, {
+  enableElementSelection: true,
+  onSelectionContextChange(context) {
+    updateAskAiButton(context);
+  },
+  onContextMenu: async ({ originalEvent, getContext }) => {
+    // Browser-menu control must happen synchronously, before the first await.
+    originalEvent.preventDefault();
+    const { clientX, clientY } = originalEvent;
+    const context = await getContext();
+    openContextMenu({ clientX, clientY, context });
+  },
+});
+const spreadsheetContext = spreadsheet.getSelectionContext({ maxCells: 1_000 });
+// kind === 'range': selection state, values and formulas.
+// kind === 'element': a clicked chart, picture or shape.
+```
+
+All three formats expose the same `onSelectionContextChange(context)` handoff;
+callers may instead query on demand. `enableElementSelection` is an independent,
+explicit opt-in because it enables object selection and draws a non-editable outline
+around the focused object; adding the callback alone never enables object
+hit-testing. XLSX separately retains
+`onSelectionStateChange` for canonical UI state such as ActiveCell and multiple
+areas. Its context callback is frame-coalesced so drag selection does not build
+one snapshot per pointer event.
+`onContextMenu` is also common to every Viewer. It receives the real browser
+event synchronously so the host can call `preventDefault()`, plus a clearly
+asynchronous `getContext()` lookup for the right-click target. The lookup starts
+on the first call and is memoized. Omitting the callback installs no listener and leaves
+the native browser menu unchanged.
+`DocxDocument.getElementContextAt()` and
+`PptxPresentation.getElementContextAt()` provide the identical compact element
+query for custom/headless page or slide surfaces in both modes. PPTX
+element provenance is limited to `master | layout | slide`; editor tree indexes,
+archive paths, save/round-trip handles, and mutation APIs are deliberately absent.
+When switching on `kind`, retain a default branch so a future read-only focus kind
+can be added without changing the transport envelope.
+See the [selection-context guide](docs/selection-context.md) for the complete
+contract, resource bounds, PPTX hit-testing semantics, and extension policy.
+
 **Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
 overlay, so hyperlink interaction requires `enableTextSelection: true`; when that
 overlay is enabled, links are interactive by default. XLSX hit-tests cells
@@ -254,26 +392,38 @@ Pass `enableHyperlinks: false` to disable hyperlink interactivity entirely — n
 hit-testing, no pointer cursor over links, no default navigation, and
 `onHyperlinkClick` is never called; links still render as authored but are inert.
 This applies to every viewer that supports hyperlinks (`DocxViewer`,
-`DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`, `XlsxViewer`).
+`DocxScrollViewer`, `PptxViewer`, `PptxScrollViewer`, `XlsxViewer`,
+`XlsxSheetViewer`).
 
-**Master–detail / shared engine.** Inject an already-loaded headless engine so a
-paged viewer and a scroll viewer (or several panes) share **one** parse. When you
-inject, `load()` is unsupported (the engine is already loaded), the engine's own
-`mode` wins, and `destroy()` leaves the injected engine intact — the caller owns
-its lifecycle:
+**Choose one loading mode.** For the normal one-view case, construct a Viewer and
+call `viewer.load(source)`: the Viewer owns the parsed engine, may replace it on a
+later load, and destroys it during teardown. For master–detail, multi-pane, or
+multi-window UIs, create the Viewer from an already-loaded headless engine so
+every view shares **one** parse. The two modes are mutually exclusive: on a
+Viewer returned by a `from*()` factory, `load()` is unsupported, the engine's
+own `mode` wins, and `destroy()` leaves the borrowed engine intact — the caller
+owns its lifecycle.
+
+| Use case | Acquisition | Engine owner |
+| --- | --- | --- |
+| One Viewer | `new Viewer(target)` then `viewer.load(source)` | Viewer |
+| Shared parse | `Engine.load(source)` then `Viewer.fromDocument / fromPresentation / fromWorkbook(...)` | Caller |
 
 ```typescript
-import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml/docx';
+import { DocxDocument, DocxScrollViewer, DocxViewer } from '@silurus/ooxml/docx';
 
-const doc = await DocxDocument.load('/document.docx'); // parse once
-const scroll = new DocxScrollViewer(container, { document: doc });
-// ...also drive a thumbnail grid, a paged view, etc. from the same `doc`.
-scroll.destroy(); // the injected `doc` is NOT destroyed — you own it
-doc.destroy();    // release it yourself when every pane is gone
+const document = await DocxDocument.load('/document.docx'); // parse once
+const scroll = DocxScrollViewer.fromDocument(container, document);
+const page = DocxViewer.fromDocument(canvas, document);
+await page.goToPage(0);
+// ...also drive a thumbnail grid or more panes from the same document.
+page.destroy();
+scroll.destroy();  // the borrowed document is NOT destroyed — you own it
+document.destroy(); // release it yourself when every pane is gone
 ```
 
-`PptxScrollViewer` takes the same shape with `{ presentation: pres }`
-(`await PptxPresentation.load(...)`).
+`PptxViewer` and `PptxScrollViewer` use `fromPresentation(...)`; `XlsxViewer`
+and `XlsxSheetViewer` use `fromWorkbook(...)`.
 
 For presentations, `enableMediaPlayback: true` makes embedded audio and video
 interactive inside the real viewport plus `mediaOverscan` slides. Other mounted
@@ -308,20 +458,9 @@ const md = await doc.toMarkdown();
 bullets, notes / comments collated) and `XlsxWorkbook.toMarkdown()` (each sheet →
 a `## SheetName` pipe table) are the twins.
 
-For a one-off conversion outside a viewer, the standalone
-`@silurus/ooxml-markdown` package exposes the low-level functions and a CLI:
-
-```typescript
-import { docxToMarkdown, initDocxFromBytes } from '@silurus/ooxml-markdown';
-
-initDocxFromBytes(wasmBytes);          // the docx parser's `_bg.wasm`
-const md = docxToMarkdown(fileBytes);  // ArrayBuffer | Uint8Array | Buffer
-```
-
-```bash
-npx ooxml-md document.docx            # → stdout
-npx ooxml-md deck.pptx -o deck.md     # → file
-```
+The repository also contains a low-level adapter and CLI for workspace tooling.
+They are internal implementation utilities, not separately published packages;
+installed applications should use the format model's `toMarkdown()` method.
 
 ---
 
@@ -394,256 +533,13 @@ All three formats follow the same shape: the worker parses the `.docx` / `.xlsx`
 
 ## Framework Examples
 
-<details>
-<summary><strong>React 19</strong></summary>
-
-```tsx
-// React 19.1 — Vite copies the parser .wasm asset automatically; no extra plugin needed.
-import { useEffect, useRef, useState } from 'react';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-export function PptxViewerComponent({ src }: { src: string }) {
-  const canvasRef  = useRef<HTMLCanvasElement>(null);
-  const viewerRef  = useRef<PptxViewer | null>(null);
-  const [slide, setSlide] = useState({ current: 0, total: 0 });
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const viewer = new PptxViewer(canvas, {
-      onSlideChange: (i, total) => setSlide({ current: i, total }),
-    });
-    viewerRef.current = viewer;
-    viewer.load(src);
-  }, [src]);
-
-  return (
-    <div>
-      <canvas ref={canvasRef} style={{ width: 800 }} />
-      <button onClick={() => viewerRef.current?.prevSlide()}>‹ Prev</button>
-      <span> {slide.current + 1} / {slide.total} </span>
-      <button onClick={() => viewerRef.current?.nextSlide()}>Next ›</button>
-    </div>
-  );
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Vue 3.5</strong></summary>
-
-```vue
-<!-- Vue 3.5 — useTemplateRef is a 3.5+ feature -->
-<script setup lang="ts">
-import { useTemplateRef, onMounted, ref } from 'vue';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-const props = defineProps<{ src: string }>();
-
-const canvas  = useTemplateRef<HTMLCanvasElement>('canvas');
-let viewer: PptxViewer | null = null;
-const current = ref(0);
-const total   = ref(0);
-
-onMounted(async () => {
-  viewer = new PptxViewer(canvas.value as HTMLCanvasElement, {
-    onSlideChange: (i, t) => { current.value = i; total.value = t; },
-  });
-  await viewer.load(props.src);
-});
-</script>
-
-<template>
-  <div>
-    <canvas ref="canvas" style="width: 800px" />
-    <button @click="viewer?.prevSlide()">‹ Prev</button>
-    <span> {{ current + 1 }} / {{ total }} </span>
-    <button @click="viewer?.nextSlide()">Next ›</button>
-  </div>
-</template>
-```
-
-</details>
-
-<details>
-<summary><strong>Angular 19</strong></summary>
-
-The Angular CLI's esbuild-based builder does not process the `new URL('…', import.meta.url)`
-asset reference the parsers use ([angular-cli#22388](https://github.com/angular/angular-cli/issues/22388)),
-so the `.wasm` never reaches the build output — and under `ng serve` the dependency
-optimizer additionally rewrites the reference into its own cache path. **Both steps
-below are required** (the asset copy alone fixes only production builds; `ng serve`
-still 404s without `wasmUrl`):
-
-```jsonc
-// angular.json — copy the parser WASM into the served root
-// (restart `ng serve` after editing this file)
-"architect": {
-  "build": {
-    "options": {
-      "assets": [
-        { "glob": "*_parser_bg.wasm", "input": "node_modules/@silurus/ooxml/dist", "output": "/" },
-        { "glob": "**/*", "input": "public" }
-      ]
-    }
-  }
-}
-```
-
-```typescript
-// Angular 19 — standalone component with signal-based state
-import {
-  Component, ElementRef, viewChild,
-  signal, AfterViewInit,
-} from '@angular/core';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-@Component({
-  selector: 'app-pptx-viewer',
-  standalone: true,
-  template: `
-    <div>
-      <canvas #canvas style="width: 800px"></canvas>
-      <button (click)="prev()">‹ Prev</button>
-      <span> {{ current() + 1 }} / {{ total() }} </span>
-      <button (click)="next()">Next ›</button>
-    </div>
-  `,
-})
-export class PptxViewerComponent implements AfterViewInit {
-  canvasEl = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
-  current = signal(0);
-  total   = signal(0);
-  private viewer?: PptxViewer;
-
-  ngAfterViewInit(): void {
-    this.viewer = new PptxViewer(this.canvasEl().nativeElement, {
-      wasmUrl: '/pptx_parser_bg.wasm',
-      onSlideChange: (i, t) => { this.current.set(i); this.total.set(t); },
-    });
-    this.viewer.load('/deck.pptx');
-  }
-
-  prev(): void { this.viewer?.prevSlide(); }
-  next(): void { this.viewer?.nextSlide(); }
-}
-```
-
-> The `*_parser_bg.wasm` glob copies all three parsers; narrow it to
-> `pptx_parser_bg.wasm` if you only use one format. If you deploy under a
-> non-root `base href`, adjust `wasmUrl` so it resolves under your base (a
-> relative `wasmUrl` is resolved against the document URL).
-
-</details>
-
-<details>
-<summary><strong>Svelte 5</strong></summary>
-
-```svelte
-<!-- Svelte 5 — runes syntax ($props, $state) -->
-<script lang="ts">
-  import { onMount } from 'svelte';
-  import { PptxViewer } from '@silurus/ooxml/pptx';
-
-  let { src }: { src: string } = $props();
-
-  let canvas: HTMLCanvasElement;
-  let viewer: PptxViewer;
-  let current = $state(0);
-  let total   = $state(0);
-
-  onMount(async () => {
-    viewer = new PptxViewer(canvas, {
-      onSlideChange: (i, t) => { current = i; total = t; },
-    });
-    await viewer.load(src);
-  });
-</script>
-
-<div>
-  <canvas bind:this={canvas} style="width: 800px"></canvas>
-  <button onclick={() => viewer?.prevSlide()}>‹ Prev</button>
-  <span> {current + 1} / {total} </span>
-  <button onclick={() => viewer?.nextSlide()}>Next ›</button>
-</div>
-```
-
-</details>
-
-<details>
-<summary><strong>SolidJS 1.9</strong></summary>
-
-```tsx
-// SolidJS 1.9
-import { createSignal, onMount, onCleanup } from 'solid-js';
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-export function PptxViewerComponent(props: { src: string }) {
-  let canvasEl!: HTMLCanvasElement;
-  let viewer: PptxViewer | undefined;
-  const [current, setCurrent] = createSignal(0);
-  const [total,   setTotal  ] = createSignal(0);
-
-  onMount(async () => {
-    viewer = new PptxViewer(canvasEl, {
-      onSlideChange: (i, t) => { setCurrent(i); setTotal(t); },
-    });
-    await viewer.load(props.src);
-  });
-
-  onCleanup(() => { /* viewer?.destroy?.() */ });
-
-  return (
-    <div>
-      <canvas ref={canvasEl} style={{ width: '800px' }} />
-      <button onClick={() => viewer?.prevSlide()}>‹ Prev</button>
-      <span> {current() + 1} / {total()} </span>
-      <button onClick={() => viewer?.nextSlide()}>Next ›</button>
-    </div>
-  );
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Qwik 2</strong></summary>
-
-```tsx
-// Qwik 2.0 — dynamic import to keep WASM out of SSR bundle
-import { component$, useSignal, useVisibleTask$ } from '@builder.io/qwik';
-import type { PptxViewer as PptxViewerType } from '@silurus/ooxml/pptx';
-
-export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
-  const canvasRef = useSignal<HTMLCanvasElement>();
-  const current = useSignal(0);
-  const total   = useSignal(0);
-  let viewer: PptxViewerType | undefined;
-
-  // useVisibleTask$ runs only in the browser, never during SSR
-  useVisibleTask$(async () => {
-    if (!canvasRef.value) return;
-    const { PptxViewer } = await import('@silurus/ooxml/pptx');
-    viewer = new PptxViewer(canvasRef.value, {
-      onSlideChange: (i, t) => { current.value = i; total.value = t; },
-    });
-    await viewer.load(src);
-  });
-
-  return (
-    <div>
-      <canvas ref={canvasRef} style={{ width: '800px' }} />
-      <button onClick$={() => viewer?.prevSlide()}>‹ Prev</button>
-      <span> {current.value + 1} / {total.value} </span>
-      <button onClick$={() => viewer?.nextSlide()}>Next ›</button>
-    </div>
-  );
-});
-```
-
-</details>
+Runnable TypeScript projects are available for
+[React](https://ooxml.silurus.dev/frameworks/react/),
+[Vue](https://ooxml.silurus.dev/frameworks/vue/),
+[Svelte](https://ooxml.silurus.dev/frameworks/svelte/), and
+[Solid](https://ooxml.silurus.dev/frameworks/solid/). Each guide embeds the
+complete StackBlitz project and supports selecting a local DOCX, XLSX, or PPTX
+file without uploading it.
 
 ---
 
@@ -689,7 +585,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
-| | Text boxes / drawing shapes (`wps:txbx`, `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
+| | Text boxes / drawing shapes (inline and anchored `wps:wsp` / `wps:txbx`, including solid, gradient, and image fills; `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
 | | WMF **and EMF** metafile images (legacy vector, incl. inside text boxes) — rasterized via a built-in player: window→viewport mapping (MS-EMF map modes, world transform), pens/brushes, poly/rect/ellipse, text-out, path clipping, and embedded DIB blits | ✅ |
 | | OLE embedded objects (`w:object` — the baked VML `v:imagedata` preview is drawn; the embedded app is not run) | ✅ |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
@@ -699,13 +595,14 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
 | | Track changes (`w:ins` / `w:del` — author-coloured underline / strikethrough) | ✅ |
 | | Comments — author / date / text via the document model (`doc.comments`, §17.13.4; not drawn on the page) | ✅ |
-| | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
+| | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | Bounded read-only text/element context (`getSelectionContext()`, page/source locators, element selection, AI/MCP callback) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — full-text search, all hits highlighted, each match tagged with its page) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (overlay hit-test, `onHyperlinkClick`; internal bookmark / anchor navigation) | ✅ |
-| | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
+| | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, borrowed-engine factory) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---
@@ -754,12 +651,12 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Pivot tables (saved worksheet output renders unchanged; read-only metadata is exposed. Refresh, recalculation, filtering, restructuring, and interactivity are unsupported) | ⚠️ Partial |
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model, shown in an Excel-style hover popup) | ✅ |
 | | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell whose click opens a panel showing the allowed values — read-only) | ✅ |
-| | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
-| **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
+| | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table) | ✅ |
+| **Interaction** | Cell selection (single / range / row / column / all / multiple areas; `setSelection('B2:D5')` or canonical structured state) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
 | | Text selection inside cells (transparent overlay) | ✅ |
-| | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
+| | `onSelectionStateChange`, bounded range/element `getSelectionContext()` / `copySelection()`, chart/picture/shape selection, `getCellAt(x, y)` | ✅ |
 | | Zoom slider (Excel-style, right of the tab bar, 10–400% with 100% centered; `showZoomSlider` option) | ✅ |
 | | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
 | | Runtime fit / zoom API (`fitWidth` / `fitPage` / `getScale` / `setScale`, in addition to the slider) | ✅ |
@@ -781,7 +678,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Slide background (solid, gradient, image) | ✅ |
 | | Slide numbers | ✅ |
 | | Speaker notes (plain text via `getNotes()`) | ✅ |
-| | Markdown export (`PptxPresentation.toMarkdown()` — title slides → headings, body → nested bullets, notes / comments collated; also `@silurus/ooxml-markdown` + the `ooxml-md` CLI) | ✅ |
+| | Markdown export (`PptxPresentation.toMarkdown()` — title slides → headings, body → nested bullets, notes / comments collated) | ✅ |
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
@@ -863,10 +760,11 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
 | **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| | Bounded text/element selection context (`getSelectionContext()`, element selection, master/layout/slide provenance, main + worker) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with slide) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (`onHyperlinkClick`; internal slide-jump navigation) | ✅ |
-| | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, engine injection) | ✅ |
+| | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, borrowed-engine factory) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |
 
 ---
@@ -877,9 +775,10 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ## Companion packages
 
-- **[`packages/markdown/`](packages/markdown/)** — `@silurus/ooxml-markdown` and the `ooxml-md` CLI convert `.pptx` / `.docx` / `.xlsx` to GitHub-flavoured markdown via the workspace WASM parsers. Same projection used by the MCP server (~21× smaller than the raw XML on the demo deck, ~8% bigger than a flat-text extractor). Includes a node20-based GitHub Action for bulk repo-wide conversion.
-- **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. It exposes materializing `parsePptx` / `parseDocx` / `parseXlsx` / `parseXlsxAllSheets` helpers plus uniformly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions, with no DOM or Web Worker dependency. Each `open*` call returns an explicit `close()`-able session; PPTX streams `slides()` and can render each yielded slide through the same bounded archive, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
-- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` so AI coding agents in the same window (Copilot Agent mode, Claude, …) can read those files via dedicated tools. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) surfaces the library's metric-compatible font substitution, widening the webview CSP to the Google Fonts CDN only while enabled.
+- **[`packages/markdown/`](packages/markdown/)** — internal workspace adapter and `ooxml-md` development CLI for the same GitHub-flavoured Markdown projection exposed by each format model's `toMarkdown()` method.
+- **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
+  See the [0.75 to 0.76 migration guide](docs/migration-0.76.md) for every removed synchronous helper and its replacement.
+- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` for GitHub Copilot Chat in Agent mode, including active Viewer selection. Claude Code and Codex can configure the same binary separately for path-based file tools, but do not receive the active selection bridge. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) surfaces the library's metric-compatible font substitution, widening the webview CSP to the Google Fonts CDN only while enabled.
 - **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`. Prebuilt binaries are attached to each [GitHub Release](https://github.com/yukiyokotani/office-open-xml-viewer/releases) for macOS / Linux / Windows; the VS Code extension downloads them on demand.
 
 ---
@@ -918,16 +817,18 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
 
 ## Error handling
 
-Headless APIs (`DocxDocument`, `XlsxWorkbook`, and `PptxPresentation`) report
-load and render failures by rejecting the returned Promise. Viewer APIs also
-support an `onError(error)` callback, with an important delivery rule:
+Headless APIs (`DocxDocument`, `XlsxWorkbook`, and `PptxPresentation`) and
+Viewer APIs report failures from awaitable operations by rejecting the returned
+Promise. This includes `viewer.load()` parsing and its initial render, whether
+or not the Viewer has an `onError(error)` callback. A failure is never delivered
+through both channels.
 
-- Without `onError`, a load/parse failure rejects `viewer.load()`.
-- With `onError`, that failure is delivered to the callback and
-  `viewer.load()` resolves. Do not treat resolution alone as proof that the
-  document rendered.
-- Later Viewer-managed render or media failures are delivered to `onError`, or
-  logged with `console.error` when the callback is omitted.
+Use `onError` for later Viewer-managed work that has no directly awaitable
+result, such as virtualized scroll-view rendering or embedded-media playback.
+Those failures are logged with `console.error` when the callback is omitted.
+`PptxPresentation.presentSlide()` follows the same boundary: initialization
+rejects its Promise, while `PresentSlideOptions.onError` observes only media
+decode or playback failures after the presentation handle has been returned.
 
 Stable failures can be narrowed without parsing message strings:
 
@@ -960,6 +861,7 @@ import {
 } from '@silurus/ooxml/docx';
 
 const viewer = new DocxViewer(canvas, {
+  // Background failures after an awaited operation has completed.
   onError(error) {
     if (error instanceof OoxmlResourceLimitError) {
       const { limit, observed } = error.details.violation;
@@ -974,22 +876,27 @@ const viewer = new DocxViewer(canvas, {
   },
 });
 
-await viewer.load(file);
+try {
+  await viewer.load(file);
+} catch (error) {
+  reportUnexpectedError(error);
+}
 ```
 
 ## Security & Privacy
 
 - **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.
-- **Bounded OOXML package expansion.** DOCX, XLSX, and PPTX use the same resource policy. By default, one archive entry may inflate to at most 128 MiB and the distinct entries visited during one package session may inflate to at most 256 MiB. Override either budget with a plain `resourceLimits` object on a viewer or `load(...)` call:
+- **Bounded OOXML package expansion.** DOCX, XLSX, and PPTX use the same resource policy. By default, one archive entry may inflate to at most 128 MiB, the distinct entries visited during one package session may inflate to at most 256 MiB, and an archive may contain at most 4,096 entries. Override these budgets with a plain `resourceLimits` object on a viewer or `load(...)` call:
   ```ts
   new XlsxViewer(container, {
     resourceLimits: {
       maxArchiveEntryBytes: 64 * 1024 * 1024,
       maxTotalInflatedBytes: 192 * 1024 * 1024,
+      maxArchiveEntries: 2048,
     },
   });
   ```
-  `maxArchiveEntryBytes` applies to every XML, text, image, media, and other package part that the parser reads. `maxTotalInflatedBytes` counts the largest amount actually read from each distinct part during the lifetime of the loaded package; reading the same part again does not consume that budget twice. Set an individual field to `null` to disable that configurable budget. Internal hard safety ceilings still apply, so disabling a budget does not make arbitrary archives acceptable. Values other than `null` must be positive safe-integer byte counts.
+  `maxArchiveEntryBytes` applies to every XML, text, image, media, and other package part that the parser reads. `maxTotalInflatedBytes` counts the largest amount actually read from each distinct part during the lifetime of the loaded package; reading the same part again does not consume that budget twice. `maxArchiveEntries` bounds central-directory entries before the ZIP library allocates its owned index. Set an individual field to `null` to disable that configurable budget. Internal hard safety ceilings still apply, so disabling a budget does not make arbitrary archives acceptable. Values other than `null` must be positive safe integers; byte fields are expressed in bytes and the entry field is a count.
 
   A violation rejects with `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`). Its structured `details.violation` reports the resource, metric, limit, observed value, usage snapshot, and part name when a particular part caused the failure. The deprecated `maxZipEntryBytes` option remains as a compatibility alias for `resourceLimits.maxArchiveEntryBytes`, but is scheduled for removal in a future breaking release; new code should use `resourceLimits`.
 
@@ -1011,6 +918,7 @@ await viewer.load(file);
     resourceLimits: {
       maxArchiveEntryBytes: 128 * 1024 * 1024,
       maxTotalInflatedBytes: 256 * 1024 * 1024,
+      maxArchiveEntries: 4096,
     },
   });
   ```
@@ -1023,7 +931,7 @@ await viewer.load(file);
   The package counters and raster-image guards are deterministic admission limits, not exact JavaScript/WASM process-memory accounting. XML trees, document models, canvas backing stores, browser decoder overhead, renderer state, and browser-managed SVG/vector parse or decoded storage can still require several times the measured input. SVG has no portable decoded-byte measure or explicit browser release primitive; the library count-bounds its cache and revokes owned object URLs, but cannot charge it as RGBA bytes. The defaults therefore reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 
   A measured limit crossing is reported as `OoxmlResourceLimitError`. A residual WASM failure that reaches a recognized trap-shaped boundary is reported conservatively as `parser-crashed`, not `parser-oom`: with the current aborting Rust/WASM boundary, panic, allocation failure, explicit `unreachable`, and stack overflow can lose their distinct causes and converge on the same generic runtime error. Inferring OOM from an exception class or message would misclassify some parser defects as large-file failures. Reliable OOM classification would require preserving a structured cause before the trap across every relevant allocation path; it cannot be recovered from the generic trap afterward. The WebAssembly JavaScript embedding also permits implementation-defined stack/OOM failures, including an indistinguishable plain `Error` or process termination, so converting and poisoning every engine-level failure cannot be guaranteed.
-- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
+- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts, Office font metric substitutes (Carlito/Caladea), and the script fallback fonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, `XlsxViewer`, and `XlsxSheetViewer`. When enabled, fonts for non-Latin scripts are supplied on demand from Noto families so text does not fall back to tofu: Arabic (Noto Naskh/Sans Arabic), CJK (Noto Sans/Serif KR · SC · TC · JP, picked per document language so shared Han glyphs take the right shapes), Cyrillic (Noto Sans/Serif), Hebrew (Noto Sans/Serif Hebrew, RTL), Thai (Noto Sans Thai) and Devanagari (Noto Sans Devanagari). No font binaries ship in the bundle. Enabling this option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 - **Encrypted OOXML ([MS-OFFCRYPTO] Agile Encryption).** Password-protected `.docx` / `.xlsx` / `.pptx` files are OLE2/CFB containers, not ZIPs. Pass `password` to `load(...)` and the file is decrypted **client-side** via WebCrypto — no bytes and no password leave the browser:
   ```ts

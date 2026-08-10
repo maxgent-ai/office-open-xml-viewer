@@ -1,129 +1,54 @@
-/**
- * Self-poison + auto-respawn for a Rust/WASM parser instance (RB6).
- *
- * The three format parsers (pptx / docx / xlsx) are compiled with
- * `panic = "abort"` (see the workspace `Cargo.toml`): a Rust panic, an
- * `unreachable`, an allocation abort, or a stack overflow can terminate an
- * export through a WebAssembly trap instead of returning a typed `Result`.
- * Once that happens the host cannot prove which parser invariants were committed
- * before the abort, so **every subsequent exported call on that same instance is
- * unsafe** even though the WebAssembly engine still owns the linear memory.
- *
- * Each format package runs its parser in one long-lived worker that reuses a
- * single WASM instance across many `parse` / `extractImage` / … calls. Without
- * this guard, the first file that traps poisons the instance and takes every
- * *later* file down with it — one malicious or malformed document kills the
- * whole viewer session. That is exactly the RB6 threat.
- *
- * {@link WasmParserHost} draws the line between the two failure modes a parser
- * call can produce:
- *
- *   - A **graceful error** — the Rust code returned `Result::Err`, surfaced by
- *     wasm-bindgen as a thrown JS string/Error. The instance is *healthy*; the
- *     file was simply unparseable. Pass it through unchanged, keep the instance.
- *   - A **trap-shaped failure** — normally a `WebAssembly.RuntimeError`, with
- *     implementation-dependent failures sometimes surfaced as another native
- *     error such as `RangeError`. The instance is *poisoned*. Mark it dead, drop
- *     the archive handle, and re-init a fresh module on the next call so the
- *     following file parses on clean memory. This classification is about safe
- *     recovery; it deliberately does not claim to recover the original Rust
- *     cause from the JavaScript exception.
- *
- * The recovery is intentionally lazy: {@link WasmParserHost.poison} only flags
- * the instance, and the fresh `init()` runs inside the next {@link
- * WasmParserHost.ensureReady}. A worker that traps and is never used again pays
- * nothing; a worker that keeps going gets a clean instance exactly when it needs
- * one. This lives in `core` so all three formats share one implementation (the
- * only per-format pieces are the `init` function and the archive type, injected
- * by the caller).
- */
+import { RuntimeGeneration } from '../internal/runtime-generation.js';
 
-/** Machine-readable code for the RB6 self-heal error. */
 export type WasmTrapErrorCode = 'parser-crashed';
 
-/**
- * Typed error thrown by {@link WasmParserHost.run} when the guarded WASM call
- * *trapped* (as opposed to returning a graceful `Result::Err`). Signals that
- * this one file crashed the parser and the instance was recycled — the caller
- * may keep using the same engine for the next file.
- *
- * Like {@link import('../errors/ooxml-error').OoxmlError}, the `instanceof`
- * check does not survive a structured-clone across the worker boundary, so
- * workers forward the `code` string and the main thread reconstructs the error.
- */
+/** A trap-shaped parser failure. The next operation uses a fresh runtime. */
 export class WasmTrapError extends Error {
   readonly code: WasmTrapErrorCode = 'parser-crashed';
 
   constructor(message: string) {
     super(message);
     this.name = 'WasmTrapError';
-    // Restore the prototype chain for down-levelled `extends Error` targets so
-    // `instanceof WasmTrapError` holds.
     Object.setPrototypeOf(this, WasmTrapError.prototype);
   }
 }
 
-/**
- * Whether `err` indicates the WASM instance is *poisoned* (its linear memory is
- * no longer trustworthy), as opposed to a graceful parser error.
- *
- * A `panic = "abort"` build can collapse a Rust panic, allocation abort, explicit
- * `unreachable`, or stack exhaustion onto the same generic trap surface. The
- * WebAssembly JavaScript embedding does not provide a portable cause code for
- * reconstructing which Rust path produced that trap. A
- * `Result::Err(JsValue::from_str(...))` arrives as a thrown *string* or a plain
- * `Error`, which this returns `false` for — the instance survives that.
- *
- * The discriminator is the error's TYPE / NAME, never its message substring
- * alone. Recognised trap-shaped failures include a
- * `WebAssembly.RuntimeError` / `CompileError` / `LinkError` (matched by
- * `instanceof` and by `name`, since the `instanceof` check does not survive a
- * structured-clone across the worker boundary), a native `RangeError`, or the
- * implementation-defined `InternalError` / `OOMError` names observed at the
- * WebAssembly boundary. A plain `Error` (name `'Error'`) is a GRACEFUL parser
- * error even when its message mentions "out of memory" — e.g. a wrapper that
- * surfaces a lenient degradation as `new Error('...out of memory...')`.
- * Classifying that as a trap would needlessly recycle a healthy instance and
- * drop its open archive, so message-substring sniffing is deliberately NOT done
- * here. Consequently an implementation-defined failure surfaced as an
- * indistinguishable plain `Error`, or as process termination, cannot be
- * recognised or recovered by this guard.
- */
-export function isWasmTrap(err: unknown): boolean {
-  // `WebAssembly.RuntimeError` is the canonical trap. Guard the reference in
-  // case a runtime lacks the constructor (older / non-WASM test envs).
+/** Classify by boundary error type/name, never by message substring. */
+export function isWasmTrap(error: unknown): boolean {
   const RuntimeError = (globalThis as { WebAssembly?: { RuntimeError?: unknown } }).WebAssembly
     ?.RuntimeError as (new () => Error) | undefined;
-  if (RuntimeError && err instanceof RuntimeError) return true;
-  // Some engines/wrappers surface a failed WebAssembly boundary as a RangeError.
-  // Treat it as poisoned conservatively, but do not infer OOM from the class:
-  // the JavaScript embedding does not define a portable original-cause code.
-  if (err instanceof RangeError) return true;
-  // A trap that crossed the worker boundary (structured-clone strips the
-  // prototype) or was re-thrown as a generic Error may retain a trap-shaped
-  // NAME. Match the standard names plus implementation-defined stack/OOM names,
-  // but never a message substring on a plain `Error`, which would over-match a
-  // graceful parser error and poison a healthy instance.
-  if (err instanceof Error) {
-    const name = err.name;
-    if (
-      name === 'RuntimeError'
-      || name === 'CompileError'
-      || name === 'LinkError'
-      || name === 'InternalError'
-      || name === 'OOMError'
-    ) return true;
-  }
-  return false;
+  if (RuntimeError && error instanceof RuntimeError) return true;
+  if (error instanceof RangeError) return true;
+  if (!(error instanceof Error)) return false;
+  return error.name === 'RuntimeError'
+    || error.name === 'CompileError'
+    || error.name === 'LinkError'
+    || error.name === 'InternalError'
+    || error.name === 'OOMError';
 }
 
 /**
- * The module input a wasm-bindgen `init({ module_or_path })` accepts: a URL
- * string / `URL` to fetch,
- * or the already-decoded module bytes (a `data:` URL that `init` cannot fetch is
- * decoded to an `ArrayBuffer`/`BufferSource` by the worker first). Kept wide to
- * match the generated glue's `InitInput` without depending on its exact type.
+ * Remove a wasm-bindgen object's GC finalizer without invoking its Rust
+ * destructor. The generated `__destroy_into_raw()` method only clears the JS
+ * pointer and unregisters the wrapper from its `FinalizationRegistry`; the
+ * discarded runtime generation continues to own the underlying allocation.
+ *
+ * This must run before `reinit()` replaces wasm-bindgen's module-level `wasm`
+ * binding. Otherwise a stale wrapper collected later calls its finalizer with
+ * an old-generation pointer against the new instance's linear memory.
  */
+export function detachWasmBindgenResource(resource: unknown): void {
+  try {
+    if ((typeof resource !== 'object' || resource === null) && typeof resource !== 'function') return;
+    const detach = Reflect.get(resource as object, '__destroy_into_raw');
+    if (typeof detach === 'function') Reflect.apply(detach, resource, []);
+  } catch {
+    // Poison fan-out must still invalidate every sibling and preserve the
+    // original trap. Production wasm-bindgen wrappers use a JS-only method here;
+    // focused integration coverage pins that generated contract.
+  }
+}
+
 export type WasmInitInput =
   | string
   | URL
@@ -133,237 +58,115 @@ export type WasmInitInput =
   | WebAssembly.Module
   | Response;
 
-/** Current wasm-bindgen async initialization options. */
 export interface WasmInitOptions {
   readonly module_or_path: WasmInitInput | Promise<WasmInitInput>;
 }
 
-/** How a {@link WasmParserHost} initialises its WASM module. */
 export type WasmInit = (options: WasmInitOptions) => Promise<unknown>;
-
-/**
- * How a {@link WasmParserHost} REBUILDS its WASM module after a trap. Mirrors the
- * `reinit(input)` free function `scripts/append-wasm-reinit.mjs` appends to each
- * parser glue.
- *
- * This is distinct from {@link WasmInit} for a load-bearing reason: wasm-bindgen's
- * generated `init` keeps its instance in a module-level singleton and
- * short-circuits (`if (wasm !== undefined) return wasm;`) on every later call, so
- * re-running `init` after a trap hands back the SAME poisoned instance and
- * "recovery" silently does nothing. `reinit` nulls that singleton first, forcing a
- * genuine `WebAssembly.instantiate` with fresh linear memory. The host therefore
- * MUST use `reinit` (not `init`) on the recovery path — see
- * {@link WasmParserHost.ensureReady}.
- */
 export type WasmReinit = (options: WasmInitOptions) => Promise<unknown>;
 
 function invokeWasmInitializer(
   initializer: WasmInit | WasmReinit,
   input: WasmInitInput,
 ): Promise<unknown> {
-  return initializer({
-    module_or_path: input,
-  });
+  return initializer({ module_or_path: input });
 }
 
-/** Optional per-host hooks. */
 export interface WasmParserHostOptions<TArchive> {
-  /**
-   * How to free an archive handle (e.g. `(a) => a.free()`). Called when the host
-   * replaces the handle on a re-parse, and once on a trap right before the
-   * instance is recycled. A throwing `free()` on a trapped handle is caught and
-   * swallowed (see {@link WasmParserHost.run}). Omit for a host that keeps no
-   * archive.
-   */
   readonly freeArchive?: (archive: TArchive) => void;
-  /**
-   * How to force a FRESH instance after a trap (the glue's `reinit` export). If
-   * omitted, the host falls back to calling {@link WasmInit} again — but note that
-   * against the real wasm-bindgen singleton that fallback is a NO-OP (the poisoned
-   * instance is reused). Production callers MUST pass this; it is optional only so
-   * unit tests that assert lifecycle bookkeeping can omit it. When present it is
-   * the sole re-instantiation path; `init` is used only for the very first load.
-   */
+  /** Production callers provide the wasm-bindgen `reinit` export. */
   readonly reinit?: WasmReinit;
 }
 
 /**
- * Owns the lifecycle of one WASM parser instance **and its archive handle**, and
- * recycles both after a trap.
- *
- * Making the host the single owner of the archive is what makes recovery safe:
- * on a trap it frees the handle and nulls its own reference in one place, so the
- * worker never double-frees a handle that belonged to a now-discarded instance.
- * The worker reads the current handle through {@link WasmParserHost.archive}
- * instead of a local variable.
- *
- * Usage inside a worker:
- *
- * ```ts
- * const host = new WasmParserHost<PptxArchive>(init, { freeArchive: (a) => a.free() });
- * // on the init message:
- * host.setWasmInput(wasmUrl);
- * // on a parse message:
- * await host.ensureReady();               // re-inits transparently if poisoned
- * const model = host.run(() => {          // traps → free handle + WasmTrapError
- *   host.setArchive(new PptxArchive(bytes, max)); // frees any prior handle first
- *   return host.archive!.parse();
- * });
- * // on a later message:
- * const bytes = host.run(() => host.archive!.extract_image(path));
- * ```
- *
- * `run` is synchronous because a wasm-bindgen call is synchronous; the async
- * work (a fresh `init`) is confined to `ensureReady`, which the caller already
- * awaits before every request.
+ * Worker-facing single-archive facade over the same RuntimeGeneration used by
+ * format-owned in-process sessions. It owns the archive reference; the shared
+ * primitive alone owns initialization, poison fan-out, and recovery ordering.
  */
 export class WasmParserHost<TArchive = unknown> {
-  private readonly _init: WasmInit;
-  private readonly _opts: WasmParserHostOptions<TArchive>;
-  private _wasmInput: WasmInitInput | null = null;
-  private _initPromise: Promise<unknown> | null = null;
-  /** Set true by {@link poison} after a trap; cleared by the next re-init. */
-  private _poisoned = false;
-  /** The live archive handle for the current instance, or null. Owned here so a
-   *  trap frees + nulls it in exactly one place (no worker-side double-free). */
-  private _archive: TArchive | null = null;
+  private readonly runtime: RuntimeGeneration<WasmTrapError>;
+  private wasmInput: WasmInitInput | null = null;
+  private currentArchive: TArchive | null = null;
 
-  constructor(init: WasmInit, opts: WasmParserHostOptions<TArchive> = {}) {
-    this._init = init;
-    this._opts = opts;
+  constructor(
+    private readonly init: WasmInit,
+    private readonly options: WasmParserHostOptions<TArchive> = {},
+  ) {
+    this.runtime = new RuntimeGeneration(
+      () => this.invokeConfigured(this.init),
+      () => this.invokeConfigured(this.options.reinit ?? this.init),
+      normalizeTrap,
+    );
+    this.runtime.onPoison(() => this.dropPoisonedArchive());
   }
 
-  /** Record the WASM URL/input and kick off the first `init`. Called once, on
-   *  the worker's `init` message. The object form is required by current
-   *  wasm-bindgen glue; its legacy positional form logs a browser warning. */
   setWasmInput(input: WasmInitInput): void {
-    this._wasmInput = input;
-    this._poisoned = false;
-    this._initPromise = invokeWasmInitializer(this._init, input);
+    this.wasmInput = input;
+    // Preserve the historical eager first initialization. The rejection is
+    // observed by ensureReady() on the request path.
+    this.runtime.ensureReady().catch(() => undefined);
   }
 
-  /** @deprecated Use {@link setWasmInput}; inputs are not limited to URLs.
-   * Scheduled for removal in a future breaking release. */
+  /** @deprecated Use setWasmInput. */
   setWasmUrl(input: WasmInitInput): void {
     this.setWasmInput(input);
   }
 
-  /** The archive handle for the current instance, or null when none is open
-   *  (before the first parse, or after a trap recycled the instance). */
   get archive(): TArchive | null {
-    return this._archive;
+    return this.currentArchive;
   }
 
-  /**
-   * Adopt a freshly constructed archive handle as the host's own, freeing any
-   * prior handle first (the re-parse dispose the workers used to do inline).
-   */
   setArchive(archive: TArchive): void {
-    this._freeArchive();
-    this._archive = archive;
+    this.freeArchive();
+    this.currentArchive = archive;
   }
 
-  /** Free the current handle (if any) and null it — the double-free / UAF guard
-   *  the workers used to keep as a local `disposeArchive()`. */
   disposeArchive(): void {
-    this._freeArchive();
+    this.freeArchive();
   }
 
-  private _freeArchive(): void {
-    if (this._archive != null && this._opts.freeArchive) {
-      this._opts.freeArchive(this._archive);
-    }
-    this._archive = null;
-  }
-
-  /** True after a trap and before the next successful re-init. Exposed for
-   *  tests and diagnostics. */
   get poisoned(): boolean {
-    return this._poisoned;
+    return this.runtime.poisoned;
   }
 
-  /**
-   * Resolve when a *healthy* instance is ready. If the instance was poisoned,
-   * this transparently re-inits a fresh module from the retained URL first, so
-   * the next {@link run} executes on clean linear memory.
-   *
-   * Mirrors the historical `await initPromise` the workers already do before
-   * each request — callers just swap that one line for `await ensureReady()`.
-   */
   async ensureReady(): Promise<void> {
-    if (this._poisoned) {
-      if (this._wasmInput === null) {
-        throw new Error('WasmParserHost: setWasmInput was never called');
-      }
-      // Recovery MUST use `reinit`, not `init`: wasm-bindgen's `init` returns the
-      // cached (poisoned) instance on every later call, so re-`init`-ing recovers
-      // nothing. `reinit` nulls the singleton first, forcing a real
-      // `WebAssembly.instantiate` with fresh linear memory. Fall back to `init`
-      // only when no `reinit` was supplied (unit tests that don't drive real
-      // glue); production callers always pass `reinit`.
-      const rebuild = this._opts.reinit ?? this._init;
-      // Only flip `_poisoned` off once the rebuild settles successfully, so a
-      // failed rebuild stays poisoned and is retried on the following request
-      // rather than handing back a dead module.
-      const p = invokeWasmInitializer(rebuild, this._wasmInput);
-      this._initPromise = p;
-      await p;
-      this._poisoned = false;
-      return;
-    }
-    if (this._initPromise === null) {
-      throw new Error('WasmParserHost: setWasmInput was never called');
-    }
-    await this._initPromise;
+    await this.runtime.ensureReady();
   }
 
-  /**
-   * Run a synchronous WASM operation. A graceful error propagates unchanged
-   * (the instance stays healthy). A *trap* ({@link isWasmTrap}) poisons the
-   * instance — freeing + nulling {@link archive} and scheduling a re-init on the
-   * next {@link ensureReady} — and is rethrown as a {@link WasmTrapError} so the
-   * caller can report "this one file crashed the parser" while the next file
-   * recovers on a fresh instance.
-   */
-  run<T>(op: () => T): T {
-    try {
-      return op();
-    } catch (err) {
-      if (isWasmTrap(err)) {
-        this._poison();
-        const detail = err instanceof Error ? err.message : String(err);
-        throw new WasmTrapError(`WASM parser trapped and was recycled: ${detail}`);
-      }
-      throw err;
-    }
+  run<TResult>(operation: () => TResult): TResult {
+    return this.runtime.run(operation);
   }
 
-  /**
-   * Mark the instance poisoned without running an operation — for the rare case
-   * where the caller detects corruption out of band. The next
-   * {@link ensureReady} re-inits.
-   */
   poison(): void {
-    this._poison();
+    this.runtime.poison(new WasmTrapError('WASM parser was recycled'));
   }
 
-  private _poison(): void {
-    this._poisoned = true;
-    // Drop the init promise so ensureReady takes the re-init branch even if the
-    // poison flag were ever cleared out of order.
-    this._initPromise = null;
-    // Free the archive that belongs to the now-dead instance and null the host's
-    // sole reference, so the next parse's setArchive/disposeArchive never
-    // double-frees a handle from a discarded module. A `free()` on a trapped
-    // handle may itself throw (its memory is poisoned) — swallow so it never
-    // masks the original trap.
-    if (this._archive != null && this._opts.freeArchive) {
-      try {
-        this._opts.freeArchive(this._archive);
-      } catch {
-        // expected on poisoned memory; ignore
-      }
+  private invokeConfigured(initializer: WasmInit | WasmReinit): Promise<unknown> {
+    if (this.wasmInput === null) {
+      return Promise.reject(new Error('WasmParserHost: setWasmInput was never called'));
     }
-    this._archive = null;
+    return invokeWasmInitializer(initializer, this.wasmInput);
   }
+
+  private freeArchive(): void {
+    if (this.currentArchive !== null && this.options.freeArchive) {
+      this.options.freeArchive(this.currentArchive);
+    }
+    this.currentArchive = null;
+  }
+
+  private dropPoisonedArchive(): void {
+    // A trap invalidates the entire runtime generation. Calling a wasm-bindgen
+    // destructor here would re-enter poisoned linear memory and may trap again;
+    // detach the JS handle and let the discarded instance be collected whole.
+    const archive = this.currentArchive;
+    this.currentArchive = null;
+    detachWasmBindgenResource(archive);
+  }
+}
+
+function normalizeTrap(error: unknown): WasmTrapError | null {
+  if (!isWasmTrap(error)) return null;
+  const detail = error instanceof Error ? error.message : String(error);
+  return new WasmTrapError(`WASM parser trapped and was recycled: ${detail}`);
 }

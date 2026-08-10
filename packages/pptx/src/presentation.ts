@@ -56,6 +56,12 @@ import type {
 } from './worker-protocol';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
+import {
+  hitTestPptxSlideContext,
+  type PptxElementContextOptions,
+  type PptxElementContext,
+  type PptxSlidePoint,
+} from './element-selection';
 
 /** Options for {@link PptxPresentation.load}. */
 export type LoadOptions = CoreLoadOptions & {
@@ -108,9 +114,14 @@ export interface RenderSlideOptions {
   skipMediaControls?: boolean;
   /** Translucent overlay drawn over the finished slide (hidden-slide dimming). */
   dim?: DimOptions;
+}
+
+/** Options for {@link PptxPresentation.presentSlide}. */
+export interface PresentSlideOptions extends Omit<RenderSlideOptions, 'skipMediaControls'> {
   /**
-   * Called for asynchronous embedded-media fetch, decode, and playback
-   * failures created by {@link PptxPresentation.presentSlide}.
+   * Called for embedded-media decode and playback failures that occur after
+   * the presentation handle has been returned. Initial rendering and media
+   * acquisition failures reject `presentSlide()` instead.
    */
   onError?: (error: Error) => void;
 }
@@ -591,6 +602,36 @@ export class PptxPresentation {
   }
 
   /**
+   * Return a compact, detached snapshot of the topmost element whose transformed
+   * frame contains a point in slide EMU coordinates. Straight lines use the
+   * explicit tolerance. Works in both render modes and exposes no archive paths,
+   * mutable element model, or editor tree position.
+   */
+  async getElementContextAt(
+    slideIndex: number,
+    point: PptxSlidePoint,
+    options: PptxElementContextOptions = {},
+  ): Promise<PptxElementContext | null> {
+    this._assertResourceHealthy();
+    if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= this.slideCount) {
+      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    }
+    try {
+      if (this._mode === 'worker') {
+        const response = await this._bridge.request(
+          (id) => ({ kind: 'hitTestElement', id, slideIndex, point, options }) satisfies RenderWorkerRequest,
+        );
+        return (response as Extract<RenderWorkerResponse, { kind: 'elementHit' }>).context;
+      }
+      if (!this._slides) throw new Error('Presentation not loaded');
+      return await this._slides.withSlide(slideIndex, (slide) =>
+        hitTestPptxSlideContext(slideIndex, slide, point, options));
+    } catch (error) {
+      this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /**
    * Extract raw media bytes for a zip path referenced by {@link MediaElement}.
    * Results share a count- and byte-bounded cache with embedded images.
    */
@@ -688,7 +729,7 @@ export class PptxPresentation {
   async presentSlide(
     canvas: HTMLCanvasElement,
     slideIndex: number,
-    opts: RenderSlideOptions = {},
+    opts: PresentSlideOptions = {},
   ): Promise<PresentationHandle> {
     this._assertResourceHealthy();
     try {

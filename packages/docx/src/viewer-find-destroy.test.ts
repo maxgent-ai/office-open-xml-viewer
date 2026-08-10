@@ -47,7 +47,9 @@ describe('DocxViewer.destroy() — find state invalidation', () => {
     const v = new DocxViewer(canvas as unknown as HTMLCanvasElement);
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
     engine.feedTextRuns = [run('hello world')];
-    (v as unknown as { _doc: DocxDocument })._doc = engine.asDoc();
+    (v as unknown as {
+      _documentOwner: { install(document: DocxDocument): void };
+    })._documentOwner.install(engine.asDoc());
 
     // A live find with a real active match…
     const matches = await v.findText('hello');

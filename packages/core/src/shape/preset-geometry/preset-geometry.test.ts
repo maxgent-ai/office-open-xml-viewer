@@ -3,6 +3,7 @@ import {
   renderPresetShape,
   hasPreset,
   buildPresetGeometryPath,
+  buildPresetGeometryFillPath,
   getConnectorAnchors,
 } from './index';
 
@@ -168,6 +169,20 @@ describe('renderPresetShape (core preset-geometry engine)', () => {
       const ok = buildPresetGeometryPath(ctx, 'totallyMadeUpShape', 0, 0, 10, 10);
       expect(ok).toBe(false);
       expect(points.length).toBe(0);
+    });
+
+    it('excludes fill=none decorative paths from a multi-path clip silhouette', () => {
+      const complete = makeRecorder();
+      const silhouette = makeRecorder();
+      expect(buildPresetGeometryPath(
+        complete.ctx, 'verticalScroll', 0, 0, 200, 100,
+      )).toBe(true);
+      expect(buildPresetGeometryFillPath(
+        silhouette.ctx, 'verticalScroll', 0, 0, 200, 100,
+      )).toBe(true);
+
+      expect(silhouette.points.length).toBeGreaterThan(0);
+      expect(silhouette.points.length).toBeLessThan(complete.points.length);
     });
   });
 

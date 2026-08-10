@@ -7,10 +7,14 @@ export function retainedBorderTreatment(
   widthPt: number,
 ): Pick<BorderSegment, 'authoredStyle' | 'style' | 'dashPatternPt'> {
   const dashPatternPt = docxBorderDashArray(authoredStyle, widthPt);
+  const compound = authoredStyle === 'triple'
+    || /^(?:thinThick|thickThin|thinThickThin)(?:Small|Medium|Large)Gap$/.test(authoredStyle);
   return Object.freeze({
     authoredStyle,
     style: authoredStyle === 'double'
       ? 'double'
+      : compound
+        ? 'compound'
       : dashPatternPt.length > 0
         ? 'dashed'
         : authoredStyle.includes('wave') ? 'wavy' : 'solid',

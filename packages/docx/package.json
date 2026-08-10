@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-docx",
   "private": true,
-  "version": "0.75.0",
+  "version": "0.77.0",
   "description": "DOCX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -26,7 +26,8 @@
       "require": "./dist/index.cjs"
     },
     "./wasm": "./src/wasm/docx_parser.js",
-    "./wasm-binary": "./src/wasm/docx_parser_bg.wasm"
+    "./wasm-binary": "./src/wasm/docx_parser_bg.wasm",
+    "./internal/session": "./src/internal/session.ts"
   },
   "files": [
     "dist",
@@ -39,7 +40,11 @@
     "preview": "vite preview",
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/docx_parser.js",
     "typecheck": "tsc --noEmit",
-    "vrt": "playwright test --config playwright.config.ts --project=chrome",
+    "vrt": "VRT_MODE=regression playwright test --config playwright.config.ts --project=chrome",
+    "vrt:snapshot": "VRT_SNAPSHOT=1 playwright test --config playwright.config.ts --project=chrome",
+    "vrt:private": "VRT_PRIVATE_CORPUS=1 VRT_MODE=regression playwright test --config playwright.config.ts --project=chrome --grep 'private corpus self regression'",
+    "vrt:private:snapshot": "VRT_PRIVATE_CORPUS=1 VRT_SNAPSHOT=1 playwright test --config playwright.config.ts --project=chrome --grep 'private corpus self regression'",
+    "vrt:fidelity": "VRT_MODE=fidelity playwright test --config playwright.config.ts --project=chrome",
     "vrt:pdf": "LOCAL_PDF_ACCEPTANCE=1 playwright test --config playwright.config.ts --project=chrome pdf-acceptance.spec.ts",
     "vrt:worker": "playwright test --config playwright.config.ts worker-equivalence",
     "conformance": "playwright test --config playwright.config.ts conformance.spec.ts"
@@ -51,7 +56,7 @@
     "pixelmatch": "^7.1.0",
     "playwright": "^1.59.1",
     "pngjs": "^7.0.0",
-    "@typescript/native": "npm:typescript@^7.0.2",
+    "typescript": "^7.0.2",
     "vite": "^6.3.5",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"

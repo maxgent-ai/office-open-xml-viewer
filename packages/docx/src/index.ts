@@ -1,8 +1,70 @@
-export { DocxDocument, type LoadOptions, type RenderPageToBitmapOptions } from './document';
-export type { WireRenderPageOptions } from './worker-protocol';
+export {
+  DocxDocument,
+  type CollectPageRunsOptions,
+  type LoadOptions,
+  type RenderPageToBitmapOptions,
+} from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export { buildDocxTextLayer } from './text-layer';
+export {
+  readDocxTextSelectionContext,
+  type DocxSelectionContext,
+  type DocxTextSelectionContext,
+  type DocxElementContext,
+  type DocxPagePoint,
+  type DocxSelectionContextOptions,
+  type DocxSelectionSourceLocator,
+  type DocxSelectionRunLocator,
+} from './selection-context';
+export type { DocxElementContextOptions } from './element-context';
+export type {
+  ChartDataLabelOverride,
+  ChartDataPointOverride,
+  ChartErrBars,
+  ChartLabelBox,
+  ChartManualLayout,
+  ChartModel,
+  ChartRect,
+  ChartSeries,
+  ChartSeriesDataLabels,
+  ChartTrendline,
+  ChartType,
+  ChartexBoxSeries,
+  ChartexBoxWhisker,
+  ChartexSunburst,
+  ChartexSunburstRow,
+  Duotone,
+  FillRect,
+  LegendManualLayout,
+  MathAccent,
+  MathArray,
+  MathBar,
+  MathBorderBox,
+  MathBox,
+  MathDelimiter,
+  MathFraction,
+  MathFunc,
+  MathGroup,
+  MathGroupChr,
+  MathLimit,
+  MathRenderer,
+  MathNary,
+  MathNode,
+  MathPhant,
+  MathRadical,
+  MathRun,
+  MathScript,
+  MathSPre,
+  MathStyle,
+  MathSvg,
+  MatchRunSlice,
+  SecondaryValueAxis,
+  TextSelectionContextOptions,
+  TileInfo,
+  ViewerContextMenuEvent,
+  ZoomableViewer,
+} from '@silurus/ooxml-core';
 // IX2 find-in-document: the highlight overlay builder + the docx match-location
 // shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export {
@@ -27,7 +89,6 @@ export {
   isOoxmlDecodedImageLimitError,
   type OoxmlDecodedImageLimitMetric,
   type OoxmlErrorCode,
-  type OoxmlErrorSource,
   type OoxmlErrorStage,
   type OoxmlFormat,
   type OoxmlResourceLimit,

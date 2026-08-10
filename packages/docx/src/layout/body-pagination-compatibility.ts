@@ -97,8 +97,11 @@ export const WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION = defineCompatibilit
 export const WORD_LOWERED_DROP_CAP_ANCHOR_LEADING = defineCompatibilityRule({
   id: 'word-lowered-drop-cap-anchor-leading',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/frame-keep-with-anchor.test.ts#keeps anchor text below a lowered drop cap without extending its authored line count',
+    kind: 'office-observation',
+    syntheticFixtureId: 'lowered-drop-cap-anchor-leading',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
   description: 'Word keeps the following anchor text below a baseline-lowered drop-cap glyph while preserving the drop cap exclusion height authored by framePr lines. ECMA-376 specifies those two inputs independently but does not prescribe this interaction.',
 });
@@ -109,6 +112,13 @@ export function wordLoweredDropCapAnchorLeadingPt(
   maximumBaselineLoweringPt: number,
 ): number {
   return Math.max(0, maximumBaselineLoweringPt);
+}
+
+/** Whether a framed paragraph's baseline shift contributes to its line box.
+ * Only the observed lowered-drop-cap interaction suppresses that contribution;
+ * an ordinary `w:framePr` remains governed by §17.3.2.24 metrics. */
+export function wordFramePositionExtendsLineBox(dropCap: string): boolean {
+  return dropCap === 'none';
 }
 
 /** Compatibility projection governed by {@link WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION}. */
@@ -262,8 +272,10 @@ function paragraphHasOnlyDrawingAnchors(layout: ParagraphLayout): boolean {
 /** A positive-size inline DrawingML resource that participates in line flow. */
 export function wordPreBreakInlineDrawingResource(layout: ParagraphLayout): boolean {
   return layout.lines.some((line) => line.placements.some((placement) =>
-    placement.kind === 'resource'
-    && (placement.resourceKind === 'image' || placement.resourceKind === 'chart')
+    ((placement.kind === 'resource'
+      && (placement.resourceKind === 'image' || placement.resourceKind === 'chart'))
+      || placement.kind === 'drawing')
+    && placement.advancePt > 0
     && placement.bounds !== undefined
     && placement.bounds.widthPt > 0
     && placement.bounds.heightPt > 0));

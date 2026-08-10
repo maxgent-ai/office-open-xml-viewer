@@ -1,5 +1,6 @@
-import type { DocxDocumentModel, BodyElement } from './types';
-import type { HyperlinkTarget, LayoutServices, MathRenderer } from './layout/types.js';
+import type { DocxDocumentModel, BodyElement, DocxTextRunInfo } from './types';
+import type { LayoutServices, MathRenderer } from './layout/types.js';
+export type { DocxTextRunInfo } from './types';
 import { bodyMathOccurrences } from './layout/resources.js';
 import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
@@ -35,51 +36,6 @@ export async function prepareMathRuns(
   return prepareBrowserMathResources(layoutSourceStore(input).mathOccurrences, math);
 }
 
-/** Information about a rendered text segment for building a transparent selection overlay. */
-export interface DocxTextRunInfo {
-  /**
-   * Authored `w14:paraId` of the source paragraph. Absent when the paragraph
-   * does not carry that identifier.
-   */
-  paragraphId?: string;
-  text: string;
-  /** Left edge in canvas CSS px. */
-  x: number;
-  /** Top of line box in canvas CSS px. */
-  y: number;
-  /** Measured text width in CSS px. */
-  w: number;
-  /** Line height in CSS px. */
-  h: number;
-  /** Font size in CSS px. */
-  fontSize: number;
-  /** CSS `font` shorthand used for canvas drawing (e.g. `"bold 16px Arial"`). */
-  font: string;
-  /** Uniform per-code-point pitch in CSS px used to draw a horizontal run.
-   *  Absent when the pitch is zero or the run uses vertical / 縦中横 paint. */
-  letterSpacingPx?: number;
-  /** ECMA-376 §17.6.20 (tbRl) — when the page is vertical the canvas is the
-   *  physical landscape page rotated +90° at paint, so this run's `x`/`y` are the
-   *  PHYSICAL top-left the overlay span must sit at, and `transform` is the CSS
-   *  rotation (`"rotate(90deg)"`, applied about the span's top-left) that lays the
-   *  horizontal DOM span along the drawn (rotated) glyph run. Absent for
-   *  horizontal pages (the span is placed at `x`/`y` untransformed). */
-  transform?: string;
-  /** IX1 — the resolved hyperlink target of this run (ECMA-376 §17.16.22
-   *  external URL / §17.16.23 internal `w:anchor` bookmark), or absent for a
-   *  non-link run. The text-layer overlay turns a run carrying this into a
-   *  clickable region; the drawn glyphs are unaffected. */
-  hyperlink?: HyperlinkTarget;
-  /** ECMA-376 §17.3.2.10 eastAsianLayout `w:vert` (縦中横 / horizontal-in-vertical):
-   *  `true` when this run was drawn as tate-chu-yoko — its glyphs laid out
-   *  horizontally, side by side, COMPRESSED into ONE em cell of the vertical
-   *  column (see {@link drawTateChuYokoRun}). `w` is the drawn cell extent (one
-   *  em), NOT the natural text width, so the find / selection overlays must clamp
-   *  their horizontal extent to `w` rather than re-measuring the run's natural
-   *  glyphs (issue #836). Absent for every ordinary run. */
-  eastAsianVert?: boolean;
-}
-
 export interface RenderDocumentOptions {
   width?: number;
   dpr?: number;
@@ -94,11 +50,6 @@ export interface RenderDocumentOptions {
   fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
-  /** Default `true`. When false, runs tagged with a `revision` (insertion or
-   *  deletion from `<w:ins>` / `<w:del>`) render in their normal colour with
-   *  no underline / strikethrough overlay — useful for a "final / no markup"
-   *  view of a tracked document. */
-  showTrackChanges?: boolean;
   /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant that a
    *  DATE/TIME field formats through its `\@` date picture (§17.16.4.1). Accepts a
    *  `Date` or epoch-ms number. Default = the real current time (`Date.now()` at
@@ -153,7 +104,6 @@ function normalizeRenderOptions(
       width: options.width,
       dpr: options.dpr,
       defaultTextColor: options.defaultTextColor,
-      showTrackChanges: options.showTrackChanges,
       fetchImage: options.fetchImage,
       parseError: source.fatalParse !== null,
       registry: paintResourceRegistryOf(services),

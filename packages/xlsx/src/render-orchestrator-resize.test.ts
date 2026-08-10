@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { renderWorksheetViewport, type RenderDeps } from './render-orchestrator.js';
+import {
+  renderWorksheetViewport,
+  withXlsxRenderCommitGuard,
+  type RenderDeps,
+} from './render-orchestrator.js';
 import type { Worksheet } from './types.js';
 import type { ParsedWorkbook } from './types.js';
 
@@ -111,6 +115,23 @@ function deps(): RenderDeps {
 const VIEWPORT = { row: 1, col: 1, rows: 10, cols: 10 };
 
 describe('renderWorksheetViewport canvas re-allocation guard (C4 commit 2)', () => {
+  it('does not touch the target when its owner invalidates the frame while resources prepare', async () => {
+    const canvas = new FakeCanvas();
+    await renderWorksheetViewport(
+      deps(),
+      canvas as unknown as HTMLCanvasElement,
+      VIEWPORT,
+      withXlsxRenderCommitGuard({
+      width: 800,
+      height: 600,
+      dpr: 1,
+      }, () => false),
+    );
+    expect(canvas.widthWrites).toBe(0);
+    expect(canvas.heightWrites).toBe(0);
+    expect(canvas._ctx.transforms).toHaveLength(0);
+  });
+
   it('does not re-assign width/height when the size is unchanged across frames', async () => {
     const canvas = new FakeCanvas();
     const opts = { width: 800, height: 600, dpr: 1 };

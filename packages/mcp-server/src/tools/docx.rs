@@ -140,7 +140,7 @@ pub struct DocxTools;
 
 impl DocxTools {
     #[tool(
-        description = "Convert a DOCX file to GitHub-flavoured markdown. Preserves textual structure (headings from outlineLevel, paragraphs, bullet/numbered lists, tables, footnotes, comments) and rich-text formatting (bold/italic/strikethrough/hyperlinks). Discards positioning, section properties, font metrics, drawing shapes, and headers/footers. Designed for agents that need to *read* the document content efficiently — typical 10×+ token reduction vs. the structured JSON tools. Lossy by design: when you need precise layout or styling, fall back to `docx_get_structure` / `docx_get_paragraph`"
+        description = "Convert a DOCX file to GitHub-flavoured markdown. Preserves textual structure (headings from outlineLevel, paragraphs, bullet/numbered lists, tables, footnotes, comments) and rich-text formatting (bold/italic/strikethrough/hyperlinks). Discards positioning, section properties, font metrics, drawing shapes, and headers/footers. Designed for agents that need to *read* the document content efficiently — typical 10×+ token reduction vs. the structured JSON tools. Lossy by design: when you need precise layout or styling, fall back to `docx_get_structure` / `docx_get_body_element`"
     )]
     pub fn docx_to_markdown(Parameters(p): Parameters<DocxPathParam>) -> String {
         let data = match read_file(&p.path) {
@@ -318,7 +318,7 @@ impl DocxTools {
     #[tool(
         description = "Return one body element's full detail (paragraph or table) including run-level formatting (bold/italic/color/font/hyperlink), indents, spacing, numbering, and tab stops. `index` is into the document body list (matches `docx_get_structure`)"
     )]
-    pub fn docx_get_paragraph(Parameters(p): Parameters<DocxIndexParam>) -> String {
+    pub fn docx_get_body_element(Parameters(p): Parameters<DocxIndexParam>) -> String {
         let data = match read_file(&p.path) {
             Ok(d) => d,
             Err(e) => return format!("Error: {}", e),
@@ -425,7 +425,7 @@ impl DocxTools {
     }
 
     #[tool(
-        description = "List all images in the document. Each entry carries the paragraph index, anchor mode, wrap settings, and dimensions. Set `includeDataUrl=true` to also receive the inline base64 image bytes (large)"
+        description = "List all images in the document. Each entry carries the paragraph index, anchor mode, wrap settings, and dimensions. Set `include_data_url=true` to also receive the inline base64 image bytes (large)"
     )]
     pub fn docx_get_images(Parameters(p): Parameters<DocxImagesParam>) -> String {
         let data = match read_file(&p.path) {
@@ -687,12 +687,12 @@ mod sample_tests {
     }
 
     #[test]
-    fn docx_get_paragraph_first_element() {
+    fn docx_get_body_element_first_element() {
         let path = sample_path();
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let out = DocxTools::docx_get_paragraph(Parameters(DocxIndexParam {
+        let out = DocxTools::docx_get_body_element(Parameters(DocxIndexParam {
             path: path.clone(),
             index: 0,
         }));
@@ -770,12 +770,12 @@ mod sample_tests {
     }
 
     #[test]
-    fn docx_get_paragraph_out_of_range_errors() {
+    fn docx_get_body_element_out_of_range_errors() {
         let path = sample_path();
         if !std::path::Path::new(&path).exists() {
             return;
         }
-        let out = DocxTools::docx_get_paragraph(Parameters(DocxIndexParam {
+        let out = DocxTools::docx_get_body_element(Parameters(DocxIndexParam {
             path,
             index: 999_999,
         }));

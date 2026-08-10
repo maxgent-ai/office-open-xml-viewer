@@ -78,6 +78,7 @@ import type {
 } from './layout/body-layout-input.js';
 import { projectBodyLayoutInput } from './layout/body-layout-input.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
+import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
 import {
   wordTableCellSpacingValuePt,
@@ -238,6 +239,22 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     footnotePosition?: string;
     endnotePosition?: string;
   }>;
+  readonly __documentTypographySettings?: Readonly<{
+    normalStyleFontSizePt?: number;
+  }>;
+}
+
+export function documentTypographySettingsInput(
+  doc: DocxDocumentModel,
+): DocumentTypographySettingsInput {
+  const authored = (doc as InternalDocxDocumentModel)
+    .__documentTypographySettings?.normalStyleFontSizePt;
+  return snapshotPlainData({
+    normalStyleFontSizePt:
+      typeof authored === 'number' && Number.isFinite(authored) && authored > 0
+        ? authored
+        : 10,
+  }, 'DOCX document typography settings input');
 }
 
 export interface DocumentPageLayoutSettingsInput {
@@ -881,7 +898,7 @@ export function tableColumnLayoutInput(
   table: TableLayoutSource,
   availableWidthPt: number,
   intrinsicWidths: (cell: TableLayoutSource['rows'][number]['cells'][number]) => CellIntrinsicWidths,
-  maximumWidthPt: number = availableWidthPt,
+  maximumWidthPt: number | null = availableWidthPt,
 ): import('./layout/types.js').TableColumnLayoutInput {
   const source = tableSourceAcquisitionInput(table);
   return projectTableColumnLayoutInput(

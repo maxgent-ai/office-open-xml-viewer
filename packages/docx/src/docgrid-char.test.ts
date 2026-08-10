@@ -112,6 +112,12 @@ function para(
   return { type: 'paragraph', ...p } as BodyElement;
 }
 
+function paraRuns(runs: readonly DocxTextRun[]): BodyElement {
+  const paragraph = para('') as DocParagraph & { type: 'paragraph' };
+  paragraph.runs = runs.map((run) => ({ type: 'text', ...run }) as DocRun);
+  return paragraph as BodyElement;
+}
+
 /** A wide section so a paragraph fits on one line unless the grid changes the
  *  per-char width; tall enough that vertical fit never wraps in these tests. */
 function section(overrides: Partial<SectionProps> = {}): SectionProps {
@@ -177,9 +183,10 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
       snapToCharacterGrid: false,
     } as unknown as LayoutTextSeg;
 
-    expect(segAdvanceWidth(base, FONT_PX, 1, 1)).toBe(FONT_PX + 1);
-    expect(segAdvanceWidth(optedOut, FONT_PX, 1, 1)).toBe(FONT_PX);
-    expect(segLetterSpacingPx(optedOut, 1, 1)).toBe(0);
+    const grid = { type: 'linesAndChars', linePitchPt: null, charSpacePt: 1 };
+    expect(segAdvanceWidth(base, FONT_PX, grid, 1)).toBe(FONT_PX + 1);
+    expect(segAdvanceWidth(optedOut, FONT_PX, grid, 1)).toBe(FONT_PX);
+    expect(segLetterSpacingPx(optedOut, grid, 1)).toBe(0);
   });
 
   it('carries run-level character-grid opt-out through measurement and paint', async () => {
@@ -260,21 +267,13 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     expect(isolated.length).toBe(0);
   });
 
-  // A space-free MIXED CJK+Latin token (no U+0020, so `splitTextForLayout` keeps
-  // it as one word). The §17.3.2.26 ascii/eastAsia split sub-divides it into
-  // per-script segments [あ][A][本]; under an active grid the pure-EA segments
-  // get the cell delta while the Latin segment keeps its natural advance. This
-  // guards two things at once: (1) measure==draw still holds across the mixed
-  // token (each single-font segment's box abuts the next — no overlap), and
-  // (2) the EA glyphs ARE gridded even when sandwiching Latin (the behaviour
-  // that changed: before the split, the whole mixed token was one non-pure-EA
-  // segment and its CJK chars were NOT snapped). It also pins the load-bearing
-  // interaction between `splitByEastAsia` (isCjkBreakChar) and the grid's own
-  // `EAST_ASIAN_RE` purity test, so a future predicate edit can't silently break it.
-  it('mixed CJK+Latin token: EA sub-segments grid, Latin keeps natural width, boxes abut', async () => {
+  it('linesAndChars applies one pitch to every mixed-script sub-segment', async () => {
     const charSpace = -1161;
-    const cell = FONT_PX + charSpace / 4096; // per-CJK-glyph cell
-    const { runs, fillTextCalls } = await renderRun([para('あA本')], section(charGrid(charSpace)));
+    const pitchedAdvance = FONT_PX + charSpace / 4096;
+    const { runs, fillTextCalls } = await renderRun(
+      [para('あA本')],
+      section(charGrid(charSpace)),
+    );
 
     const segA1 = runs.find((r) => r.text === 'あ');
     const segLat = runs.find((r) => r.text === 'A');
@@ -283,11 +282,9 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     expect(segLat, 'Latin segment A').toBeDefined();
     expect(segA2, 'EA segment 本').toBeDefined();
 
-    // MEASURE: EA segments are one grid cell; the Latin segment is its natural
-    // advance (NOT gridded).
-    expect(segA1!.w).toBeCloseTo(cell, 6);
-    expect(segA2!.w).toBeCloseTo(cell, 6);
-    expect(segLat!.w).toBeCloseTo(FONT_PX, 6);
+    expect(segA1!.w).toBeCloseTo(pitchedAdvance, 6);
+    expect(segA2!.w).toBeCloseTo(pitchedAdvance, 6);
+    expect(segLat!.w).toBeCloseTo(pitchedAdvance, 6);
 
     // measure==draw + abutment: each segment's box starts exactly where the prior
     // one ends, so glyphs never overlap and the line width is the sum of cells.
@@ -318,17 +315,75 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     expect(w(loose)).toBeCloseTo(n * (FONT_PX + 2048 / 4096), 6);
   });
 
-  it('does NOT snap Latin text (Latin spans cells at natural advance)', async () => {
-    const text = 'abcde'; // 5 non-EA glyphs → one segment, never gridded
+  it('linesAndChars adds the character pitch to Latin text', async () => {
+    const text = 'abcde';
+    const charSpace = -1161;
+    const deltaPt = charSpace / 4096;
     const n = [...text].length;
-    const { runs, fillTextCalls } = await renderRun([para(text)], section(charGrid(-1161)));
+    const { runs, fillTextCalls } = await renderRun([para(text)], section(charGrid(charSpace)));
     const seg = runs.find((r) => r.text === text)!;
-    // Box is the natural width — the grid delta does not apply to Latin.
-    expect(seg.w).toBeCloseTo(n * FONT_PX, 6);
-    // Drawn as a single fillText at the natural position (no per-glyph walk).
+    expect(seg.w).toBeCloseTo(n * (FONT_PX + deltaPt), 6);
     const whole = fillTextCalls.filter((c) => c.text === text);
     expect(whole.length).toBe(1);
     expect(whole[0].x).toBeCloseTo(seg.x, 6);
+    expect(whole[0].letterSpacing).toBe(`${deltaPt}px`);
+  });
+
+  it('keeps a closing parenthesis at the measured end of a Latin run under an active grid', async () => {
+    const email = 'address@example.test';
+    const rendered = await renderRun([
+      paraRuns([
+        textRun(email, FONT_PX),
+        textRun(')', FONT_PX),
+      ]),
+    ], section({ ...charGrid(-1161), pageWidth: 1000 }));
+
+    const emailRun = rendered.runs.find((run) => run.text === email);
+    const closingRun = rendered.runs.find((run) => run.text === ')');
+    expect(emailRun).toBeDefined();
+    expect(closingRun).toBeDefined();
+    expect(closingRun!.x).toBeCloseTo(emailRun!.x + emailRun!.w, 6);
+    expect(rendered.fillTextCalls.find((call) => call.text === email)?.letterSpacing)
+      .toBe(`${-1161 / 4096}px`);
+    expect(rendered.fillTextCalls.find((call) => call.text === ')')?.letterSpacing)
+      .toBe(`${-1161 / 4096}px`);
+  });
+
+  it('keeps a Japanese-comma/Latin boundary invariant across source-run formatting', async () => {
+    const prefix = '確認後に、';
+    const latin = 'E-mail';
+    const activeGrid = section({ ...charGrid(-1161), pageWidth: 1000 });
+    const sameRun = await renderRun([
+      paraRuns([textRun(`${prefix}${latin}`, FONT_PX)]),
+    ], activeGrid);
+    const splitRuns = await renderRun([
+      paraRuns([
+        textRun(prefix, FONT_PX),
+        textRun(latin, FONT_PX),
+      ]),
+    ], activeGrid);
+
+    const placement = (rendered: Awaited<ReturnType<typeof renderRun>>) => {
+      const prefixRun = rendered.runs.find((run) => run.text === prefix);
+      const latinRun = rendered.runs.find((run) => run.text === latin);
+      const latinPaint = rendered.fillTextCalls.find((call) => call.text === latin);
+      expect(prefixRun).toBeDefined();
+      expect(latinRun).toBeDefined();
+      expect(latinPaint).toBeDefined();
+      return {
+        prefixEnd: prefixRun!.x + prefixRun!.w,
+        latinX: latinRun!.x,
+        latinPaintX: latinPaint!.x,
+      };
+    };
+
+    const samePlacement = placement(sameRun);
+    const splitPlacement = placement(splitRuns);
+    expect(samePlacement.latinX).toBeCloseTo(samePlacement.prefixEnd, 6);
+    expect(splitPlacement.latinX).toBeCloseTo(splitPlacement.prefixEnd, 6);
+    expect(samePlacement.latinPaintX).toBeCloseTo(samePlacement.latinX, 6);
+    expect(splitPlacement.latinPaintX).toBeCloseTo(splitPlacement.latinX, 6);
+    expect(splitPlacement).toEqual(samePlacement);
   });
 
   it('type="lines" (line grid, no char grid) leaves EA glyphs at natural advance', async () => {
@@ -341,16 +396,102 @@ describe('docGrid character grid — measure==draw invariant (§17.6.5)', () => 
     expect(seg.w).toBeCloseTo(n * FONT_PX, 6);
   });
 
-  it('type="snapToChars" applies the character-grid delta', async () => {
+  it('type="snapToChars" centers one East-Asian character in one full grid cell', async () => {
+    const sec = section({
+      docGridType: 'snapToChars',
+      docGridLinePitch: 20,
+      docGridCharSpace: 40960,
+    });
+    const { runs, fillTextCalls } = await renderRun([para('あ')], sec);
+
+    // The document Normal style defaults to 10pt in this hand-built model, so
+    // §17.6.5 resolves a 20pt cell (10 + charSpace delta 10). The 20pt glyph
+    // occupies one centered cell; charSpace is not letterSpacing.
+    expect(runs[0].w).toBe(20);
+    expect(fillTextCalls[0].x).toBeCloseTo(runs[0].x, 6);
+    expect(fillTextCalls[0].letterSpacing).toBe('0px');
+  });
+
+  it('expands each East-Asian grapheme to the smallest whole cells that contain it', async () => {
     const sec = section({
       docGridType: 'snapToChars',
       docGridLinePitch: 20,
       docGridCharSpace: 4096,
     });
-    const { runs, fillTextCalls } = await renderRun([para('あ')], sec);
+    const { runs, fillTextCalls } = await renderRun([para('あい')], sec);
 
-    expect(runs[0].w).toBe(FONT_PX + 1);
-    expect(fillTextCalls[0].letterSpacing).toBe('1px');
+    // An 11pt pitch cannot contain either 20pt grapheme. Word allocates two
+    // cells independently to each one, rather than treating the pair as one
+    // 40pt block (which would require only four cells here by coincidence but
+    // would lose the per-grapheme centering boundary).
+    expect(runs[0].w).toBe(44);
+    expect(fillTextCalls[0].x).toBeCloseTo(runs[0].x + 1, 6);
+    expect(fillTextCalls[1].x).toBeCloseTo(runs[0].x + 23, 6);
+  });
+
+  it('centers one contiguous ascii/highAnsi block in the fewest whole cells', async () => {
+    const sec = section({
+      docGridType: 'snapToChars',
+      docGridLinePitch: 20,
+      docGridCharSpace: 4096,
+      pageWidth: 1000,
+    });
+    const rendered = await renderRun([
+      paraRuns([
+        textRun('A', FONT_PX),
+        { ...textRun('B', FONT_PX), bold: true },
+      ]),
+    ], sec);
+    const first = rendered.runs.find((run) => run.text === 'A')!;
+    const second = rendered.runs.find((run) => run.text === 'B')!;
+
+    // Natural 40pt requires four 11pt cells. Formatting/source boundaries do
+    // not split the Latin block; only the block's two outer edges own 2pt slack.
+    expect(first.w + second.w).toBeCloseTo(44, 6);
+    expect(rendered.fillTextCalls.find((call) => call.text === 'A')!.x)
+      .toBeCloseTo(first.x + 2, 6);
+    expect(rendered.fillTextCalls.find((call) => call.text === 'B')!.x)
+      .toBeCloseTo(second.x, 6);
+  });
+
+  it('left-aligns a complex-script block in the fewest whole cells', async () => {
+    const arabic = { ...textRun('ب', FONT_PX), cs: true, rtl: true };
+    const rendered = await renderRun(
+      [paraRuns([arabic])],
+      section({
+        docGridType: 'snapToChars',
+        docGridLinePitch: 20,
+        docGridCharSpace: 4096,
+      }),
+    );
+    expect(rendered.runs[0].w).toBe(22);
+    expect(rendered.fillTextCalls[0].x).toBeCloseTo(rendered.runs[0].x, 6);
+  });
+
+  it('activates snapToChars with the Normal-style pitch when charSpace is absent', async () => {
+    const rendered = await renderRun(
+      [paraRuns([textRun('あ', 15)])],
+      section({ docGridType: 'snapToChars', docGridLinePitch: 20 }),
+    );
+
+    // Omitted charSpace contributes zero, so the Normal 10pt pitch remains an
+    // active grid. A natural 15pt grapheme therefore occupies two 10pt cells.
+    expect(rendered.runs[0].w).toBe(20);
+    expect(rendered.fillTextCalls[0].x).toBeCloseTo(rendered.runs[0].x + 2.5, 6);
+  });
+
+  it('lets run-level snapToGrid=false bypass snapToChars allocation', async () => {
+    const rendered = await renderRun(
+      [paraRuns([{ ...textRun('あ', FONT_PX), snapToGrid: false }])],
+      section({
+        docGridType: 'snapToChars',
+        docGridLinePitch: 20,
+        docGridCharSpace: 4096,
+      }),
+    );
+
+    expect(rendered.runs[0].w).toBe(FONT_PX);
+    expect(rendered.fillTextCalls[0].x).toBeCloseTo(rendered.runs[0].x, 6);
   });
 
   it('an absent charSpace leaves EA glyphs at natural advance even under linesAndChars', async () => {
@@ -397,11 +538,10 @@ describe('docGrid character grid — packs more chars per line (§17.6.5)', () =
     expect(tightLines).toBeLessThan(naturalLines);
   });
 
-  it('has NO effect on Latin-only text (cells not applied) — line count unchanged', () => {
-    // Space-separated Latin words wrap by word; the grid must not change that.
+  it('linesAndChars changes Latin line packing because its pitch applies to every character', () => {
     const text = 'ab '.repeat(30).trim();
     expect(linesOf(text, section({ ...charGrid(-8192), ...ONE_LINE_PAGE })))
-      .toBe(linesOf(text, section(ONE_LINE_PAGE)));
+      .toBeLessThan(linesOf(text, section(ONE_LINE_PAGE)));
   });
 
   it('type="lines" does not change CJK line count (char grid inactive)', () => {

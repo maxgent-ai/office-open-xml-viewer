@@ -151,7 +151,7 @@ function paginate(input: Readonly<{
       return {
         layout: paragraph(paragraphInput.source.path[0]!, heightPt),
         blockExtentPt: heightPt,
-        lineEndBoundaries: [],
+        fragmentation: { kind: 'indivisible' },
       };
     },
     measureTable: () => { throw new Error('unused'); },

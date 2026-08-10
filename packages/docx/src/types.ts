@@ -4,6 +4,9 @@ import type {
   MathNode,
   ChartModel,
   Duotone,
+  FillRect,
+  HyperlinkTarget,
+  TileInfo,
 } from '@silurus/ooxml-core';
 import type {
   NormalizedOoxmlResourcePolicy,
@@ -22,7 +25,8 @@ export interface DocxDocumentModel {
   minorFont?: string;
   /**
    * ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
-   * Maps font name to `<w:family @w:val>`: "roman" | "swiss" | "modern" |
+   * Maps each primary font name and §17.8.3.1 alternate name to
+   * `<w:family @w:val>`: "roman" | "swiss" | "modern" |
    * "script" | "decorative" | "auto". The renderer uses this as the primary
    * source for serif/sans-serif decisions (roman→serif, swiss→sans-serif,
    * modern→monospace), falling back to name-pattern matching only when the
@@ -30,9 +34,10 @@ export interface DocxDocumentModel {
    */
   fontFamilyClasses?: Record<string, string>;
   /**
-   * ECMA-376 §17.8.3.29 — per-font pitch from `word/fontTable.xml`
-   * (`<w:pitch>`, ST_Pitch §17.18.66): font name → "fixed" | "variable" |
-   * "default". Present only for fonts that declare `<w:pitch>`. The renderer
+   * ECMA-376 §17.8.3.14 — per-font pitch from `word/fontTable.xml`
+   * (`<w:pitch>`, ST_Pitch §17.18.66): primary font name and each §17.8.3.1
+   * alternate name → "fixed" | "variable" | "default". Present only for fonts
+   * that declare `<w:pitch>`. The renderer
    * pairs this with {@link fontFamilyClasses}: a `family="modern"` face is
    * treated as monospace ONLY when its pitch is "fixed"; "variable" /
    * "default" / absent fall through to name-pattern / CJK-sans classification
@@ -102,9 +107,10 @@ export interface DocSettings {
   /** §17.15.1.18 `w:characterSpacingControl@w:val` — East Asian punctuation /
    *  character-spacing control. */
   characterSpacingControl?: string;
-  /** §17.15.3.1 `w:compat/w:useFELayout` — Far East layout compatibility. */
+  /** ECMA-376 Part 4 §14.8.3.50 `w:compat/w:useFELayout` — Far East layout
+   * compatibility. */
   useFeLayout?: boolean;
-  /** §17.15.3.1 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
+  /** §17.15.3.3 `w:compat/w:balanceSingleByteDoubleByteWidth` — balance
    *  single-byte and double-byte widths for East Asian layout. */
   balanceSingleByteDoubleByteWidth?: boolean;
   /** §17.15.3.1 `w:compat/w:adjustLineHeightInTable` — apply the section
@@ -303,12 +309,9 @@ export interface SectionProps {
    *  "linesAndChars", auto line spacing multiplies against this pitch instead of
    *  the font's natural line height. */
   docGridLinePitch?: number | null;
-  /** ECMA-376 §17.6.5 w:docGrid/@w:charSpace (ST_DecimalNumber, signed). The
-   *  raw character-grid spacing in 1/4096ths of an em (NOT twips). When
-   *  docGridType is "linesAndChars" or "snapToChars", every full-width East-
-   *  Asian glyph occupies a fixed cell of width `fontSizePt + charSpace/4096` pt
-   *  (negative = tighter). Absent ⇒ East-Asian glyphs keep their natural em
-   *  advance. */
+  /** ECMA-376 §17.6.5 w:docGrid/@w:charSpace (ST_DecimalNumber, signed), in
+   *  1/4096ths of a point (not twips). `linesAndChars` adds the resulting pitch
+   *  to every character. Negative values tighten. */
   docGridCharSpace?: number | null;
   /** ECMA-376 §17.6.4 `<w:cols>` — newspaper-style multi-column layout. `null`
    *  (or absent) ⇒ single full-width column (unchanged behavior). When present,
@@ -483,6 +486,10 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.21 `<w:overflowPunct>` — permit one trailing
    *  punctuation character beyond paragraph indents/margins. Omission is true. */
   overflowPunct?: boolean;
+  /** ECMA-376 §17.3.1.1 `<w:adjustRightInd>` — permit automatic right-indent
+   *  adjustment when a document grid is active. Absent means true after the
+   *  paragraph style hierarchy and specification default are resolved. */
+  adjustRightInd?: boolean;
   /** Paragraph borders (w:pBdr) */
   borders?: ParagraphBorders | null;
   /** Style ID of the applied paragraph style */
@@ -498,10 +505,9 @@ export interface DocParagraph {
   defaultFontFamilyEastAsia?: string | null;
   /** ECMA-376 §17.3.1.29 — the paragraph mark run's resolved `w:color` (direct
    *  pPr/rPr → pStyle chain → docDefaults; hex 6 without `#`, lowercased; an
-   *  explicit `auto` surfaces as absent, §17.3.2.6). The numbering level rPr
-   *  (§17.9.24) layers over the mark's run properties, so the renderer uses
-   *  this as the marker-color fallback when {@link NumberingInfo.color} is
-   *  absent. */
+   *  explicit `auto` surfaces as absent, §17.3.2.6). Compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback` uses this when §17.9.24
+   *  leaves {@link NumberingInfo.color} absent. */
   paragraphMarkColor?: string | null;
   /**
    * ECMA-376 §17.3.1.6 `<w:bidi>` — right-to-left paragraph. `true` = RTL,
@@ -634,7 +640,8 @@ export interface NumberingInfo {
    *  it (the renderer treats absent as "left"). */
   jc?: string;
   /** ECMA-376 §17.3.2.26 ascii axis for the marker glyph, resolved through the
-   *  level's `rPr` (§17.9.6) merged over the paragraph's run formatting. The
+   *  level's `rPr` (§17.9.24) plus compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback`. The
    *  renderer draws Latin marker chars (e.g. a decimal "1") with this family, so
    *  a heading whose ascii=Times renders its auto-number in Times (serif) even
    *  when eastAsia=Gothic. Absent ⇒ the renderer falls back to its default. */
@@ -647,9 +654,11 @@ export interface NumberingInfo {
   /** ECMA-376 §17.9.24 — the numbering level rPr's `w:color` (hex 6 without
    *  `#`, lowercased). Colors the marker glyph only, never the paragraph's
    *  runs. Absent ⇒ the renderer falls back to
-   *  {@link DocParagraph.paragraphMarkColor} (§17.3.1.29 — the level rPr layers
-   *  over the paragraph mark's run properties) and finally to its
-   *  default ink. An explicit `w:val="auto"` is absent here + {@link colorAuto}. */
+   *  {@link DocParagraph.paragraphMarkColor} under compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback`, then to its default ink.
+   *  §17.3.1.29 defines the
+   *  mark properties but not that fallback. An explicit `w:val="auto"` is
+   *  absent here + {@link colorAuto}. */
   color?: string | null;
   /** ECMA-376 §17.3.2.6 / ST_HexColorAuto (§17.18.39) — true when the level
    *  rPr carries an EXPLICIT `w:color w:val="auto"`. Auto names no concrete
@@ -773,6 +782,9 @@ export interface AnchorHostMetrics {
 }
 
 export interface ShapeRun {
+  /** ECMA-376 §20.4.2.8 — true when the shape is hosted by `<wp:inline>` and
+   * therefore advances the paragraph pen like an inline drawing object. */
+  inline?: boolean;
   widthPt: number;
   heightPt: number;
   /** X offset in pt */
@@ -832,7 +844,7 @@ export interface ShapeRun {
   /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
   strokeDash?: string | null;
   /** Normalized line cap: `butt` | `round` | `square`. */
-  strokeCap?: CanvasLineCap | null;
+  strokeCap?: 'butt' | 'round' | 'square' | null;
   /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
   headEnd?: LineEnd | null;
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
@@ -947,6 +959,13 @@ export interface ShapeText {
   text: string;
   fontSizePt: number;
   color?: string | null;
+  /** Resolved paragraph-mark run color used by compatibility rule
+   *  `word-numbering-marker-paragraph-mark-fallback` when the numbering level
+   *  has no explicit color; kept separate from the first content run's
+   *  compatibility-level {@link ShapeText.color}. `null` means the parser
+   *  resolved automatic/default ink; `undefined` preserves the legacy contract
+   *  for hand-built values that did not provide paragraph-mark facts. */
+  paragraphMarkColor?: string | null;
   fontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;
@@ -1024,7 +1043,21 @@ export interface ShapeText {
 
 export type ShapeFill =
   | { fillType: 'solid'; color: string }
-  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string };
+  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string }
+  | {
+      /** ECMA-376 §20.1.8.14 picture fill on a DrawingML shape. */
+      fillType: 'image';
+      imagePath: string;
+      mimeType: string;
+      /** Microsoft 2016 SVG original retained beside the raster fallback. */
+      svgImagePath?: string;
+      /** ECMA-376 §20.1.8.55 source-image crop. */
+      srcRect?: { l: number; t: number; r: number; b: number };
+      fillRect?: FillRect;
+      tile?: TileInfo;
+      alpha?: number;
+      duotone?: Duotone;
+    };
 
 export interface GradientStop {
   /** 0.0–1.0 */
@@ -1167,7 +1200,8 @@ export interface DocxTextRun {
    *  width, not the gap between glyphs. Absent ⇒ 100%. */
   charScale?: number;
   /** ECMA-376 §17.3.2.24 `<w:position w:val>` — baseline raise (positive) /
-   *  lower (negative) in POINTS, without changing the font size or line box.
+   *  lower (negative) in POINTS, without changing the font size. The shifted
+   *  ink still participates in the surrounding line's visible extent.
    *  Absent ⇒ no shift. */
   position?: number;
   /** ECMA-376 §17.3.2.19 `<w:kern w:val>` — font-kerning threshold in POINTS
@@ -1534,6 +1568,39 @@ export type WorkerResponse =
 
 // ===== Public API types =====
 
+/** Information about a rendered text segment for overlays and read-only integrations. */
+export interface DocxTextRunInfo {
+  /** Canonical structural source of the owning paragraph. */
+  source?: Readonly<{
+    story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+    storyInstance: string;
+    path: readonly number[];
+  }>;
+  /** Authored `w14:paraId`, when present. */
+  paragraphId?: string;
+  text: string;
+  /** Left edge in canvas CSS px. */
+  x: number;
+  /** Top of line box in canvas CSS px. */
+  y: number;
+  /** Measured text width in CSS px. */
+  w: number;
+  /** Line height in CSS px. */
+  h: number;
+  /** Font size in CSS px. */
+  fontSize: number;
+  /** CSS `font` shorthand used for canvas drawing. */
+  font: string;
+  /** Uniform per-code-point pitch in CSS px for horizontal text. */
+  letterSpacingPx?: number;
+  /** CSS transform used by the overlay for vertical-page text. */
+  transform?: string;
+  /** Resolved external or internal hyperlink target. */
+  hyperlink?: HyperlinkTarget;
+  /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
+  eastAsianVert?: boolean;
+}
+
 export interface RenderPageOptions {
   /** Canvas CSS width in px; height is auto-computed from page aspect ratio.
    *  Applies per CALL — pages of different physical widths (per-section pgSz,
@@ -1547,11 +1614,7 @@ export interface RenderPageOptions {
    *  selection overlay. On a vertical (§17.6.20 tbRl) page `x`/`y` are the
    *  PHYSICAL top-left and `transform` is the CSS rotation the overlay span
    *  applies about its top-left; absent for horizontal pages. */
-  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string; transform?: string }) => void;
-  /** Default `true`. When false, ECMA-376 §17.13.5 track-changes runs render
-   *  in their normal style (no author colour, no underline / strikethrough)
-   *  — equivalent to Word's "Final / No Markup" view. */
-  showTrackChanges?: boolean;
+  onTextRun?: (run: DocxTextRunInfo) => void;
   /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant a
    *  DATE/TIME field formats through its `\@` date picture (§17.16.4.1). A `Date`
    *  or epoch-ms number. Default = the real current time at render. Set a fixed

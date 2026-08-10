@@ -36,10 +36,16 @@ function makeCtx(): CanvasRenderingContext2D {
   return ctx as unknown as CanvasRenderingContext2D;
 }
 
-function makeRecordingCanvas(): { canvas: HTMLCanvasElement; texts: string[] } {
+type TextDraw = Readonly<{ text: string; x: number; y: number }>;
+
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; texts: string[]; draws: TextDraw[] } {
   const texts: string[] = [];
+  const draws: TextDraw[] = [];
   const ctx = makeCtx() as CanvasRenderingContext2D & Record<string, unknown>;
-  ctx.fillText = (text: string) => { texts.push(text); };
+  ctx.fillText = (text: string, x: number, y: number) => {
+    texts.push(text);
+    draws.push({ text, x, y });
+  };
   Object.assign(ctx, {
     setTransform() {}, clearRect() {}, closePath() {}, rect() {}, clip() {},
     translate() {}, rotate() {}, scale() {}, setLineDash() {}, arc() {},
@@ -52,7 +58,7 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; texts: string[] } {
     height: 0,
     getContext: () => ctx,
   } as unknown as HTMLCanvasElement;
-  return { canvas, texts };
+  return { canvas, texts, draws };
 }
 
 // OffscreenCanvas polyfill (paginateWithHeaderFooterReserve builds its measure ctx
@@ -74,6 +80,15 @@ function pageFieldRun(instruction = 'PAGE', fontSize = 20): DocRun {
   const f: FieldRun = {
     fieldType: 'page', instruction, fallbackText: '?',
     bold: false, italic: false, underline: false, strikethrough: false,
+    fontSize, color: null, fontFamily: 'NotInMetrics', background: null, vertAlign: null,
+  } as unknown as FieldRun;
+  return { type: 'field', ...f } as DocRun;
+}
+
+function numPagesFieldRun(fontSize = 10): DocRun {
+  const f: FieldRun = {
+    fieldType: 'numPages', instruction: 'NUMPAGES', fallbackText: '8',
+    bold: true, italic: false, underline: false, strikethrough: false,
     fontSize, color: null, fontFamily: 'NotInMetrics', background: null, vertAlign: null,
   } as unknown as FieldRun;
   return { type: 'field', ...f } as DocRun;
@@ -306,5 +321,61 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
     // 6 lines, 5 per page ⇒ 2 pages: footers "1" and "2".
     expect(await footerTexts(doc, 0)).toContain('1');
     expect(await footerTexts(doc, 1)).toContain('2');
+  });
+
+  it('keeps recomputed PAGE and NUMPAGES on the authored run-position baseline', async () => {
+    // §17.16.18 complex-field delimiters split one displayed result across
+    // physical runs. The instruction run inherits w:position=6 (3pt) through
+    // the style hierarchy; the recomputed field must retain that effective
+    // §17.3.2.24 position instead of dropping to the unshifted baseline.
+    const positionedTypography = {
+      strike: false, doubleStrike: false, caps: false, smallCaps: false, colorAuto: false,
+      verticalAlign: { status: 'missing', raw: null, value: null },
+      positionPt: { status: 'valid', raw: '6', value: 3 },
+      snapToGrid: null, characterSpacingPt: null, characterScale: null,
+      kerningThresholdPt: null,
+      emphasis: { status: 'missing', raw: null, value: null },
+      languages: { eastAsia: null, bidi: null },
+      eastAsianLayout: {
+        vert: null, vertCompress: null, combine: null,
+        combineBrackets: { status: 'missing', raw: null, value: null },
+      },
+    } as const;
+    const positionedText = (text: string): DocRun => ({
+      ...textRun(text, 10), position: 3,
+    } as DocRun);
+    const positionedField = (field: DocRun): DocRun => ({
+      ...field, __typographyAcquisition: positionedTypography,
+    } as unknown as DocRun);
+    const footer: HeaderFooter = { body: [{
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
+      runs: [
+        positionedText('Page '),
+        positionedField(pageFieldRun('PAGE', 10)),
+        positionedText(' of '),
+        positionedField(numPagesFieldRun()),
+      ],
+      defaultFontSize: 10, defaultFontFamily: 'NotInMetrics', widowControl: false,
+    } as unknown as BodyElement] };
+    const section: SectionProps = {
+      ...GEOM(), titlePage: false, evenAndOddHeaders: false,
+    } as unknown as SectionProps;
+    const doc = {
+      section,
+      // 56 × 20pt lines at five lines/page ⇒ 12 pages, so the runtime NUMPAGES
+      // value is two digits even though its cached fallback is one digit.
+      body: Array.from({ length: 56 }, (_, index) => para(`L${index}`)),
+      headers: { default: null, first: null, even: null },
+      footers: { default: footer, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const { canvas, draws } = makeRecordingCanvas();
+
+    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1 });
+
+    const footerDraws = draws.filter(({ text }) => ['Page ', '1', '12'].includes(text));
+    expect(footerDraws.map(({ text }) => text)).toEqual(['Page ', '1', '12']);
+    expect(new Set(footerDraws.map(({ y }) => y)).size).toBe(1);
   });
 });

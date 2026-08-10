@@ -8,6 +8,17 @@ describe('fontWinLineHeightRatio', () => {
     expect(fontWinLineHeightRatio('Meiryo')).toBeCloseTo(3269 / 2048, 5);
     expect(fontWinLineHeightRatio('メイリオ')).toBeCloseTo(3269 / 2048, 5);
   });
+  it('uses the Meiryo UI hhea box with Word Far East leading on East Asian lines', () => {
+    // Meiryo UI 6.30: hhea ascent 2171, descent -430, lineGap 0. Word's
+    // useFELayout path applies the same 1.3 Far East leading used by the Yu
+    // faces. The resulting 1.6510em reproduces both measured grid boundaries:
+    // 10/11pt on an 18pt pitch and 12/13pt on a 20pt pitch.
+    const farEast = ((2171 + 430) * 1.3) / 2048;
+    expect(fontWinLineHeightRatio('Meiryo UI', true)).toBeCloseTo(farEast, 5);
+    expect(fontWinLineHeightRatio('meiryoui', true)).toBeCloseTo(farEast, 5);
+    // Non-Far-East callers retain the established general line profile.
+    expect(fontWinLineHeightRatio('Meiryo UI', false)).toBeCloseTo(3269 / 2048, 5);
+  });
   it('returns Sakkal Majalla win line-height ratio (1.3965 em, from OS/2)', () => {
     // unitsPerEm 2048, usWinAscent 1810 + usWinDescent 1050 = 2860 → 1.3965.
     expect(fontWinLineHeightRatio('Sakkal Majalla')).toBeCloseTo(2860 / 2048, 5);

@@ -1,6 +1,7 @@
 export type {
   ArrowEnd,
   Bullet,
+  EquationRun,
   Fill,
   FillRect,
   Glow,
@@ -36,7 +37,12 @@ export type {
   ChartRect,
   ChartSeries,
   ChartSeriesDataLabels,
+  ChartTrendline,
   ChartType,
+  ChartexBoxSeries,
+  ChartexBoxWhisker,
+  ChartexSunburst,
+  ChartexSunburstRow,
   LegendManualLayout,
   SecondaryValueAxis,
 } from './types/chart';
@@ -50,13 +56,13 @@ export type {
   OoxmlResourceMetricsCheckpoint,
   OoxmlResourcePolicySnapshot,
 } from './types/resource-metrics';
+export type { TextSelectionContextOptions, ViewerContextMenuEvent } from './selection-context';
 // Typed load-time error (PD4 seed): the `load()` factories throw this with a
 // stable `code` for container-level failures detected on the main thread.
 export {
   OoxmlError,
   OoxmlResourceLimitError,
   type OoxmlErrorCode,
-  type OoxmlErrorSource,
   type OoxmlErrorStage,
   type OoxmlFormat,
   type OoxmlResourceMetric,
@@ -137,6 +143,8 @@ export { hexToRgba, relativeLuma, autoContrastColor, resolveFill, applyStroke } 
 export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/preset';
 export {
   paintDrawingMLShape,
+  clipDrawingMLShape,
+  withDrawingMLShapeTransform,
   type DrawingMLShapeFill,
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,
@@ -252,6 +260,7 @@ export {
   renderPresetShape,
   hasPreset,
   buildPresetGeometryPath,
+  buildPresetGeometryFillPath,
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
@@ -329,7 +338,28 @@ export {
   type MathSvg,
   type MathRenderer,
 } from './math';
-export type { MathNode, MathFormula, MathStyle } from './types/math';
+export type {
+  MathAccent,
+  MathArray,
+  MathBar,
+  MathBorderBox,
+  MathBox,
+  MathDelimiter,
+  MathFormula,
+  MathFraction,
+  MathFunc,
+  MathGroup,
+  MathGroupChr,
+  MathLimit,
+  MathNary,
+  MathNode,
+  MathPhant,
+  MathRadical,
+  MathRun,
+  MathScript,
+  MathSPre,
+  MathStyle,
+} from './types/math';
 export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';
 export { isHTMLCanvas, defaultDpr } from './canvas/env';
 export { crispOffset } from './canvas/crisp';

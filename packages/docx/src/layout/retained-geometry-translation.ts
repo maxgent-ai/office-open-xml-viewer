@@ -60,7 +60,7 @@ function translateClip(clip: ClipPathData, delta: LayoutTranslation): ClipPathDa
 
 function translateDrawingCommand(command: DrawingPaintCommand, delta: LayoutTranslation): DrawingPaintCommand {
   if (command.kind === 'noop') return command;
-  if (command.kind === 'drawingml-shape') return {
+  if (command.kind === 'drawingml-shape' || command.kind === 'drawingml-image-fill') return {
     ...command,
     plan: { ...command.plan, rect: {
       ...command.plan.rect,
@@ -142,12 +142,18 @@ export function translatePlacement(
   if (placement.kind === 'drawing') return {
     ...placement, bounds: translateRect(placement.bounds, drawingTranslations?.get(placement.drawingId) ?? delta),
   };
-  if (placement.kind === 'tab' && placement.leaderGlyphs) return {
+  if (placement.kind === 'tab' && (placement.leaderGlyphs || placement.decorations)) return {
     ...placement,
     ...(placement.bounds ? { bounds: translateRect(placement.bounds, delta) } : {}),
-    leaderGlyphs: placement.leaderGlyphs.map((operation) => ({
+    ...(placement.leaderGlyphs ? { leaderGlyphs: placement.leaderGlyphs.map((operation) => ({
       ...operation, origin: translatePoint(operation.origin, delta),
-    })),
+    })) } : {}),
+    ...(placement.decorations ? { decorations: placement.decorations.map((decoration) => ({
+      ...decoration,
+      from: translatePoint(decoration.from, delta),
+      to: translatePoint(decoration.to, delta),
+      ...(decoration.path ? { path: decoration.path.map((point) => translatePoint(point, delta)) } : {}),
+    })) } : {}),
   };
   return placement.bounds ? { ...placement, bounds: translateRect(placement.bounds, delta) } : placement;
 }
@@ -162,6 +168,11 @@ export function translateLine(
     bounds: translateRect(line.bounds, delta),
     baselinePt: line.baselinePt + delta.yPt,
     placements: line.placements.map((placement) => translatePlacement(placement, delta, drawingTranslations)),
+    ...(line.barTabRules ? { barTabRules: line.barTabRules.map((rule) => ({
+      ...rule,
+      from: translatePoint(rule.from, delta),
+      to: translatePoint(rule.to, delta),
+    })) } : {}),
   };
 }
 
@@ -348,6 +359,12 @@ export function translateTableLayout(table: TableLayout, delta: LayoutTranslatio
     flowBounds: translateRect(table.flowBounds, delta), inkBounds: translateRect(table.inkBounds, delta),
     ...(table.clipBounds ? { clipBounds: translateRect(table.clipBounds, delta) } : {}),
     borders: table.borders.map((border) => translateBorder(border, delta)),
+    ...(table.compoundBorderFrames ? {
+      compoundBorderFrames: table.compoundBorderFrames.map((frame) => ({
+        ...frame,
+        bounds: translateRect(frame.bounds, delta),
+      })),
+    } : {}),
     rows: table.rows.map((row) => ({
       ...row,
       flowBounds: translateRect(row.flowBounds, delta), inkBounds: translateRect(row.inkBounds, delta),

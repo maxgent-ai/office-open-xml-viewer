@@ -117,9 +117,9 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
   'docx vertical line-head kinsoku (§17.6.20 + §17.15.1.58)',
   () => {
     it('never places closing punctuation at a column head', async () => {
-      const { parseDocx } = docxMod as { parseDocx: (b: Uint8Array) => Any };
+      const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (b: Uint8Array) => Any };
       const { renderDocumentToCanvas } = rendererMod!;
-      const doc = parseDocx(verticalKinsokuDocx());
+      const doc = await materializeDocxDocument(verticalKinsokuDocx());
       const canvas = new Canvas(Math.round(doc.section.pageWidth), Math.round(doc.section.pageHeight));
       const runs: Any[] = [];
       const rImg = installImageBitmapShim(factory);

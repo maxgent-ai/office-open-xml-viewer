@@ -19,8 +19,10 @@ describe('public error documentation', () => {
 
   it('guides a first-time integrator from delivery choice to a safe user response', () => {
     expect(errorPage).toContain('Start with Promise rejection');
-    expect(errorPage).toContain('A failed initial load calls the callback and <code>load()</code> resolves.');
+    expect(errorPage).toContain('the same failure is never delivered twice');
     expect(errorPage).toContain('Keep <code>onError</code> non-throwing.');
+    expect(errorPage).toContain('<code>PptxPresentation.presentSlide()</code>');
+    expect(errorPage).toContain('<code>PresentSlideOptions.onError</code>');
     expect(errorPage).toContain('export function previewErrorMessage(error: unknown): string');
     expect(errorPage).toContain('If <code>configurable</code> is true');
     expect(errorPage).toContain('If <code>configurable</code> is false');
@@ -30,8 +32,9 @@ describe('public error documentation', () => {
 
   it('makes the callback-versus-Promise behavior explicit in the README', () => {
     expect(readme).toContain('## Error handling');
-    expect(readme).toContain('With `onError`, that failure is delivered to the callback and');
-    expect(readme).toContain('`viewer.load()` resolves');
+    expect(readme).toContain('Viewer APIs report failures from awaitable operations by rejecting');
+    expect(readme).toContain('or not the Viewer has an `onError(error)` callback');
+    expect(readme).toContain('through both channels.');
     expect(readme).toContain('messages are diagnostic text, not a programmatic API');
   });
 });

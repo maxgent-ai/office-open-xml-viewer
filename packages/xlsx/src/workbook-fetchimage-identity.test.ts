@@ -15,9 +15,8 @@ describe('XlsxWorkbook.renderViewport() fetchImage identity', () => {
    * counter, and destroy-time cache drops. A per-call closure would split that
    * namespace and leave its decoded images alive after destroy().
    */
-  it('uses the instance fetchImage closure even when the caller supplies one', async () => {
+  it('uses the instance fetchImage closure owned by the workbook', async () => {
     const stableClosure = vi.fn(async () => new Blob());
-    const callerClosure = vi.fn(async () => new Blob());
     const minimalWorksheet = {} as Worksheet;
     const instance = Object.create(XlsxWorkbook.prototype) as Record<string, unknown>;
     instance._mode = 'main';
@@ -30,11 +29,9 @@ describe('XlsxWorkbook.renderViewport() fetchImage identity', () => {
       {} as HTMLCanvasElement,
       0,
       { row: 1, col: 1, rows: 1, cols: 1 },
-      { fetchImage: callerClosure },
     );
 
     const opts = renderWorksheetViewport.mock.calls[0]?.[3] as RenderViewportOptions;
     expect(opts.fetchImage).toBe(stableClosure);
-    expect(opts.fetchImage).not.toBe(callerClosure);
   });
 });

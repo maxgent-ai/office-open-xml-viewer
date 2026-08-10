@@ -37,6 +37,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The cargo-fuzz harness is an intentionally independent workspace, so
+      # the root workspace checks above do not format, lint, or compile it.
+      - name: Fuzz target format check
+        run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+
+      # Keep every target buildable and its separate lockfile synchronized on
+      # ordinary PRs, before the long scheduled fuzz run discovers API drift.
+      - name: Fuzz target clippy
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --bins --locked -- -D warnings
+
       - name: Test
         run: cargo test --workspace
 

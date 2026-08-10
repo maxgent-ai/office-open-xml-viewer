@@ -2,6 +2,15 @@ import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
+function setSelectionData(element: HTMLElement, key: string, value?: string): void {
+  if (element.dataset) {
+    if (value === undefined) delete element.dataset[key];
+    else element.dataset[key] = value;
+  } else if (value !== undefined) {
+    element.setAttribute?.(`data-${key.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`)}`, value);
+  }
+}
+
 /**
  * Build the transparent text-selection overlay for a rendered docx page: one
  * absolutely-positioned, color-transparent `<span>` per {@link DocxTextRunInfo}
@@ -54,11 +63,23 @@ export function buildDocxTextLayer(
   cssHeight: number,
   onHyperlinkClick?: (target: HyperlinkTarget) => void,
   measureForFont?: (font: string) => (s: string) => number,
+  pageIndex?: number,
 ): void {
   layer.innerHTML = '';
+  setSelectionData(layer, 'ooxmlSelectionSurface', 'docx');
+  setSelectionData(layer, 'pageIndex', pageIndex === undefined ? undefined : String(pageIndex));
 
-  for (const run of runs) {
-    const span = document.createElement('span');
+  const ownerDocument = layer.ownerDocument ?? document;
+  for (const [runIndex, run] of runs.entries()) {
+    const span = ownerDocument.createElement('span');
+    setSelectionData(span, 'ooxmlSelectionRun', 'docx');
+    setSelectionData(span, 'runIndex', String(runIndex));
+    if (run.paragraphId !== undefined) setSelectionData(span, 'paragraphId', run.paragraphId);
+    if (run.source !== undefined) {
+      setSelectionData(span, 'sourceStory', run.source.story);
+      setSelectionData(span, 'sourceStoryInstance', run.source.storyInstance);
+      setSelectionData(span, 'sourcePath', JSON.stringify(run.source.path));
+    }
     span.textContent = run.text;
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
@@ -110,7 +131,13 @@ export function buildDocxTextLayer(
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
     if (link && onHyperlinkClick) {
       span.title = link.kind === 'external' ? link.url : link.ref;
-      span.addEventListener('click', () => onHyperlinkClick(link));
+      span.addEventListener('click', (event) => {
+        // Hyperlink activation owns this click. The Viewer-level element-context
+        // listener observes defaultPrevented and must not focus a drawing under
+        // link text in the same gesture.
+        event.preventDefault();
+        onHyperlinkClick(link);
+      });
     }
     layer.appendChild(span);
   }

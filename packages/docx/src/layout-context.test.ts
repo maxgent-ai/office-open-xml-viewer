@@ -8,6 +8,7 @@ import type {
 import {
   enterTableCellStoryContext,
   resolveDocumentLayoutSettings,
+  paragraphGridRightAdjustmentPt,
   resolveParagraphLayoutContext,
   resolveRunLayoutContext,
   resolveSectionLayoutContext,
@@ -324,6 +325,132 @@ describe('layout context resolvers', () => {
     expect(cellWithCompat.lineGrid.active).toBe(true);
   });
 
+  it('aligns the paragraph right edge to the active character-grid pitch', () => {
+    const model = documentModel();
+    const settings = resolveDocumentLayoutSettings(model, { normalStyleFontSizePt: 9 });
+    const charGrid = resolveSectionLayoutContext(settings, section({
+      docGridType: 'linesAndChars',
+      docGridLinePitch: 20,
+      docGridCharSpace: 0,
+    }));
+    const context = resolveParagraphLayoutContext(
+      settings,
+      charGrid,
+      bodyStory,
+      paragraph(),
+    );
+
+    expect(settings.normalStyleFontSizePt).toBe(9);
+    expect(context.rightIndentGrid).toEqual({
+      pitchPt: 9,
+      paragraphAllowsAdjustment: true,
+    });
+    expect(paragraphGridRightAdjustmentPt(context, 481.9)).toBeCloseTo(4.9, 9);
+
+    const optedOut = resolveParagraphLayoutContext(
+      settings,
+      charGrid,
+      bodyStory,
+      paragraph({ adjustRightInd: false }),
+    );
+    expect(optedOut.rightIndentGrid).toEqual({
+      pitchPt: 9,
+      paragraphAllowsAdjustment: false,
+    });
+    expect(paragraphGridRightAdjustmentPt(optedOut, 481.9)).toBe(0);
+
+    const lineOnly = resolveParagraphLayoutContext(
+      settings,
+      resolveSectionLayoutContext(settings, section({
+        docGridType: 'lines',
+        docGridLinePitch: 20,
+      })),
+      bodyStory,
+      paragraph(),
+    );
+    expect(lineOnly.rightIndentGrid).toEqual({
+      pitchPt: null,
+      paragraphAllowsAdjustment: true,
+    });
+
+    const snapToChars = resolveParagraphLayoutContext(
+      settings,
+      resolveSectionLayoutContext(settings, section({
+        docGridType: 'snapToChars',
+        docGridCharSpace: 0,
+      })),
+      bodyStory,
+      paragraph(),
+    );
+    expect(snapToChars.characterGrid).toEqual({
+      active: true,
+      kind: 'snapToChars',
+      deltaPt: 0,
+      pitchPt: 9,
+    });
+    expect(snapToChars.rightIndentGrid).toEqual({
+      pitchPt: null,
+      paragraphAllowsAdjustment: true,
+    });
+
+    const tableCell = resolveParagraphLayoutContext(
+      settings,
+      charGrid,
+      cellStory,
+      paragraph(),
+    );
+    expect(tableCell.rightIndentGrid).toEqual({
+      pitchPt: 9,
+      paragraphAllowsAdjustment: false,
+    });
+    expect(paragraphGridRightAdjustmentPt(tableCell, 481.9)).toBe(0);
+  });
+
+  it('adds the hanging indent as an implicit leading tab without hiding a bar rule', () => {
+    const settings = resolveDocumentLayoutSettings(documentModel());
+    const context = resolveParagraphLayoutContext(
+      settings,
+      resolveSectionLayoutContext(settings, section()),
+      bodyStory,
+      paragraph({
+        indentLeft: 72,
+        indentFirst: -18,
+        tabStops: [
+          { pos: 72, alignment: 'bar', leader: 'none' },
+          { pos: 144, alignment: 'left', leader: 'none' },
+        ],
+      }),
+    );
+
+    expect(context.tabStops).toEqual([
+      { pos: 72, alignment: 'left', leader: 'none' },
+      { pos: 72, alignment: 'bar', leader: 'none' },
+      { pos: 144, alignment: 'left', leader: 'none' },
+    ]);
+  });
+
+  it('lets an authored alignment replace the implicit hanging stop at the same position', () => {
+    const settings = resolveDocumentLayoutSettings(documentModel());
+    const context = resolveParagraphLayoutContext(
+      settings,
+      resolveSectionLayoutContext(settings, section()),
+      bodyStory,
+      paragraph({
+        indentLeft: 72,
+        indentFirst: -18,
+        tabStops: [
+          { pos: 72, alignment: 'center', leader: 'none' },
+          { pos: 144, alignment: 'left', leader: 'none' },
+        ],
+      }),
+    );
+
+    expect(context.tabStops).toEqual([
+      { pos: 72, alignment: 'center', leader: 'none' },
+      { pos: 144, alignment: 'left', leader: 'none' },
+    ]);
+  });
+
   it('lets a run opt out of character-grid spacing without changing line policy', () => {
     const settings = resolveDocumentLayoutSettings(documentModel());
     const sectionContext = resolveSectionLayoutContext(
@@ -345,6 +472,6 @@ describe('layout context resolvers', () => {
     expect(resolveRunLayoutContext(
       paragraphContext,
       textRun({ snapToGrid: false }),
-    ).characterGrid).toEqual({ active: false, deltaPt: 0 });
+    ).characterGrid).toEqual({ active: false, kind: null, pitchPt: null, deltaPt: 0 });
   });
 });

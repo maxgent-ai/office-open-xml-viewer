@@ -68,7 +68,12 @@ function documentModel(): DocxDocumentModel {
     }, {
       type: 'shape', widthPt: 50, heightPt: 30, anchorXPt: 0, anchorYPt: 0,
       anchorXFromMargin: false, anchorYFromPara: false, zOrder: 0, subpaths: [],
-      fill: null, stroke: null, textBlocks: [{
+      fill: {
+        fillType: 'image', imagePath: 'word/media/shape-fill.png', mimeType: 'image/png',
+        svgImagePath: 'word/media/shape-fill.svg',
+        srcRect: { l: .2, t: 0, r: .1, b: .05 },
+        alpha: .6, duotone: { clr1: '112233', clr2: 'DDEEFF' },
+      }, stroke: null, textBlocks: [{
         text: '', fontSizePt: 10, alignment: 'left', imagePath: 'word/media/textbox.png',
         mimeType: 'image/png', imageWidthPt: 9, imageHeightPt: 5,
       }],
@@ -87,6 +92,9 @@ describe('production paint resources', () => {
     const textBoxKey = imageResourceKey({
       story: 'textbox', storyInstance: 'body:body:0.3', path: [0, 0],
     }, 'word/media/textbox.png');
+    const shapeFillKey = imageResourceKey(
+      { ...body, path: [0, 3] }, 'word/media/shape-fill.png',
+    );
     const headerImageKey = imageResourceKey({
       story: 'header', storyInstance: 'default', path: [0, 0],
     }, 'word/media/header.png');
@@ -95,7 +103,7 @@ describe('production paint resources', () => {
     }, 'word/media/bullet.gif');
 
     expect(registry.keys).toEqual([
-      bulletKey, headerBulletKey, headerImageKey, imageKey, textBoxKey, chartKey, mathKey,
+      bulletKey, headerBulletKey, headerImageKey, imageKey, shapeFillKey, textBoxKey, chartKey, mathKey,
     ].sort((left, right) => left.localeCompare(right)));
     expect(registry.resolve(imageKey, 'image')).toMatchObject({
       partPath: 'word/media/image.png', svgImagePath: 'word/media/image.svg',
@@ -105,6 +113,13 @@ describe('production paint resources', () => {
       duotone: { clr1: '000000', clr2: 'FFFFFF' },
     });
     expect(registry.resolve(chartKey, 'chart').model.chartType).toBe('line');
+    expect(registry.resolve(shapeFillKey, 'image')).toMatchObject({
+      partPath: 'word/media/shape-fill.png',
+      intrinsicSize: { widthPt: 50, heightPt: 30 },
+      svgImagePath: 'word/media/shape-fill.svg',
+      srcRect: { l: .2, t: 0, r: .1, b: .05 },
+      alpha: .6, duotone: { clr1: '112233', clr2: 'DDEEFF' },
+    });
     expect(registry.resolve(bulletKey, 'picture-bullet')).toMatchObject({
       partPath: 'word/media/bullet.gif', intrinsicSize: { widthPt: 6, heightPt: 7 },
     });

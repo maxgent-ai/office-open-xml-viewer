@@ -138,7 +138,12 @@ describe('§17.3.2.35 run charSpacing survives into the paint-scale advance', ()
     const segs = painted[0].segments.filter(isText);
 
     const run2StartX = segs[0].measuredWidth; // run1 is first on the line
-    const run1PaintedRightEdge = segAdvanceWidth(segs[0], 4 * (12 * scale * 0.5), 0, scale);
+    const run1PaintedRightEdge = segAdvanceWidth(
+      segs[0],
+      4 * (12 * scale * 0.5),
+      undefined,
+      scale,
+    );
     // No overlap: run2 begins at or after run1's painted right edge.
     expect(run2StartX).toBeGreaterThanOrEqual(run1PaintedRightEdge - 1e-6);
   });

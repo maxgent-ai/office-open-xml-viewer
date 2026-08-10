@@ -1,7 +1,12 @@
-import { test } from '@playwright/test';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { test, expect } from '@playwright/test';
+import { mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
+import {
+  captureOrComparePrivateItem,
+  preparePrivateCorpus,
+  verifyPrivateItemManifest,
+} from '../../../../tests/visual/private-corpus.mjs';
 
 // ── Test targets ──────────────────────────────────────────────────────────────
 // Each entry needs:
@@ -134,6 +139,9 @@ test.describe('xlsx visual regression', () => {
         const targetRoot = RUN_MODE === 'regression' ? 'baseline' : 'references';
         const refPath = `tests/visual/${targetRoot}/${name}/sheet-${sheetNum}.png`;
         if (!existsSync(refPath)) {
+          if (RUN_MODE === 'regression') {
+            throw new Error(`missing regression baseline: ${refPath}`);
+          }
           test.skip(true, `no ${targetRoot} image for ${name} sheet ${sheetNum}`);
         }
         const refBuf = readFileSync(refPath);
@@ -143,14 +151,20 @@ test.describe('xlsx visual regression', () => {
         const { width: refW, height: refH } = refPng;
 
         if (actualPng.width !== refW || actualPng.height !== refH) {
+          if (RUN_MODE === 'regression') {
+            throw new Error(
+              `${name} sheet ${sheetNum}: regression dimensions changed from ` +
+              `${refW}×${refH} to ${actualPng.width}×${actualPng.height}`,
+            );
+          }
           console.warn(
             `  ${name} sheet ${sheetNum}: size mismatch ` +
             `actual=${actualPng.width}×${actualPng.height} ref=${refW}×${refH}`
           );
         }
 
-        const w = Math.min(actualPng.width, refW);
-        const h = Math.min(actualPng.height, refH);
+        const w = Math.max(actualPng.width, refW);
+        const h = Math.max(actualPng.height, refH);
 
         const pad = (png: ReturnType<typeof PNG.sync.read>, tw: number, th: number) => {
           if (png.width === tw && png.height === th) return png;
@@ -215,5 +229,68 @@ test.describe('xlsx visual regression', () => {
         }
       });
     }
+  }
+});
+
+const XLSX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
+  ? readdirSync('public/private')
+      .filter((file) => file.endsWith('.xlsx') && !file.startsWith('~$'))
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+  : [];
+
+if (process.env.VRT_PRIVATE_CORPUS === '1') {
+  preparePrivateCorpus({ format: 'xlsx', files: XLSX_PRIVATE_CORPUS, snapshot: SNAPSHOT });
+}
+
+test.describe('private corpus self regression', () => {
+  for (const file of XLSX_PRIVATE_CORPUS) {
+    test(file, async ({ page }) => {
+      test.setTimeout(600_000);
+      const stem = file.slice(0, -'.xlsx'.length);
+      const openSheet = async (sheetIndex: number) => {
+        await page.goto(
+          `/tests/visual/fixture.html?file=${encodeURIComponent(`private/${file}`)}`
+          + `&sheet=${sheetIndex}`,
+        );
+        await page.waitForFunction(
+          () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+          { timeout: 120_000 },
+        );
+        const status = await page.evaluate(() => document.body.dataset.status);
+        if (status === 'error') {
+          const message = await page.evaluate(() => document.body.dataset.errorMessage ?? '');
+          throw new Error(`${stem} sheet ${sheetIndex + 1}: ${message}`);
+        }
+        await page.waitForTimeout(200);
+      };
+
+      await openSheet(0);
+      const sheetCount = Number(await page.evaluate(() => document.body.dataset.sheetCount));
+      expect(sheetCount, `${stem} must report its complete sheet count`).toBeGreaterThan(0);
+      const differences: string[] = [];
+      for (let sheetIndex = 0; sheetIndex < sheetCount; sheetIndex++) {
+        if (sheetIndex > 0) {
+          await page.evaluate(async (index) => {
+            const render = (globalThis as unknown as {
+              renderXlsxVrtSheet(sheetIndex: number): Promise<void>;
+            }).renderXlsxVrtSheet;
+            await render(index);
+          }, sheetIndex);
+          await page.waitForTimeout(200);
+        }
+        const dataUrl = await page.evaluate(() =>
+          (document.querySelector('canvas') as HTMLCanvasElement | null)?.toDataURL('image/png'));
+        if (!dataUrl) throw new Error(`${stem} sheet ${sheetIndex + 1}: no canvas`);
+        const actual = Buffer.from(dataUrl.split(',')[1], 'base64');
+        const difference = captureOrComparePrivateItem({
+          stem, itemKind: 'sheet', itemIndex: sheetIndex, actual, snapshot: SNAPSHOT,
+        });
+        if (difference) differences.push(difference);
+      }
+      verifyPrivateItemManifest({
+        format: 'xlsx', stem, itemKind: 'sheet', itemCount: sheetCount, snapshot: SNAPSHOT,
+      });
+      expect(differences, differences.join('\n')).toEqual([]);
+    });
   }
 });

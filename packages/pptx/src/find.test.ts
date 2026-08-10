@@ -56,6 +56,28 @@ describe('PptxFindController.find', () => {
 });
 
 describe('PptxFindController cursor + highlights', () => {
+  it('suppresses a rejected collection after it becomes stale', async () => {
+    let rejectRuns!: (reason: Error) => void;
+    const c = new PptxFindController(
+      () => 1,
+      () => new Promise((_resolve, reject) => { rejectRuns = reject; }),
+    );
+    const pending = c.find('a');
+
+    c.invalidate();
+    rejectRuns(new Error('old presentation closed'));
+
+    await expect(pending).resolves.toEqual([]);
+  });
+
+  it('propagates a rejected collection for the current query', async () => {
+    const c = new PptxFindController(
+      () => 1,
+      () => Promise.reject(new Error('current presentation failed')),
+    );
+    await expect(c.find('a')).rejects.toThrow('current presentation failed');
+  });
+
   it('cycles the active match with wrap-around across slides', async () => {
     const c = controllerFor([[run('x')], [run('x')]]);
     await c.find('x');

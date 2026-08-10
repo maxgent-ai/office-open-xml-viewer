@@ -45,6 +45,7 @@ interface FillCall {
 function makeRecordingCanvas(options: Readonly<{
   followingGlyphLeftInsetPx?: number;
   closingPunctuationPairKerningPx?: number;
+  spaceAdvancePx?: number;
 }> = {}): { canvas: HTMLCanvasElement; fills: FillCall[] } {
   let font = `${FONT_PX}px serif`;
   let letterSpacing = '0px';
@@ -63,7 +64,10 @@ function makeRecordingCanvas(options: Readonly<{
     measureText: (s: string) => {
       const p = px();
       const pairCount = s.match(/。）/gu)?.length ?? 0;
-      const w = [...s].length * p
+      const w = [...s].reduce(
+        (sum, character) => sum + (character === ' ' ? options.spaceAdvancePx ?? p : p),
+        0,
+      )
         - pairCount * (options.closingPunctuationPairKerningPx ?? 0);
       return {
         width: w,
@@ -243,6 +247,29 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(followingInkLeftPx).toBeGreaterThanOrEqual(closingInkRightPx);
   });
 
+  it('preserves authored run spacing instead of layering punctuation compression over it', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const authoredText = '独自文面の配置を確認します）。';
+    const model = {
+      ...doc([para([
+        textRun(authoredText, { charSpacing: 0.4 }),
+        textRun('次'),
+      ])], section()),
+      settings: {
+        characterSpacingControl: 'compressPunctuation',
+      },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const authored = drawOf(fills, authoredText);
+    const following = drawOf(fills, '次');
+    expect(authored.letterSpacing).toBe('0.4px');
+    expect(fills.some(({ text }) => text === '）')).toBe(false);
+    expect(fills.some(({ text }) => text === '。')).toBe(false);
+    expect(following.x - authored.x).toBeCloseTo([...authoredText].length * (FONT_PX + 0.4), 5);
+  });
+
   it('does not collapse middle-punctuation advance into the following glyph', async () => {
     const { canvas, fills } = makeRecordingCanvas();
     const model = {
@@ -306,6 +333,34 @@ describe('run charSpacing/charScale reach the painted glyphs on every branch', (
     expect(r1.letterSpacing).toBe('3px');
     expect(r2.letterSpacing).toBe('1px');
     expect(r2.x + r2.translateX - (r1.x + r1.translateX)).toBeCloseTo(4 * FONT_PX + 4 * 3, 5);
+  });
+
+  it('paints balanced SBCS grid pitch and advances across balanced authored spaces', async () => {
+    const { canvas, fills } = makeRecordingCanvas({ spaceAdvancePx: 6 });
+    const model = {
+      ...doc([para([
+        textRun('AB  '),
+        textRun('Target'),
+        textRun('日本', { fontFamilyEastAsia: 'NotInMetrics' }),
+      ])], section({
+        docGridType: 'linesAndChars',
+        docGridLinePitch: 24,
+        docGridCharSpace: -4096,
+      })),
+      settings: { balanceSingleByteDoubleByteWidth: true },
+    } as DocxDocumentModel;
+
+    await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 600 });
+
+    const spaced = drawOf(fills, 'AB  ');
+    const target = drawOf(fills, 'Target');
+    const cjk = drawOf(fills, '日本');
+    // Word's §17.15.3.3 projection applies half of the -1pt grid delta to
+    // SBCS and the full delta to DBCS. The two authored spaces each occupy
+    // half of the selected 20pt East-Asian cell: 2×20 + 2×10 - 4×0.5 = 58.
+    expect(spaced.letterSpacing).toBe('-0.5px');
+    expect(target.x + target.translateX - (spaced.x + spaced.translateX)).toBeCloseTo(58, 5);
+    expect(cjk.letterSpacing).toBe('-1px');
   });
 
   it('justify path: charSpacing adds to the distributed pitch at the draw', async () => {

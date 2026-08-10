@@ -99,6 +99,20 @@ interface WinMetric {
 
 /** A known font's design line metrics. Keyed by a normalized (lowercased) name test. */
 const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinMetric]> = [
+  // Meiryo UI 6.30 — hhea ascent 2171, descent -430, lineGap 0, unitsPerEm
+  // 2048. Word's Far East layout path uses 1.3 × that hhea glyph box:
+  // (2171 + 430) × 1.3 / 2048 = 1.651025em. A synthetic Word-PDF matrix
+  // discriminates both boundaries: 10pt is one cell and 11pt is two cells on
+  // an 18pt grid; 12pt is one cell and 13pt is two cells on a 20pt grid.
+  //
+  // Keep this EA-only and before the established general Meiryo profile below.
+  // Non-Far-East Meiryo UI layout retains that profile; only callers explicitly
+  // entering the East Asian metric path see the hhea × 1.3 value.
+  [
+    (n) => n.includes('meiryo ui') || n.includes('meiryoui')
+      || (n.includes('メイリオ') && n.includes('ui')),
+    { asc: (2171 * 1.3) / 2048, desc: (430 * 1.3) / 2048, eaOnly: true },
+  ],
   // Meiryo / Meiryo UI — unitsPerEm 2048, usWinAscent 2210, usWinDescent 1059
   // (OS/2 table; USE_TYPO_METRICS fsSelection bit 7 is clear, so Word uses the
   // win metric for `lineRule="auto"` single spacing, §17.3.1.33). The single-

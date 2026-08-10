@@ -1,5 +1,12 @@
 import { computeVisibleRange, openExternalHyperlink, PT_TO_PX, zoomStepScale, anchoredZoomOffset, nextZoomStep, prevZoomStep, fitScale, type VisibleRange } from '@silurus/ooxml-core';
-import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
+import {
+  createCanvasElementOutlineLayer,
+  renderCanvasElementOutline,
+  resolveCanvasViewerMode,
+  StaticCanvasRenderDispatcher,
+  TerminalResourceOwner,
+} from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
 import type { DocxTextRunInfo } from './renderer';
@@ -7,6 +14,16 @@ import { buildDocxTextLayer } from './text-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { buildDocxHighlightLayer } from './find-highlight-layer';
 import type { RenderPageOptions } from './types';
+import {
+  readDocxTextSelectionContext,
+  type DocxElementContext,
+  type DocxSelectionContext,
+  type DocxSelectionContextOptions,
+} from './selection-context';
+import {
+  limitDocxElementContext,
+  MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
+} from './element-context';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -30,6 +47,10 @@ const ZOOM_SETTLE_MS = 150;
  * {@link DocxScrollViewerOptions.pageShadow}.
  */
 const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
+const borrowedDocumentOption = Symbol('DocxScrollViewer.borrowedDocument');
+type InternalDocxScrollViewerOptions = DocxScrollViewerOptions & {
+  [borrowedDocumentOption]?: DocxDocument;
+};
 
 /**
  * Options for {@link DocxScrollViewer}. Extends `RenderPageOptions` (per-page
@@ -74,6 +95,19 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  shipped back beside the page bitmap, so the overlay is populated identically
    *  to main mode (no more empty overlay / one-time warning). */
   enableTextSelection?: boolean;
+  /**
+   * Enable read-only selection of mounted pictures, charts, and shapes. The
+   * selected object exposes element context and receives a non-editable outline.
+   */
+  enableElementSelection?: boolean;
+  /** Emits bounded, detached text or element context suitable for read-only AI/MCP use. */
+  onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
+  /**
+   * Called synchronously for a browser `contextmenu` event. The original event
+   * can suppress the native menu; `getContext()` resolves the text or element
+   * context established at the event target.
+   */
+  onContextMenu?: (event: ViewerContextMenuEvent<DocxSelectionContext>) => void;
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /** Minimum zoom scale (px-per-pt multiplier floor). Default 0.1. */
@@ -113,13 +147,6 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *   here rather than two competing options.
    */
   pageShadow?: string | false;
-  /**
-   * Inject an already-loaded engine to share one parse across panes (design §14).
-   * When set: `load()` is unsupported (throws), the engine's own `mode` wins (an
-   * explicitly conflicting `opts.mode` throws at construction, design §11), and
-   * `destroy()` does NOT destroy this engine (the caller owns its lifecycle).
-   */
-  document?: DocxDocument;
   /** Fires when the top-most visible page changes. `topIndex` from
    *  `computeVisibleRange` (the first page intersecting the viewport top,
    *  EXCLUDING overscan). */
@@ -143,11 +170,12 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  `onHyperlinkClick` is never called. Links still render exactly as authored
    *  but are inert, like plain text. */
   enableHyperlinks?: boolean;
-  /** Error callback. When set, `load()` invokes it and resolves (otherwise the
-   *  error is rethrown — shared viewer error contract). It ALSO fires for async
-   *  per-slot render failures (both main `renderPage` and worker
-   *  `renderPageToBitmap` rejections); a failed page is left blank rather than
-   *  crashing the loop. Without an `onError`, render failures are logged via
+  /** Receives asynchronous Viewer-managed failures that cannot be observed by
+   *  awaiting the method that started them. `load()` failures always reject and
+   *  are not also delivered here. Virtualized per-slot render failures (both
+   *  main `renderPage` and worker `renderPageToBitmap` rejections) invoke it; a
+   *  failed page is left blank rather than crashing the loop. Without an
+   *  `onError`, render failures are logged via
    *  `console.error` so they are never fully silent. Stable cases can be
    *  narrowed with `OoxmlError`, `OoxmlResourceLimitError`, or
    *  `OoxmlDecodedImageLimitError` re-exported by this package. Other failures
@@ -165,6 +193,7 @@ interface PageSlot {
   canvas: HTMLCanvasElement;
   textLayer: HTMLDivElement | null;
   highlightLayer: HTMLDivElement;
+  elementLayer: HTMLDivElement | null;
   /** page index this slot is currently rendering / has rendered, or -1 when free. */
   renderedPage: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -173,25 +202,20 @@ interface PageSlot {
    *  scales the text overlay by `newScale / renderedScale`; the debounced settle
    *  re-render then repaints at the new scale and updates this to match. */
   renderedScale: number;
-  /** worker-mode: a transient hold on a just-received ImageBitmap, set only
-   *  between receipt from the worker and its `transferFromImageBitmap` (which
-   *  consumes it, after which we null the field). Its purpose is the throw path:
-   *  if the transfer throws, `destroy()`/`_recycleSlot` can still find and
-   *  `.close()` the bitmap. Normally null once transfer completes. */
-  bitmap: ImageBitmap | null;
-  /** bitmaprenderer ctx (worker mode), grabbed once per canvas. */
-  bitmapCtx: ImageBitmapRenderingContext | null;
+  /** Shared single-canvas generation and worker-bitmap ownership primitive. */
+  dispatcher: StaticCanvasRenderDispatcher;
 }
 
 export class DocxScrollViewer implements ZoomableViewer {
-  private _doc: DocxDocument | null = null;
-  private readonly _injected: boolean;
+  private readonly _documentOwner: TerminalResourceOwner<DocxDocument>;
+  private get _doc(): DocxDocument | null { return this._documentOwner.current; }
+  private readonly _borrowed: boolean;
   private readonly _opts: DocxScrollViewerOptions;
   private readonly _container: HTMLElement;
   private readonly _wrapper: HTMLDivElement;
   private readonly _scrollHost: HTMLDivElement;
   private readonly _spacer: HTMLDivElement;
-  /** Resolved render mode. When an engine is injected the engine's own `mode`
+  /** Resolved render mode. When an engine is borrowed the engine's own `mode`
    *  is authoritative (design §11 — no silent mis-pathing / no probing); an
    *  explicitly conflicting `opts.mode` is rejected at construction. When self-
    *  loading, `opts.mode` decides and `load()` passes it to `DocxDocument.load`. */
@@ -226,6 +250,12 @@ export class DocxScrollViewer implements ZoomableViewer {
   private _lastRange: VisibleRange | null = null;
   private _lastTopIndex = -1;
   private _scrollListener: (() => void) | null = null;
+  private _selectionChangeListener: (() => void) | null = null;
+  private _selectionContextKey = 'null';
+  private _elementClickListener: ((event: MouseEvent) => void) | null = null;
+  private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private _elementContext: DocxElementContext | null = null;
+  private _elementHitGeneration = 0;
   /** Set by `destroy()`. Async render callbacks (main + worker) check it before
    *  reporting an error so a rejection that lands after teardown is swallowed
    *  rather than surfaced to a `onError` on a dead viewer. */
@@ -234,23 +264,6 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  clamp (#836). Lazily created; `null` when canvas metrics are unavailable
    *  (headless), in which case the overlay degrades to the un-clamped span. */
   private _measureCtx: CanvasRenderingContext2D | null | undefined;
-  /**
-   * Concurrent-load latch (generation token). Every self-loading `load()`
-   * increments this and captures the value; after its engine finishes loading it
-   * re-checks the live value and BAILS (destroying its own just-loaded engine) if
-   * a newer `load()` has since started. Without it, two overlapping
-   * `load(A)`/`load(B)` calls race the WASM parse / worker init, and whichever
-   * RESOLVES last wins the swap — even the stale `load(A)` resolving after
-   * `load(B)`; the loser's freshly created engine (never installed, or installed
-   * then overwritten) then leaks its worker + pinned WASM allocation. The latch
-   * composes with SC20: the check runs AFTER the new engine loads but BEFORE the
-   * field assignment, `previous?.destroy()`, and the recycle/relayout post-load
-   * work, so a superseded load never touches `this._doc` nor frees the current
-   * (newer) engine. Only the self-loading path uses it — the injected path throws
-   * up-front and never reaches here. `destroy()` also bumps it so a load in flight
-   * at teardown is treated as superseded and its engine cleaned up.
-   */
-  private _loadGen = 0;
   /** Worker mode: page indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  page whose first is still in flight — and lets us drop pages that scrolled
@@ -314,6 +327,24 @@ export class DocxScrollViewer implements ZoomableViewer {
   );
   private _findActive = false;
 
+  /**
+   * Create a Scroll Viewer that borrows an already-loaded document.
+   *
+   * The document's render mode is authoritative. The returned Viewer cannot
+   * load another source, and destroying it leaves the caller-owned document
+   * open. The initial virtual window is laid out during construction.
+   */
+  static fromDocument(
+    container: HTMLElement,
+    document: DocxDocument,
+    opts: Omit<DocxScrollViewerOptions, keyof LoadOptions> = {},
+  ): Omit<DocxScrollViewer, 'load'> {
+    return new DocxScrollViewer(container, {
+      ...opts,
+      [borrowedDocumentOption]: document,
+    } as InternalDocxScrollViewerOptions);
+  }
+
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
     // A <canvas> is an HTMLElement too, so the type system cannot stop a caller
     // used to the pager API (DocxViewer takes a canvas) from passing one — but
@@ -331,22 +362,14 @@ export class DocxScrollViewer implements ZoomableViewer {
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
-    this._injected = !!opts.document;
-    if (this._injected) {
-      const engine = opts.document as DocxDocument;
-      // Injected engine ⇒ its own mode is the fact (design §11). An EXPLICITLY
-      // conflicting opts.mode is a mis-configuration and is rejected here; an
-      // absent opts.mode is fine.
-      if (opts.mode !== undefined && opts.mode !== engine.mode) {
-        throw new Error(
-          `DocxScrollViewer: opts.mode='${opts.mode}' conflicts with the injected engine's mode='${engine.mode}'. ` +
-            'Omit opts.mode when injecting an engine — the engine owns its render mode.',
-        );
-      }
-      this._doc = engine;
-      this._mode = engine.mode;
+    const borrowedDocument = (opts as InternalDocxScrollViewerOptions)[borrowedDocumentOption];
+    this._borrowed = borrowedDocument !== undefined;
+    if (borrowedDocument) {
+      this._documentOwner = new TerminalResourceOwner('DocxScrollViewer', borrowedDocument, false);
+      this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, borrowedDocument);
     } else {
-      this._mode = opts.mode ?? 'main';
+      this._documentOwner = new TerminalResourceOwner('DocxScrollViewer');
+      this._mode = resolveCanvasViewerMode('DocxScrollViewer', opts.mode, undefined);
     }
 
     // container → wrapper → scrollHost → spacer  (design §6)
@@ -367,6 +390,21 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._scrollHost.appendChild(this._spacer);
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
+
+    if (opts.enableTextSelection && (opts.onSelectionContextChange || opts.enableElementSelection)) {
+      this._selectionChangeListener = () => this._emitSelectionContextChange();
+      this._wrapper.ownerDocument.addEventListener('selectionchange', this._selectionChangeListener);
+    }
+    if (opts.enableElementSelection) {
+      this._elementClickListener = (event) => {
+        void this._onElementClick(event).catch((error) => this._reportRenderError(error));
+      };
+      this._scrollHost.addEventListener('click', this._elementClickListener);
+    }
+    if (opts.onContextMenu) {
+      this._contextMenuListener = (event) => this._onContextMenu(event);
+      this._scrollHost.addEventListener('contextmenu', this._contextMenuListener);
+    }
 
     this._scrollListener = () => this._onScroll();
     this._scrollHost.addEventListener('scroll', this._scrollListener);
@@ -406,8 +444,8 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._resizeObserver.observe(this._container);
     }
 
-    if (this._injected) {
-      // An injected engine is already loaded, so lay out + mount the first
+    if (this._borrowed) {
+      // A borrowed engine is already loaded, so lay out + mount the first
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
       this.relayout();
@@ -416,25 +454,27 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   /**
    * Load a DOCX from URL or ArrayBuffer and render the first window.
-   * UNSUPPORTED when an engine was injected via `opts.document` (throws) — the
-   * caller already owns the parsed engine.
+   * Unsupported on a Viewer created by {@link fromDocument}; the caller already
+   * owns the parsed engine.
    */
   async load(source: string | ArrayBuffer): Promise<void> {
-    if (this._injected) {
+    if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
+    if (this._borrowed) {
       throw new Error(
-        'DocxScrollViewer.load() is unsupported when an engine is injected via opts.document; the injected engine is already loaded.',
+        'DocxScrollViewer.load() is unsupported on a Viewer created by fromDocument(); ' +
+          'the borrowed document is already loaded.',
       );
     }
-    // SC20 atomic swap: a self-loaded viewer OWNS its engine (destroy() tears it
-    // down when `!_injected`), so a re-load must not orphan the previous one.
+    // SC20 atomic swap: a self-loaded viewer OWNS its engine, so a re-load must
+    // not orphan the previous one.
     // Retain it locally and free it only after the new engine loads — a FAILED
     // re-load then keeps the current document rendered rather than going blank.
-    // (The injected path returned above can never reach here, so this only ever
+    // (The borrowed path returned above can never reach here, so this only ever
     // frees an engine we created.)
-    const gen = ++this._loadGen;
-    const previous = this._doc;
+    let elementInvalidated = false;
     try {
-      const doc = await DocxDocument.load(source, {
+      const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
+        password: this._opts.password,
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
         resourceLimits: this._opts.resourceLimits,
@@ -444,45 +484,36 @@ export class DocxScrollViewer implements ZoomableViewer {
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
         mode: this._mode,
+      }), (ownedDocument) => {
+        this._invalidateElementContext(false);
+        elementInvalidated = true;
+        this._find.invalidate();
+        this._findActive = false;
+        if (ownedDocument) {
+          // Recycle before the old worker is terminated. Every captured slot
+          // dispatcher then becomes stale before its expected rejection lands.
+          for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
+          this._lastTopIndex = -1;
+        }
       });
-      if (gen !== this._loadGen) {
-        // A newer load() (or destroy()) started while this one was in flight — we
-        // lost the concurrent-load race. Destroy the engine we just loaded (it was
-        // never installed) and leave the winning load's engine + SC20 swap + its
-        // recycle/relayout work untouched: do NOT touch `this._doc` and do NOT
-        // destroy `previous` (irrelevant to the winner; possibly already stale).
-        doc.destroy();
-        return;
-      }
-      this._doc = doc;
-      previous?.destroy();
+      if (!doc) return;
+      if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
       this._find.invalidate();
       this._findActive = false;
-      if (previous) {
-        // Re-loading over a prior document: recycle every mounted slot (they hold
-        // the OLD document's rendered canvases) and reset the top-index latch so
-        // the new document's first window renders fresh. `_mountVisible` only
-        // RE-renders missing indices, so without this a still-mounted page 0 would
-        // keep the previous document's pixels.
-        for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
-        this._lastTopIndex = -1;
-      }
       // Lay out + mount the first window now that the engine exists (mirrors the
-      // injected-engine path in the constructor). relayout() is idempotent and
+      // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
       // appears.
-      this.relayout();
+      const initialRenders: Promise<void>[] = [];
+      this._relayout(initialRenders);
+      await Promise.all(initialRenders);
     } catch (err) {
       // Superseded loads own no error reporting — the winning load (or destroy())
       // is the outcome the caller awaits; swallow this stale rejection.
-      if (gen !== this._loadGen) return;
-      const e = err instanceof Error ? err : new Error(String(err));
-      if (this._opts.onError) {
-        this._opts.onError(e);
-        return;
-      }
-      throw e;
+      if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
+      throw err instanceof Error ? err : new Error(String(err));
     }
+    if (elementInvalidated && !this._destroyed) this._emitSelectionContextChange();
   }
 
   get pageCount(): number {
@@ -532,7 +563,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   /**
    * Recompute per-page heights + the spacer and re-mount the visible window.
    *
-   * The viewer already calls this automatically after `load()`, an injected
+   * The viewer already calls this automatically after `load()`, a borrowed
    * engine, a container resize, and a zoom, so most integrations never need it.
    * It is public as a deliberate escape hatch: if the host mutates the layout in
    * a way the `ResizeObserver` cannot observe (e.g. a CSS change on an ancestor
@@ -542,6 +573,13 @@ export class DocxScrollViewer implements ZoomableViewer {
    * fit is deferred until width appears, design §11).
    */
   relayout(): void {
+    this._relayout();
+  }
+
+  /** Synchronous geometry/layout pass. When `initialRenders` is supplied by
+   * load(), newly-mounted slot Promises are collected for direct rejection
+   * instead of being routed through the background onError channel. */
+  private _relayout(initialRenders?: Promise<void>[]): void {
     if (!this._doc) return;
     // Establish the base fit scale on the first layout that has a positive
     // width. Zoom (T4) layers its own multiplier on top of this; here we only
@@ -576,7 +614,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     this._recomputeHeights();
     this._syncSpacer();
-    this._mountVisible();
+    this._mountVisible(initialRenders);
   }
 
   private _recomputeHeights(): void {
@@ -677,7 +715,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   }
 
   /** Mount/recycle slots for the current visible window. */
-  private _mountVisible(): void {
+  private _mountVisible(initialRenders?: Promise<void>[]): void {
     if (!this._doc || this._doc.pageCount === 0) return;
     const r = this._range();
     this._lastRange = r;
@@ -694,7 +732,8 @@ export class DocxScrollViewer implements ZoomableViewer {
         const slot = this._acquireSlot();
         this._positionSlot(slot, i, r);
         this._slots.set(i, slot);
-        this._renderSlot(i, slot);
+        const render = this._renderSlot(i, slot, initialRenders === undefined);
+        if (initialRenders && render) initialRenders.push(render);
       } else {
         // Re-position (offsets shift after a spacer/height change).
         this._positionSlot(this._slots.get(i)!, i, r);
@@ -749,26 +788,29 @@ export class DocxScrollViewer implements ZoomableViewer {
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
       'overflow:hidden;pointer-events:none;';
     wrapper.appendChild(highlightLayer);
+    const elementLayer = createCanvasElementOutlineLayer(
+      wrapper,
+      this._opts.enableElementSelection === true,
+    );
     this._scrollHost.appendChild(wrapper);
     const slot: PageSlot = {
       wrapper,
       canvas,
       textLayer,
       highlightLayer,
+      elementLayer,
       renderedPage: -1,
       renderedScale: -1,
-      bitmap: null,
-      bitmapCtx: null,
+      dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
     };
     return slot;
   }
 
   private _recycleSlot(idx: number, slot: PageSlot): void {
     this._slots.delete(idx);
-    // Close any worker bitmap held by this slot (T3 sets slot.bitmap).
-    if (slot.bitmap) {
-      slot.bitmap.close();
-      slot.bitmap = null;
+    slot.dispatcher.destroy();
+    if (!this._destroyed) {
+      slot.dispatcher = new StaticCanvasRenderDispatcher(slot.canvas, this._mode === 'worker');
     }
     // Clear the per-slot text overlay so a slot sitting in the free pool holds no
     // stale spans. buildDocxTextLayer also clears on its next build, but an
@@ -784,6 +826,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     slot.highlightLayer.innerHTML = '';
     slot.highlightLayer.style.transform = '';
     slot.highlightLayer.style.transformOrigin = '';
+    renderCanvasElementOutline(slot.elementLayer, null);
     slot.renderedPage = -1;
     slot.renderedScale = -1;
     slot.wrapper.remove();
@@ -796,6 +839,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     const hpx = this._pageHeightPx(i);
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${hpx}px`;
+    this._redrawElementOutlineForSlot(i, slot);
     // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
     // auto-centering, which cannot honour a left gutter). Centre the page in the
     // scroll viewport, but never let its left edge cross the left gutter: when the
@@ -835,20 +879,30 @@ export class DocxScrollViewer implements ZoomableViewer {
    * with stale x/y/w/h (the pool reuses slot objects, so the identity check alone
    * can pass for an old-epoch resolution). We gate them on the captured epoch.
    */
-  private _renderSlot(i: number, slot: PageSlot): void {
-    if (!this._doc) return;
+  private _renderSlot(i: number, slot: PageSlot, reportErrors = true): Promise<void> | null {
+    if (!this._doc) return null;
     // Slot-identity guard: this slot is already rendering / has rendered page i.
-    if (slot.renderedPage === i) return;
+    if (slot.renderedPage === i) return null;
     slot.renderedPage = i;
 
     const dpr = this._dpr();
     const widthPx = this._pageWidthPx(i);
     const epoch = this._renderEpoch;
     const scale = this._scale;
+    const dispatcher = slot.dispatcher;
+    const generation = dispatcher.begin();
 
     if (this._mode === 'worker') {
-      void this._renderSlotBitmap(i, slot, widthPx, dpr, scale);
-      return;
+      return this._renderSlotBitmap(
+        i,
+        slot,
+        widthPx,
+        dpr,
+        scale,
+        dispatcher,
+        generation,
+        reportErrors,
+      );
     }
 
     // Main mode: render straight onto the slot's canvas.
@@ -856,20 +910,34 @@ export class DocxScrollViewer implements ZoomableViewer {
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const wantRuns = wantOverlay || this._findActive;
     const onTextRun = wantRuns ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
-    this._doc
-      .renderPage(slot.canvas, i, {
+    let render: Promise<void>;
+    try {
+      render = this._doc.renderPage(slot.canvas, i, {
         width: widthPx, // this page's own px width → uniform px-per-pt scale (§7)
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
         onTextRun,
-      })
+      });
+    } catch (error) {
+      if (reportErrors) {
+        this._reportRenderError(error);
+        return Promise.resolve();
+      }
+      return Promise.reject(error);
+    }
+    return render
       .then(() => {
         // Stale if the epoch moved (a setScale rescaled mid-flight — the run
         // geometry is at the old scale), or a recycle re-purposed this slot for a
         // different page / freed it. Either way: skip the (stale) overlay build.
         // The engine's per-canvas token already discards the superseded pixels.
-        if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        if (
+          !dispatcher.isCurrent(generation) ||
+          epoch !== this._renderEpoch ||
+          this._slots.get(i) !== slot ||
+          slot.renderedPage !== i
+        ) return;
         // This fresh render defines the scale the on-screen bitmap now lives at,
         // so a subsequent zoom preview stretches from HERE.
         slot.renderedScale = scale;
@@ -882,13 +950,21 @@ export class DocxScrollViewer implements ZoomableViewer {
             height,
             this._hyperlinkHandler(),
             (font) => this._measureForFont(font),
+            i,
           );
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        const isCurrent =
+          dispatcher.isCurrent(generation) &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedPage === i;
+        if (!isCurrent) return;
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
       });
   }
 
@@ -986,6 +1062,9 @@ export class DocxScrollViewer implements ZoomableViewer {
     widthPx: number,
     dpr: number,
     scale: number,
+    dispatcher = slot.dispatcher,
+    generation = dispatcher.begin(),
+    reportErrors = true,
   ): Promise<void> {
     if (this._bitmapInFlight.has(i)) return; // coalesce: already dispatched
     // Drop-stale before dispatch: if this page already scrolled out of the
@@ -996,15 +1075,6 @@ export class DocxScrollViewer implements ZoomableViewer {
     // Whether this invocation actually painted its slot. When it did NOT (stale
     // epoch or moved identity), the `finally` may need to re-dispatch a live slot.
     let painted = false;
-    // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
-    // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
-    // first worker render (bitmapCtx survives recycle), so we never re-getContext
-    // a canvas that already has one. (getContext for a conflicting type returns
-    // null rather than throwing; caching the first non-null ctx avoids relying on
-    // that and skips redundant lookups.)
-    if (!slot.bitmapCtx) {
-      slot.bitmapCtx = slot.canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
-    }
     // IX6 — harvest the page's run geometry alongside the bitmap so the
     // worker-mode selection overlay is built from the SAME data main mode uses.
     // The runs ride back beside the bitmap (one round-trip), collected only when
@@ -1017,7 +1087,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         width: widthPx,
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
         onTextRun: wantRuns ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
@@ -1025,24 +1095,19 @@ export class DocxScrollViewer implements ZoomableViewer {
       // the SAME slot object is re-mounted for page `i`, which the identity check
       // below cannot), or (b) the slot recycled to a different page / page `i`
       // re-mounted onto a DIFFERENT slot. Either way: close + skip the paint.
-      if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) {
+      if (
+        !dispatcher.isCurrent(generation) ||
+        epoch !== this._renderEpoch ||
+        this._slots.get(i) !== slot ||
+        slot.renderedPage !== i
+      ) {
         bmp.close();
         return;
       }
-      // Close any prior bitmap, then hold the new one on the slot BEFORE the
-      // transfer. JS is single-threaded so nothing recycles between here and the
-      // transfer; the hold's real value is the throw path — if
-      // transferFromImageBitmap throws, `destroy()`/`_recycleSlot` can still find
-      // and close this bitmap. transferFromImageBitmap consumes the bitmap, so we
-      // null the field immediately after — leaving nothing to double-close.
-      if (slot.bitmap) slot.bitmap.close();
-      slot.bitmap = bmp;
-      slot.canvas.width = bmp.width;
-      slot.canvas.height = bmp.height;
-      slot.canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
-      slot.canvas.style.height = `${Math.round(bmp.height / dpr)}px`;
-      slot.bitmapCtx?.transferFromImageBitmap(bmp);
-      slot.bitmap = null; // transfer consumed it
+      if (!dispatcher.commitBitmap(generation, bmp, {
+        cssWidth: Math.round(bmp.width / dpr),
+        cssHeight: Math.round(bmp.height / dpr),
+      })) return;
       // This bitmap now defines the scale the on-screen canvas lives at, so a
       // later zoom preview stretches from HERE (design §7 renderedScale).
       slot.renderedScale = scale;
@@ -1065,6 +1130,7 @@ export class DocxScrollViewer implements ZoomableViewer {
             height,
             this._hyperlinkHandler(),
             (font) => this._measureForFont(font),
+            i,
           );
         }
       }
@@ -1072,7 +1138,15 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._redrawSlotHighlights(i, slot);
       painted = true;
     } catch (err) {
-      this._reportRenderError(err);
+      const isCurrent =
+        dispatcher.isCurrent(generation) &&
+        epoch === this._renderEpoch &&
+        this._slots.get(i) === slot &&
+        slot.renderedPage === i;
+      if (isCurrent) {
+        if (reportErrors) this._reportRenderError(err);
+        else throw err;
+      }
     } finally {
       this._bitmapInFlight.delete(i);
       // Re-dispatch ONLY when this invocation went stale — a LIVE slot for page
@@ -1098,7 +1172,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       if (
         !painted &&
         live &&
-        (live !== slot || epoch !== this._renderEpoch) &&
+        (live !== slot || epoch !== this._renderEpoch || !dispatcher.isCurrent(generation)) &&
         !this._bitmapInFlight.has(i) &&
         !this._destroyed
       ) {
@@ -1170,7 +1244,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     // content under the pointer: content-y = scrollTop + anchorY (anchorY 0 ⇒ the
     // viewport top, the historical behaviour).
     const r0 = this._range();
-    const anchorContentY = this._scrollHost.scrollTop + anchorY;
+    const scrollTop0 = this._scrollHost.scrollTop;
+    const anchorContentY = scrollTop0 + anchorY;
     // Which page does that content-y fall in? `computeVisibleRange` attributes a
     // point in the trailing gap to the page ABOVE it, so clamp the fraction to
     // [0,1] to pin the page rather than drift into the gap.
@@ -1212,7 +1287,14 @@ export class DocxScrollViewer implements ZoomableViewer {
     // must stay at `anchorY`, so newScrollTop = newContentY − anchorY.
     const maxTop = Math.max(0, r1.totalHeight - this._scrollHost.clientHeight);
     const newContentY = (r1.offsets[top] ?? 0) + intraFrac * (this._heights[top] || 0);
-    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, newContentY - anchorY));
+    // The leading desk padding is fixed viewport space: none of it scales. If the
+    // anchor is still inside that padding, keep the native scroll offset instead
+    // of snapping to page 0's offset and hiding the margin after a programmatic
+    // zoom at scrollTop 0.
+    const reanchoredTop = anchorContentY < (r0.offsets[0] ?? 0)
+      ? scrollTop0
+      : newContentY - anchorY;
+    this._scrollHost.scrollTop = Math.min(maxTop, Math.max(0, reanchoredTop));
 
     // Re-anchor horizontally for a gesture zoom. `padL` is a FIXED (non-scaling)
     // gutter, so it is subtracted from the ANCHOR only — the scroll offset stays
@@ -1438,6 +1520,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     const spare = document.createElement('canvas');
     spare.style.cssText = 'display:block;background:#fff;';
     this._applyPageShadow(spare);
+    const spareDispatcher = new StaticCanvasRenderDispatcher(spare, false);
+    const generation = spareDispatcher.begin();
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
     const wantRuns = wantOverlay || this._findActive;
@@ -1447,24 +1531,31 @@ export class DocxScrollViewer implements ZoomableViewer {
         width: widthPx,
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        showTrackChanges: this._opts.showTrackChanges,
+        currentDate: this._opts.currentDate,
         onTextRun,
       })
       .then(() => {
         // Discard if superseded: a later setScale bumped the epoch (this spare is
         // at a stale scale), or the slot recycled / moved to another page. Drop
         // the spare (it is off-DOM, so GC reclaims it) and do NOT swap.
-        if (epoch !== this._renderEpoch || this._slots.get(i) !== slot || slot.renderedPage !== i) return;
+        if (
+          !spareDispatcher.isCurrent(generation) ||
+          epoch !== this._renderEpoch ||
+          this._slots.get(i) !== slot ||
+          slot.renderedPage !== i
+        ) {
+          spareDispatcher.destroy();
+          return;
+        }
         // Swap the freshly-painted spare in for the old (stretched-preview) canvas.
         // The old canvas was the only child that showed content; replacing it in
         // one DOM op means the screen goes from preview → crisp with no blank tick.
         const old = slot.canvas;
+        slot.dispatcher.destroy();
         slot.wrapper.insertBefore(spare, old);
         old.remove();
         slot.canvas = spare;
-        // The retired canvas held a 2d context; keep the pool clean by dropping any
-        // bitmaprenderer handle association (main-mode canvases never had one).
-        slot.bitmapCtx = null;
+        slot.dispatcher = spareDispatcher;
         slot.renderedScale = scale;
         // Rebuild the overlay at the full resolution and CLEAR the preview
         // transform (the crisp render no longer needs the scale()).
@@ -1480,6 +1571,7 @@ export class DocxScrollViewer implements ZoomableViewer {
               height,
               this._hyperlinkHandler(),
               (font) => this._measureForFont(font),
+              i,
             );
           }
         }
@@ -1487,7 +1579,13 @@ export class DocxScrollViewer implements ZoomableViewer {
         this._redrawSlotHighlights(i, slot);
       })
       .catch((err: unknown) => {
-        this._reportRenderError(err);
+        if (
+          spareDispatcher.isCurrent(generation) &&
+          epoch === this._renderEpoch &&
+          this._slots.get(i) === slot &&
+          slot.renderedPage === i
+        ) this._reportRenderError(err);
+        spareDispatcher.destroy();
       });
   }
 
@@ -1578,8 +1676,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (!this._doc) return [];
     return this._doc.collectPageRuns(page, {
       width: this._pageWidthPx(page),
-      defaultTextColor: this._opts.defaultTextColor,
-      showTrackChanges: this._opts.showTrackChanges,
+      currentDate: this._opts.currentDate,
     });
   }
 
@@ -1751,19 +1848,156 @@ export class DocxScrollViewer implements ZoomableViewer {
     return await this._doc.getResourceMetrics();
   }
 
+  /** Return the current mounted text selection or clicked drawing context. */
+  getSelectionContext(options: DocxSelectionContextOptions = {}): DocxSelectionContext | null {
+    if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
+    const text = this._opts.enableTextSelection
+      ? readDocxTextSelectionContext(
+          this._wrapper,
+          this._wrapper.ownerDocument?.getSelection?.() ?? null,
+          options,
+        )
+      : null;
+    return text ?? (this._elementContext
+      ? limitDocxElementContext(this._elementContext, options.maxTextCharacters)
+      : null);
+  }
+
+  private _emitSelectionContextChange(): void {
+    const context = this.getSelectionContext();
+    if (context?.kind === 'text') {
+      this._elementHitGeneration++;
+      this._elementContext = null;
+      this._redrawElementOutlines();
+    }
+    const key = JSON.stringify(context);
+    if (key === this._selectionContextKey) return;
+    this._selectionContextKey = key;
+    this._opts.onSelectionContextChange?.(context ? structuredClone(context) : null);
+  }
+
+  private _setElementContext(context: DocxElementContext | null): void {
+    this._elementContext = context ? structuredClone(context) : null;
+    this._redrawElementOutlines();
+    this._emitSelectionContextChange();
+  }
+
+  private _invalidateElementContext(notify = true): void {
+    this._elementHitGeneration++;
+    this._elementContext = null;
+    this._redrawElementOutlines();
+    if (notify) this._emitSelectionContextChange();
+  }
+
+  private _redrawElementOutlines(): void {
+    for (const [page, slot] of this._slots) this._redrawElementOutlineForSlot(page, slot);
+  }
+
+  private _redrawElementOutlineForSlot(pageIndex: number, slot: PageSlot): void {
+    const context = this._elementContext;
+    const doc = this._doc;
+    if (!context || !doc || context.pageIndex !== pageIndex) {
+      renderCanvasElementOutline(slot.elementLayer, null);
+      return;
+    }
+    const page = doc.pageSize(pageIndex);
+    renderCanvasElementOutline(slot.elementLayer, {
+      x: context.bounds.xPt / page.widthPt,
+      y: context.bounds.yPt / page.heightPt,
+      width: context.bounds.widthPt / page.widthPt,
+      height: context.bounds.heightPt / page.heightPt,
+    });
+  }
+
+  private async _onElementClick(event: MouseEvent): Promise<void> {
+    if (this._destroyed || event.defaultPrevented || event.button !== 0) return;
+    await this._resolveContextAt(event);
+  }
+
+  private _onContextMenu(event: MouseEvent): void {
+    let context: Promise<DocxSelectionContext | null> | undefined;
+    this._opts.onContextMenu?.({
+      originalEvent: event,
+      getContext: () => context ??= this._resolveContextAt(event),
+    });
+  }
+
+  private async _resolveContextAt(event: MouseEvent): Promise<DocxSelectionContext | null> {
+    const doc = this._doc;
+    if (this._destroyed || !doc) return null;
+    if (this._opts.enableTextSelection && readDocxTextSelectionContext(
+      this._wrapper,
+      this._wrapper.ownerDocument?.getSelection?.() ?? null,
+    )) {
+      this._emitSelectionContextChange();
+      return this._destroyed ? null : this.getSelectionContext();
+    }
+    if (!this._opts.enableElementSelection) return this.getSelectionContext();
+    const target = event.target as Node | null;
+    const entry = [...this._slots].find(([, slot]) =>
+      target !== null && slot.wrapper.contains(target));
+    if (!entry) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const [pageIndex, slot] = entry;
+    const rect = slot.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+      this._invalidateElementContext();
+      return null;
+    }
+    const generation = ++this._elementHitGeneration;
+    const pageSize = doc.pageSize(pageIndex);
+    let context: DocxElementContext | null;
+    try {
+      context = await doc.getElementContextAt(pageIndex, {
+        xPt: localX / rect.width * pageSize.widthPt,
+        yPt: localY / rect.height * pageSize.heightPt,
+      }, {
+        currentDate: this._opts.currentDate,
+        maxTextCharacters: MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
+      });
+    } catch (error) {
+      if (this._destroyed || generation !== this._elementHitGeneration || doc !== this._doc) {
+        return null;
+      }
+      throw error;
+    }
+    if (this._destroyed || generation !== this._elementHitGeneration || doc !== this._doc) return null;
+    this._setElementContext(context);
+    return this._destroyed ? null : this.getSelectionContext();
+  }
+
   /**
    * Tear down the viewer: remove the DOM subtree and (only for a self-loaded
-   * engine) destroy the engine. An injected engine is left intact — the caller
+   * engine) destroy the engine. A borrowed engine is left intact — the caller
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {
+    if (this._destroyed) return;
     this._destroyed = true;
-    // Bump the load generation so a self-loading load() still in flight is treated
-    // as superseded and its engine is cleaned up rather than installed onto a
-    // torn-down viewer.
-    this._loadGen++;
     this._find.invalidate();
     this._findActive = false;
+    if (this._selectionChangeListener) {
+      this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
+      this._selectionChangeListener = null;
+    }
+    this._elementHitGeneration++;
+    if (this._elementClickListener) {
+      this._scrollHost.removeEventListener('click', this._elementClickListener);
+      this._elementClickListener = null;
+    }
+    if (this._contextMenuListener) {
+      this._scrollHost.removeEventListener('contextmenu', this._contextMenuListener);
+      this._contextMenuListener = null;
+    }
+    this._elementContext = null;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;
@@ -1784,10 +2018,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
-    if (!this._injected) {
-      this._doc?.destroy();
-    }
-    this._doc = null;
+    this._documentOwner.close();
     this._wrapper.remove();
   }
 }

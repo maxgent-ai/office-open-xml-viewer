@@ -1,4 +1,7 @@
-import type { ParagraphLayoutContext } from './layout-context.js';
+import {
+  paragraphGridRightAdjustmentPt,
+  type ParagraphLayoutContext,
+} from './layout-context.js';
 import {
   buildSegments,
   getDefaultFontSize,
@@ -78,10 +81,27 @@ export interface MeasuredParagraph {
   readonly placement: Readonly<ParagraphPlacement>;
 }
 
-function paragraphGrid(context: ParagraphLayoutContext): DocGridCtx {
+/** Project the normalized paragraph policy without losing w:docGrid/@w:type. */
+export function paragraphCharacterGrid(
+  context: ParagraphLayoutContext,
+): DocGridCtx | undefined {
+  if (!context.characterGrid.active) return undefined;
   return {
-    type: context.lineGrid.active ? 'lines' : null,
+    type: context.characterGrid.kind,
+    linePitchPt: null,
+    characterPitchPt: context.characterGrid.pitchPt,
+    charSpacePt: context.characterGrid.deltaPt,
+  };
+}
+
+function paragraphGrid(context: ParagraphLayoutContext): DocGridCtx {
+  const characterGrid = paragraphCharacterGrid(context);
+  return {
+    type: characterGrid
+      ? characterGrid.type
+      : context.lineGrid.active ? 'lines' : null,
     linePitchPt: context.lineGrid.active ? context.lineGrid.pitchPt : null,
+    characterPitchPt: context.characterGrid.active ? context.characterGrid.pitchPt : null,
     charSpacePt: context.characterGrid.active ? context.characterGrid.deltaPt : null,
   };
 }
@@ -107,11 +127,16 @@ export function measureParagraph(
   },
 ): MeasuredParagraph {
   const grid = paragraphGrid(context);
+  const rightGridAdjustmentPt = paragraphGridRightAdjustmentPt(
+    context,
+    placement.availableWidthPt,
+  );
   const paragraphWidthPt = Math.max(
     1,
     placement.availableWidthPt
       - context.physicalIndentLeftPt
-      - context.physicalIndentRightPt,
+      - context.physicalIndentRightPt
+      - rightGridAdjustmentPt,
   );
   const paragraphXPt = placement.paragraphXPt + context.physicalIndentLeftPt;
   const requestedSpaceBeforePt = context.spaceBeforePt;
@@ -156,6 +181,7 @@ export function measureParagraph(
       environment.resolvedLocalFonts,
       environment.layoutServices?.text,
       environment.paragraphMarkShapeInput,
+      environment.useFeLayout === true,
     );
     if (placement.wrap) {
       markTopPt = placement.wrap.lineWindow({
@@ -193,6 +219,7 @@ export function measureParagraph(
         environment.resolvedLocalFonts,
         environment.layoutServices?.text,
         environment.paragraphMarkShapeInput,
+        environment.useFeLayout === true,
       ),
       placement: recordedPlacement,
     };
@@ -245,9 +272,9 @@ export function measureParagraph(
     fontFamilyClasses,
     context.physicalIndentLeftPt,
     context.kinsoku,
-    context.characterGrid.active ? context.characterGrid.deltaPt : 0,
+    grid,
     context.defaultTabPt,
-    paragraphWidthPt + context.physicalIndentRightPt,
+    paragraphWidthPt + context.physicalIndentRightPt + rightGridAdjustmentPt,
     context.baseRtl,
     context.isJustified,
     context.stretchLastLine,

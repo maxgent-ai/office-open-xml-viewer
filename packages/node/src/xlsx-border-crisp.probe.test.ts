@@ -89,12 +89,11 @@ function lum(r: number, g: number, b: number): number {
 /** Parse the sample and splice in a single cell whose style carries a thin
  *  pure-black BOTTOM border, returning the mutated Worksheet + Styles. The new
  *  border / cellXf are appended (existing indices untouched). */
-function buildInjected(): { ws: Worksheet; styles: Styles } {
+async function buildInjected(): Promise<{ ws: Worksheet; styles: Styles }> {
   if (!xlsxMod) throw new Error('xlsx WASM unavailable (run pnpm build:wasm)');
-  const { parseXlsx, parseSheet } = xlsxMod;
   const buf = readFileSync(SAMPLE);
-  const parsed = parseXlsx(buf);
-  const ws = parseSheet(buf, 0, parsed.workbook.sheets[0].name) as Worksheet;
+  const parsed = await xlsxMod.materializeXlsxWorkbookIndex(buf);
+  const ws = await xlsxMod.materializeXlsxWorksheet(buf, 0) as Worksheet;
   const styles = parsed.styles as Styles;
 
   const newBorder: Border = {
@@ -147,7 +146,7 @@ function buildInjected(): { ws: Worksheet; styles: Styles } {
 async function renderInjected(
   dpr: number,
 ): Promise<{ data: Uint8ClampedArray; w: number; h: number; canvas: InstanceType<typeof Canvas> }> {
-  const { ws, styles } = buildInjected();
+  const { ws, styles } = await buildInjected();
   const { renderWorksheetViewport } = (await import(ORCH_PATH)) as {
     renderWorksheetViewport: (
       deps: { ws: Worksheet; styles: Styles; imageCache: Map<string, unknown> },

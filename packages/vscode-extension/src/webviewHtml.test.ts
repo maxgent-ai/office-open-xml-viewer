@@ -53,6 +53,21 @@ describe('buildContentSecurityPolicy', () => {
 });
 
 describe('getWebviewHtml', () => {
+  it('embeds the host-issued selection session without executable interpolation', () => {
+    const html = getWebviewHtml(
+      {
+        cspSource: CSP_SOURCE,
+        asWebviewUri: () => 'vscode-webview://extension/dist/webview.js',
+      } as never,
+      {} as never,
+      'xlsx',
+      false,
+      17,
+    );
+
+    expect(html).toContain('window.__OOXML_SELECTION_SESSION__ = 17;');
+  });
+
   it.each(['docx', 'xlsx', 'pptx'] as const)(
     'includes shared zoom-out and zoom-in controls for %s',
     (fileType) => {

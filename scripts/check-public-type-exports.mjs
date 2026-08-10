@@ -6,7 +6,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 const require = createRequire(new URL('../package.json', import.meta.url));
-const ts = require('typescript');
+const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
 const files = ['index', ...formats, 'math'].map((entry) => path.join(typesDir, `${entry}.d.ts`));

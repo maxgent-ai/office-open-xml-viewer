@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxViewer } from './viewer.js';
-import { installDom, makeEl, type FakeEl } from './scroll-viewer-test-dom.js';
+import { installDom, makeEl, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -97,5 +97,29 @@ describe('DocxViewer.destroy() — canvas reparent return', () => {
     expect(() => v.destroy()).not.toThrow();
     expect(canvas.parentElement).toBe(parent);
     expect(parent.children).toEqual([before, canvas]);
+  });
+
+  it('borrows a document through fromDocument() with the same lifecycle contract as the scroll viewer', async () => {
+    const { canvas } = mount();
+    const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
+    const viewer = DocxViewer.fromDocument(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asDoc(),
+    );
+    expect(viewer.pageCount).toBe(2);
+    await expect((viewer as DocxViewer).load('x.docx')).rejects.toThrow(/fromDocument/);
+    viewer.destroy();
+    expect(engine.destroyed).toBe(false);
+  });
+
+  it('rejects a borrowed mode conflict before reparenting the canvas', () => {
+    const { parent, canvas } = mount();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }], 'worker');
+    expect(() => DocxViewer.fromDocument(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asDoc(),
+      { mode: 'main' } as never,
+    )).toThrow(/opts\.mode='main'.*mode='worker'/);
+    expect(parent.children).toContain(canvas);
   });
 });

@@ -358,17 +358,18 @@ describe('layoutLines scale-invariance (Phase 4-1 B2 Stage 1) — LINEAR font, t
     }
   });
 
-  it('docGrid character delta (gridDeltaPx) scales ×s with the box', () => {
+  it('docGrid character delta scales ×s with the box', () => {
     // linesAndChars grid: a per-EA-glyph cell delta in px. It must scale with the
     // box so the gridded advance stays ×s. Δ at scale 1 = -2px, at scale s = -2·s.
     const segs = () => [textSeg('あ'.repeat(20), 10)];
     const { ctx: c1 } = makeLinearCtx();
+    const grid = { type: 'linesAndChars', linePitchPt: null, charSpacePt: -2 } as const;
     const base = layoutLines(c1, cloneSegs(segs()), 120, 0, 1, [], undefined, {}, 0,
-      undefined, -2);
+      undefined, grid);
     for (const s of SCALES) {
       const { ctx } = makeLinearCtx();
       const scaled = layoutLines(ctx, cloneSegs(segs()), 120 * s, 0 * s, s, [], undefined, {}, 0,
-        undefined, -2 * s);
+        undefined, grid);
       assertScaleLinear(base, scaled, s);
     }
   });

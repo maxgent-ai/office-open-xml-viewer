@@ -1,4 +1,4 @@
-import type { DocxDocumentModel } from '@silurus/ooxml-docx';
+import type { DocxDocumentModel, DocxTextRunInfo } from '@silurus/ooxml-docx';
 import type {
   OoxmlResourceUsageSnapshot,
 } from '@silurus/ooxml-core';
@@ -9,52 +9,33 @@ import {
 } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
-  normalizeLoadResourceOptions,
-  OoxmlResourceMetricsSession,
   parseResourceLimitError,
-  resourcePolicyForWasm,
-  type PullSessionCommand,
-  type PullSessionResponse,
+  type OoxmlResourceMetricsSession,
 } from '@silurus/ooxml-core/worker';
-import { normalizeDocxDocumentModel } from '../../docx/src/parser-model.ts';
-import { materializeDocumentPullAdapterSession } from '../../docx/src/document-pull-client.ts';
 import {
-  DocumentPullWorker,
-  type DocxDocumentCursorArchive,
-} from '../../docx/src/document-pull-worker.ts';
-import { createLayoutServices } from '../../docx/src/layout-runtime.ts';
-import { retainRenderWorkerDocumentLayout } from '../../docx/src/render-worker-layout.ts';
-import {
+  acquireDocxNodeDocument,
+  normalizeDocxDocumentModel,
+  materializeDocumentPullLayoutSession,
+  materializeDocumentPullSession,
+  type DocxNodeArchive,
+  createLayoutServices,
+  retainRenderWorkerDocumentLayout,
   renderLayoutSourceToCanvas,
-  type DocxTextRunInfo,
-} from '../../docx/src/renderer.ts';
-// @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
-import * as docxWasm from '../../docx/src/wasm/docx_parser.js';
-import { InProcessPullTransport } from './in-process-pull-transport.ts';
+} from '@silurus/ooxml-docx/internal/session';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import {
   type NodeCanvasFactory,
   type NodeCanvasLike,
   withNodeCanvasRuntime,
 } from './render.ts';
-import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
+import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
+import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 
-let initialized = false;
-
-interface DocxArchiveHandle extends DocxDocumentCursorArchive {
-  free(): void;
-  extract_image(path: string): Uint8Array;
-  document_cursor_resource_usage(): Uint8Array;
-  resource_usage(): Uint8Array;
-}
-
-interface DocxArchiveConstructor {
-  new (
-    data: Uint8Array,
-    maxArchiveEntryBytes?: bigint | null,
-    maxTotalInflatedBytes?: bigint | null,
-  ): DocxArchiveHandle;
-}
+const getDocxWasmModule = createLazyWasmModule(() => resolveWasm(
+    import.meta.url,
+    'docx_parser_bg.wasm',
+    '@silurus/ooxml-docx/wasm-binary',
+  ));
 
 /** Options for the bounded Node DOCX page session. */
 export interface OpenDocxDocumentOptions extends OoxmlNodeSessionOptions {
@@ -68,7 +49,6 @@ export interface DocxPageRenderOptions {
   width?: number;
   dpr?: number;
   defaultTextColor?: string;
-  showTrackChanges?: boolean;
   onTextRun?: (run: DocxTextRunInfo) => void;
 }
 
@@ -95,130 +75,109 @@ export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
   close(): Promise<void>;
 }
 
-function ensureInit(): void {
-  if (initialized) return;
-  const wasmPath = resolveWasm(import.meta.url, '../../docx/src/wasm/docx_parser_bg.wasm');
-  loadWasmModule(docxWasm as unknown as { initSync: (m: WebAssembly.Module) => unknown }, wasmPath);
-  initialized = true;
-}
-
-/** Parse a `.docx` archive in Node and return the same `DocxDocumentModel` the
- *  browser path produces. */
-export function parseDocx(buffer: ArrayBuffer | Uint8Array | Buffer): DocxDocumentModel {
-  ensureInit();
-  const bytes =
-    buffer instanceof Uint8Array
-      ? buffer
-      : new Uint8Array(buffer as ArrayBuffer);
-  // `parse_docx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
-  // parse once. This is the intentionally materializing compatibility path;
-  // `openDocxDocument` uses the bounded cursor instead.
-  const json = (docxWasm as unknown as { parse_docx: (b: Uint8Array) => Uint8Array }).parse_docx(
-    bytes,
-  );
-  return normalizeDocxDocumentModel(
-    JSON.parse(new TextDecoder().decode(json)) as DocxDocumentModel,
-  );
-}
-
 /**
  * Open a Node DOCX session that parses through the same acknowledged body cursor
  * as the browser Viewer, seals the canonical layout source, completes pagination,
- * and then renders one caller-owned canvas at a time. Existing `parseDocx`
- * remains the synchronous materializing compatibility API.
+ * and then renders one caller-owned canvas at a time.
  */
 export async function openDocxDocument(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenDocxDocumentOptions,
 ): Promise<DocxDocumentSession> {
-  const resourceOptions = normalizeLoadResourceOptions(options ?? {});
-  const metrics = new OoxmlResourceMetricsSession({
-    enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
-    format: 'docx',
-    mode: 'node',
-    scope: 'session',
-    policy: resourceOptions.policy,
-    onMetrics: resourceOptions.onResourceMetrics,
-    emitToConsole: resourceOptions.debug,
-  });
-  metrics.setSourceBytes(toUint8(buffer).byteLength);
-  const Archive = (docxWasm as unknown as { DocxArchive: DocxArchiveConstructor }).DocxArchive;
-  let archive: DocxArchiveHandle | undefined;
-  let pull: DocumentPullWorker | undefined;
-  let transport: InProcessPullTransport<PullSessionResponse<ArrayBuffer, number>> | undefined;
+  if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
+  const acquired = await acquireDocxNodeDocument(
+    toUint8(buffer),
+    getDocxWasmModule(),
+    options,
+    (transport, identity, pullOptions) =>
+      materializeDocumentPullLayoutSession(transport, identity, pullOptions),
+  );
   try {
-    if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
-    throwIfAborted(options.signal);
-    ensureInit();
-    const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
-    archive = new Archive(toUint8(buffer), maxEntry, maxTotal);
-    metrics.checkpoint('container ready');
-    pull = new DocumentPullWorker(() => archive);
-    const identity = { sessionId: 1, operationId: 1, generation: 1 } as const;
-    pull.open(identity);
-    transport = new InProcessPullTransport(
-      (command, respond) => pull?.dispatch(
-        command as PullSessionCommand<number>,
-        respond,
-      ),
-      () => undefined,
-    );
-    let usage: OoxmlResourceUsageSnapshot | undefined;
-    const adapted = await materializeDocumentPullAdapterSession(transport, identity, {
-      signal: options.signal,
-      onUsage: (checkpoint) => {
-        usage = checkpoint;
-        metrics.observeUsage(checkpoint);
-      },
-    });
-    usage ??= decodeDocumentUsage(archive.document_cursor_resource_usage());
-    metrics.observeUsage(usage);
-    metrics.checkpoint('model streamed');
-    await pull.reset();
-    transport.terminate();
-
     throwIfAborted(options.signal);
     const measurementCanvas = options.factory.createCanvas(1, 1);
-    const services = createLayoutServices(adapted.source, {
-      measureContext: measurementCanvas.getContext('2d'),
+    const services = createLayoutServices(acquired.result, {
+      measureContext: measurementCanvas.getContext('2d') as CanvasRenderingContext2D,
     });
     const defaultCurrentDateMs = normalizeCurrentDate(options.currentDate);
     const retained = retainRenderWorkerDocumentLayout(
-      adapted.source,
+      acquired.result,
       services,
       defaultCurrentDateMs,
     );
     const layout = retained.layoutVariants.defaultLayout;
     const session = new DocxDocumentSessionImpl(
-      archive,
-      adapted.source,
+      acquired.closeArchive,
+      acquired.archive,
+      acquired.result,
       services,
       layout,
       options.factory,
       defaultCurrentDateMs,
-      usage,
-      metrics,
+      acquired.usage,
+      acquired.metrics,
       options.signal,
     );
-    metrics.observeUsage(session.resourceUsage);
-    metrics.checkpoint('pagination ready');
+    acquired.metrics.observeUsage(session.resourceUsage);
+    acquired.metrics.checkpoint('pagination ready');
     return session;
   } catch (error) {
-    await pull?.reset().catch(() => undefined);
-    transport?.terminate();
     try {
-      archive?.free();
+      acquired.closeArchive();
     } catch {
-      // Preserve the open/parse/layout failure.
+      // Preserve the layout failure.
     }
     const normalized = parseResourceLimitError(error) ?? error;
-    metrics.fail(normalized);
+    acquired.metrics.fail(normalized);
     throw normalized;
   }
 }
 
+/** Materialize the public DOCX compatibility model through the acknowledged
+ * body-unit coordinator without creating measurement or page-layout state. */
+export async function materializeDocxDocument(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OoxmlNodeSessionOptions = {},
+): Promise<DocxDocumentModel> {
+  return usingOwnedSession(
+    async () => {
+      const acquired = await acquireDocxNodeDocument(
+        toUint8(buffer),
+        getDocxWasmModule(),
+        options,
+        (transport, identity, pullOptions) =>
+          materializeDocumentPullSession(transport, identity, pullOptions),
+      );
+      let succeeded = false;
+      return {
+        acquired,
+        markSucceeded: () => { succeeded = true; },
+        close: async () => {
+          try {
+            acquired.closeArchive();
+            if (succeeded) acquired.metrics.succeed({ documents: 1 });
+          } catch (error) {
+            acquired.metrics.fail(error);
+            throw error;
+          }
+        },
+      };
+    },
+    async ({ acquired, markSucceeded }) => {
+      try {
+        const document = normalizeDocxDocumentModel(acquired.result);
+        acquired.metrics.checkpoint('document materialized', acquired.usage);
+        markSucceeded();
+        return document;
+      } catch (error) {
+        acquired.metrics.fail(error);
+        throw error;
+      }
+    },
+  );
+}
+
 type SessionState = Readonly<{
-  source: Awaited<ReturnType<typeof materializeDocumentPullAdapterSession>>['source'];
+  source: Awaited<ReturnType<typeof materializeDocumentPullLayoutSession>>;
   services: ReturnType<typeof createLayoutServices>;
 }>;
 
@@ -237,11 +196,12 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
   private resourceFailure: OoxmlResourceLimitError | null = null;
   private readonly fetchImage = async (path: string, mimeType: string): Promise<Blob> => {
     const bytes = this.archive.extract_image(path);
-    return new Blob([new Uint8Array(bytes).slice() as BlobPart], { type: mimeType });
+    return new Blob([bytes as BlobPart], { type: mimeType });
   };
 
   constructor(
-    private readonly archive: DocxArchiveHandle,
+    private readonly closeArchive: () => void,
+    private readonly archive: DocxNodeArchive,
     source: SessionState['source'],
     services: SessionState['services'],
     layout: DefaultDocumentLayout,
@@ -361,7 +321,7 @@ class DocxDocumentSessionImpl implements DocxDocumentSession {
     dropSvgImageCache(this.fetchImage);
     this.state = null;
     try {
-      this.archive.free();
+      this.closeArchive();
     } catch (error) {
       const normalized = parseResourceLimitError(error) ?? error;
       this.metrics.fail(normalized);
@@ -385,16 +345,7 @@ function normalizeCurrentDate(value: Date | number | undefined): number {
   return current;
 }
 
-function decodeDocumentUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined {
-  try {
-    return decodeOoxmlResourceUsage(bytes);
-  } catch (error) {
-    if (String(error).includes('document cursor usage is unavailable')) return undefined;
-    throw error;
-  }
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 

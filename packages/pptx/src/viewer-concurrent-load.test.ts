@@ -99,4 +99,40 @@ describe('PptxViewer.load() — concurrent-load latch', () => {
     v.destroy();
     expect(only.destroyed).toBe(true);
   });
+
+  it('does not report a pending old-presentation render rejected by a successful reload', async () => {
+    const { canvas } = mount();
+    const onError = vi.fn();
+    const old = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const next = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    vi.spyOn(PptxPresentation, 'load')
+      .mockResolvedValueOnce(old.asPres())
+      .mockResolvedValueOnce(next.asPres());
+
+    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, { onError });
+    await v.load('old.pptx');
+    (old as unknown as { deferred: boolean }).deferred = true;
+    const staleNavigation = v.goToSlide(1);
+    const staleCall = old.renderCalls.at(-1);
+    expect(staleCall?.slide).toBe(1);
+
+    await v.load('next.pptx');
+    expect(old.destroyed).toBe(true);
+    staleCall?.reject(new Error('old worker terminated'));
+    await staleNavigation;
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(next.destroyed).toBe(false);
+    v.destroy();
+  });
+
+  it('rejects load after destroy without acquiring a presentation', async () => {
+    const { canvas } = mount();
+    const load = vi.spyOn(PptxPresentation, 'load');
+    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement);
+    v.destroy();
+
+    await expect(v.load('late.pptx')).rejects.toThrow('PptxViewer is destroyed');
+    expect(load).not.toHaveBeenCalled();
+  });
 });

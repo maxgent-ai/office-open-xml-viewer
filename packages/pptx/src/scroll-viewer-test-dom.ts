@@ -1,7 +1,27 @@
 import { vi } from 'vitest';
-import type { PptxPresentation, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
+import type { PptxPresentation, PresentSlideOptions, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
+import type {
+  PptxElementContextOptions,
+  PptxElementContext,
+  PptxSlidePoint,
+} from './element-selection';
+import { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
+
+/** Test-only adapter for mechanics cases that need a preloaded engine. Public
+ * callers use `PptxScrollViewer.fromPresentation()` directly. */
+export function makeBorrowedPptxScrollViewer(
+  container: HTMLElement,
+  options: PptxScrollViewerOptions & { presentation: PptxPresentation },
+): PptxScrollViewer {
+  const { presentation, ...viewerOptions } = options;
+  return (PptxScrollViewer.fromPresentation as (
+    target: HTMLElement,
+    engine: PptxPresentation,
+    opts: PptxScrollViewerOptions,
+  ) => PptxScrollViewer)(container, presentation, viewerOptions);
+}
 
 /** A recording fake DOM element. Extends the `FakeEl` pattern from
  *  text-layer.test.ts with the surface PptxScrollViewer touches: scrollTop,
@@ -13,6 +33,7 @@ export interface FakeEl {
   tagName: string;
   textContent: string;
   innerHTML: string;
+  dataset: Record<string, string>;
   style: Record<string, string> & { cssText: string };
   children: FakeEl[];
   parentElement: FakeEl | null;
@@ -22,6 +43,7 @@ export interface FakeEl {
    *  captures `canvas.nextSibling` so it can re-`insertBefore` at the original
    *  slot). Computed from the parent's child order, like the real DOM. */
   readonly nextSibling: FakeEl | null;
+  readonly ownerDocument: Document;
   // canvas-only
   width: number;
   height: number;
@@ -47,6 +69,7 @@ export interface FakeEl {
   appendChild(c: FakeEl): FakeEl;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
+  contains(other: FakeEl | null): boolean;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
   addEventListener(type: string, fn: (e: unknown) => void, opts?: unknown): void;
   removeEventListener(type: string, fn: (e: unknown) => void): void;
@@ -65,6 +88,7 @@ export function makeEl(tag: string): FakeEl {
     tagName: tag.toUpperCase(),
     textContent: '',
     innerHTML: '',
+    dataset: {},
     width: 0,
     height: 0,
     scrollTop: 0,
@@ -78,6 +102,7 @@ export function makeEl(tag: string): FakeEl {
     // (Object.defineProperty), mirroring innerHTML/width/height.
     parentNode: null,
     nextSibling: null,
+    ownerDocument: null as unknown as Document,
     _listeners: new Map(),
     _deviceResizes: [],
     _uid: _uidSeq++,
@@ -115,6 +140,9 @@ export function makeEl(tag: string): FakeEl {
     },
     remove() {
       this.parentElement?.removeChild(this);
+    },
+    contains(other: FakeEl | null) {
+      return other === this || this.children.some((child) => child.contains(other));
     },
     insertBefore(n: FakeEl, ref: FakeEl | null) {
       // Real-DOM pre-insert validity: a non-null reference that is not a child
@@ -233,6 +261,13 @@ export function makeEl(tag: string): FakeEl {
     enumerable: true,
     configurable: true,
   });
+  Object.defineProperty(el, 'ownerDocument', {
+    get() {
+      return globalThis.document;
+    },
+    enumerable: true,
+    configurable: true,
+  });
   return el;
 }
 
@@ -247,9 +282,25 @@ export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
 /** Install a recording document + window + ResizeObserver into globals.
  *  Returns the last-constructed ResizeObserver callback so a test can fire a
  *  synthetic resize. Call `vi.unstubAllGlobals()` in afterEach. */
-export function installDom(): { resizeCb: () => (() => void) | undefined } {
+export function installDom(): {
+  resizeCb: () => (() => void) | undefined;
+  dispatchDocument(type: string): void;
+  listenerCount(type: string): number;
+  setSelection(selection: Selection | null): void;
+} {
   let lastResizeCb: (() => void) | undefined;
-  vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+  let currentSelection: Selection | null = null;
+  const listeners = new Map<string, Array<() => void>>();
+  vi.stubGlobal('document', {
+    createElement: (t: string) => makeEl(t),
+    getSelection: () => currentSelection,
+    addEventListener: (type: string, listener: () => void) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    removeEventListener: (type: string, listener: () => void) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    },
+  });
   vi.stubGlobal('window', { devicePixelRatio: 1 });
   vi.stubGlobal(
     'ResizeObserver',
@@ -261,7 +312,14 @@ export function installDom(): { resizeCb: () => (() => void) | undefined } {
       disconnect(): void {}
     },
   );
-  return { resizeCb: () => lastResizeCb };
+  return {
+    resizeCb: () => lastResizeCb,
+    dispatchDocument: (type) => {
+      for (const listener of listeners.get(type) ?? []) listener();
+    },
+    listenerCount: (type) => listeners.get(type)?.length ?? 0,
+    setSelection: (selection) => { currentSelection = selection; },
+  };
 }
 
 export interface RenderCall {
@@ -302,6 +360,12 @@ export class FakePptxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
+  elementContext: PptxElementContext | null = null;
+  elementContextCalls: Array<{
+    slideIndex: number;
+    point: PptxSlidePoint;
+    options: PptxElementContextOptions;
+  }> = [];
   constructor(
     private _slideCount: number,
     public readonly slideWidth: number, // EMU, deck-wide (uniform)
@@ -375,7 +439,7 @@ export class FakePptxEngine {
       if (!this.deferred) resolve(bmp as unknown as ImageBitmap);
     });
   }
-  presentSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<PresentationHandle> {
+  presentSlide(_canvas: unknown, slide: number, opts?: PresentSlideOptions): Promise<PresentationHandle> {
     const canvas = _canvas as FakeEl | undefined;
     if (canvas && opts?.width && opts.width > 0) {
       const dpr = opts.dpr ?? 1;
@@ -408,6 +472,18 @@ export class FakePptxEngine {
    *  `PptxPresentation.collectSlideRuns`). Returns the fed runs regardless of mode. */
   collectSlideRuns(_slide: number, _width?: number): Promise<PptxTextRunInfo[]> {
     return Promise.resolve([...(this.feedTextRuns ?? [])]);
+  }
+  getElementContextAt(
+    slideIndex: number,
+    point: PptxSlidePoint,
+    options: PptxElementContextOptions = {},
+  ): Promise<PptxElementContext | null> {
+    this.elementContextCalls.push({ slideIndex, point, options });
+    return Promise.resolve(this.elementContext ? {
+      ...structuredClone(this.elementContext),
+      slideIndex,
+      point: { ...point },
+    } : null);
   }
   /** The per-call `width` (px) recorded for every renderSlide call, in call order.
    *  T3 asserts each mounted slide received its OWN px width. */

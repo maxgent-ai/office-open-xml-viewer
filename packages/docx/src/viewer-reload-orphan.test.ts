@@ -31,8 +31,13 @@ describe('DocxViewer.load() — no orphaned engine on re-load (SC20)', () => {
       .mockResolvedValueOnce(first.asDoc())
       .mockResolvedValueOnce(second.asDoc());
 
-    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement);
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, { password: 'secret' });
     await v.load('one.docx');
+    expect(loadSpy).toHaveBeenNthCalledWith(
+      1,
+      'one.docx',
+      expect.objectContaining({ password: 'secret' }),
+    );
     expect(first.destroyed).toBe(false);
 
     await v.load('two.docx');
@@ -55,8 +60,8 @@ describe('DocxViewer.load() — no orphaned engine on re-load (SC20)', () => {
     const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, { onError });
     await v.load('one.docx');
 
-    await v.load('bad.docx');
-    expect(onError).toHaveBeenCalledTimes(1);
+    await expect(v.load('bad.docx')).rejects.toThrow('boom');
+    expect(onError).not.toHaveBeenCalled();
     expect(first.destroyed).toBe(false);
     expect(v.pageCount).toBe(2);
 

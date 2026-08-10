@@ -225,8 +225,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
     let rendered: { data: Uint8ClampedArray; w: number; h: number };
 
     beforeAll(async () => {
-      const { parseDocx } = docxMod as { parseDocx: (bytes: Uint8Array) => Any };
-      doc = parseDocx(makeDocx());
+      const { materializeDocxDocument } = docxMod as { materializeDocxDocument: (bytes: Uint8Array) => Any };
+      doc = await materializeDocxDocument(makeDocx());
       [chart] = collectRuns(doc.body, 'chart');
       const restoreOffscreen = installOffscreenCanvasShim(factory);
       try {

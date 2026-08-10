@@ -27,6 +27,18 @@ export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRu
   description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow.',
 });
 
+export const WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION = defineCompatibilityRule({
+  id: 'word-section-mark-blank-page-suppression',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'next-page-section-mark-bottom-edge-admission',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For the observed nextPage boundary, Word consumes an undecorated inkless paragraph that carries the section boundary on the outgoing page instead of creating an otherwise empty intermediate page solely for that non-painting mark. The following section still starts its requested page. Other section-start kinds remain outside this observation.',
+});
+
 export const WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE = defineCompatibilityRule({
   id: 'word-book-fold-gutter-right-edge',
   evidence: {
@@ -59,18 +71,20 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   pageBottomIsUnreserved: boolean;
   physicalRegionBottomIsActive: boolean;
   hasFollowingInk: boolean;
+  followsNextPageSectionBoundary: boolean;
+  markExtentPt: number;
   markBelowBaselinePt: number;
 }>): number {
-  return !input.hasContinuationBoundary
+  const eligible = !input.hasContinuationBoundary
     && input.inkless
     && input.undecorated
     && !input.keepNext
     && input.markReservePt === 0
     && input.pageBottomIsUnreserved
-    && input.physicalRegionBottomIsActive
-    && input.hasFollowingInk
-    ? input.markBelowBaselinePt
-    : 0;
+    && input.physicalRegionBottomIsActive;
+  if (!eligible) return 0;
+  if (input.followsNextPageSectionBoundary) return Math.max(0, input.markExtentPt);
+  return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
 }
 
 export function wordBookFoldGutterEdge(): 'right' {

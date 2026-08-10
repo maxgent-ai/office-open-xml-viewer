@@ -6,51 +6,35 @@ import {
 } from '@silurus/ooxml-core';
 import type { Presentation, Slide } from '@silurus/ooxml-pptx';
 import {
-  normalizeLoadResourceOptions,
-  OoxmlResourceMetricsSession,
   decodeOoxmlResourceUsage,
   parseResourceLimitError,
-  resourcePolicyForWasm,
   HARD_MAX_RAW_PART_CACHE_BYTES,
   HARD_MAX_RAW_PART_CACHE_ENTRIES,
   type PullSessionCommand,
   type PullSessionResponse,
+  type OoxmlResourceMetricsSession,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
+import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — wasm-pack generated JS without a d.ts entry for the bare module path
-import * as pptxWasm from '../../pptx/src/wasm/pptx_parser.js';
-import { normalizePresentationBootstrap } from '../../pptx/src/presentation-preflight.ts';
-import { PptxSlidePullClient } from '../../pptx/src/slide-pull-client.ts';
 import {
+  acquirePptxNodeSession,
+  PptxSlidePullClient,
   readPptxSlideCursorUsage,
-  type PptxSlideCursorArchive,
-} from '../../pptx/src/slide-cursor-operation.ts';
-import { SlidePullWorker } from '../../pptx/src/slide-pull-worker.ts';
-import type { PresentationBootstrap } from '../../pptx/src/worker-protocol.ts';
-import { InProcessPullTransport } from './in-process-pull-transport.ts';
+  SlidePullWorker,
+  type PresentationBootstrap,
+  type PptxNodeArchive,
+} from '@silurus/ooxml-pptx/internal/session';
+import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
-import { loadWasmModule, resolveWasm } from './wasm-loader.ts';
+import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 
-let initialized = false;
-
-interface PptxArchiveHandle extends PptxSlideCursorArchive {
-  free(): void;
-  assert_healthy(): void;
-  presentation_bootstrap(): Uint8Array;
-  resource_usage(): Uint8Array;
-  extract_image(path: string): Uint8Array;
-  extract_media(path: string): Uint8Array;
-}
-
-interface PptxArchiveConstructor {
-  new (
-    data: Uint8Array,
-    maxArchiveEntryBytes?: bigint | null,
-    maxTotalInflatedBytes?: bigint | null,
-  ): PptxArchiveHandle;
-}
+const getPptxWasmModule = createLazyWasmModule(() => resolveWasm(
+    import.meta.url,
+    'pptx_parser_bg.wasm',
+    '@silurus/ooxml-pptx/wasm-binary',
+  ));
 
 /** Options for the bounded Node presentation session. */
 export type OpenPptxPresentationOptions = OoxmlNodeSessionOptions;
@@ -84,34 +68,6 @@ export interface PptxPresentationSession extends AsyncIterable<Slide> {
   close(): Promise<void>;
 }
 
-function ensureInit(): void {
-  if (initialized) return;
-  // The wasm-pack `--target web` JS module exports `initSync` and the
-  // parser functions. Locate the sibling `.wasm` file in the pptx package
-  // and feed its bytes into `initSync` so the module is fully linked
-  // before the first `parse_pptx` call.
-  const wasmPath = resolveWasm(import.meta.url, '../../pptx/src/wasm/pptx_parser_bg.wasm');
-  loadWasmModule(pptxWasm as unknown as { initSync: (m: WebAssembly.Module) => unknown }, wasmPath);
-  initialized = true;
-}
-
-/** Parse a `.pptx` archive in Node and return the same `Presentation` model
- *  the browser path produces. Synchronous WASM init is performed on first call
- *  and cached for subsequent invocations. */
-export function parsePptx(buffer: ArrayBuffer | Uint8Array | Buffer): Presentation {
-  ensureInit();
-  const bytes =
-    buffer instanceof Uint8Array
-      ? buffer
-      : new Uint8Array(buffer as ArrayBuffer);
-  // `parse_pptx` returns UTF-8 JSON bytes (Result<Vec<u8>, JsValue>); decode +
-  // parse once. Matches the browser main-thread receiver.
-  const json = (pptxWasm as unknown as { parse_pptx: (b: Uint8Array) => Uint8Array }).parse_pptx(
-    bytes,
-  );
-  return JSON.parse(new TextDecoder().decode(json)) as Presentation;
-}
-
 /**
  * Open a one-pass, pull-based PPTX session for Node batch rendering. Existing
  * materializing helpers remain unchanged; this additive path avoids retaining a
@@ -119,42 +75,24 @@ export function parsePptx(buffer: ArrayBuffer | Uint8Array | Buffer): Presentati
  * Exhausting or breaking the iterator closes the retained WASM archive.
  */
 export async function openPptxPresentation(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
+  buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSession> {
-  const resourceOptions = normalizeLoadResourceOptions(options);
-  const metrics = new OoxmlResourceMetricsSession({
-    enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
-    format: 'pptx',
-    mode: 'node',
-    scope: 'session',
-    policy: resourceOptions.policy,
-    onMetrics: resourceOptions.onResourceMetrics,
-    emitToConsole: resourceOptions.debug,
-  });
-  metrics.setSourceBytes(toUint8(buffer).byteLength);
-  const Archive: PptxArchiveConstructor = pptxWasm.PptxArchive;
-  let archive: PptxArchiveHandle | undefined;
-  try {
-    throwIfAborted(options.signal);
-    ensureInit();
-    const [maxEntry, maxTotal] = resourcePolicyForWasm(resourceOptions.policy);
-    archive = new Archive(toUint8(buffer), maxEntry, maxTotal);
-    const bootstrap = normalizePresentationBootstrap(JSON.parse(
-      new TextDecoder().decode(archive.presentation_bootstrap()),
-    ) as PresentationBootstrap);
-    metrics.checkpoint('presentation bootstrap ready');
-    return new PptxPresentationSessionImpl(archive, bootstrap, metrics, options.signal);
-  } catch (error) {
-    try {
-      archive?.free();
-    } catch {
-      // Preserve the open/bootstrap failure.
-    }
-    const normalized = parseResourceLimitError(error) ?? error;
-    metrics.fail(normalized);
-    throw normalized;
-  }
+  return openPptxPresentationImpl(buffer, options);
+}
+
+async function openPptxPresentationImpl(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OpenPptxPresentationOptions = {},
+): Promise<PptxPresentationSessionImpl> {
+  const acquired = await acquirePptxNodeSession(toUint8(buffer), getPptxWasmModule(), options);
+  return new PptxPresentationSessionImpl(
+    acquired.closeArchive,
+    acquired.archive,
+    acquired.bootstrap,
+    acquired.metrics,
+    options.signal,
+  );
 }
 
 class PptxPresentationSessionImpl implements PptxPresentationSession {
@@ -182,7 +120,8 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   });
 
   constructor(
-    private readonly archive: PptxArchiveHandle,
+    private readonly closeArchive: () => void,
+    private readonly archive: PptxNodeArchive,
     private readonly bootstrap: PresentationBootstrap,
     private readonly metrics: OoxmlResourceMetricsSession,
     private readonly signal?: AbortSignal,
@@ -210,6 +149,19 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
         this.metrics.observeUsage(usage);
       },
     });
+  }
+
+  materialize(slides: Slide[]): Presentation {
+    return {
+      slideWidth: this.slideWidth,
+      slideHeight: this.slideHeight,
+      slides,
+      defaultTextColor: this.bootstrap.defaultTextColor,
+      majorFont: this.bootstrap.majorFont,
+      minorFont: this.bootstrap.minorFont,
+      ...(this.bootstrap.hlinkColor ? { hlinkColor: this.bootstrap.hlinkColor } : {}),
+      ...(this.bootstrap.folHlinkColor ? { folHlinkColor: this.bootstrap.folHlinkColor } : {}),
+    };
   }
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
@@ -312,7 +264,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
     this.transport.terminate();
     this.rawParts.clear();
     try {
-      this.archive.free();
+      this.closeArchive();
     } catch (cleanupError) {
       operationError ??= parseResourceLimitError(cleanupError) ?? cleanupError;
     }
@@ -333,13 +285,13 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   private getPartInternal(
     path: string,
     mimeType: string,
-    extract: (archive: PptxArchiveHandle) => Uint8Array,
+    extract: (archive: PptxNodeArchive) => Uint8Array,
   ): Promise<Blob> {
     return this.rawParts.get(path, mimeType, () => {
       throwIfAborted(this.signal);
       const bytes = extract(this.archive);
       this.refreshResourceUsage();
-      return new Blob([new Uint8Array(bytes).slice() as BlobPart], { type: mimeType });
+      return new Blob([bytes as BlobPart], { type: mimeType });
     });
   }
 
@@ -368,47 +320,23 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   }
 }
 
-/** Extract raw bytes for a single media entry (e.g. `ppt/media/image1.png`)
- *  from the source archive. Mirrors `extract_media` on the browser worker. */
-export function extractMedia(buffer: ArrayBuffer | Uint8Array | Buffer, path: string): Uint8Array {
-  ensureInit();
-  const bytes =
-    buffer instanceof Uint8Array
-      ? buffer
-      : new Uint8Array(buffer as ArrayBuffer);
-  return (pptxWasm as unknown as { extract_media: (b: Uint8Array, p: string) => Uint8Array }).extract_media(bytes, path);
-}
-
-/** Extract raw bytes for a single embedded image entry (e.g.
- *  `ppt/media/image1.png`) from the source archive. Mirrors `extract_image`
- *  on the browser worker (twin of {@link extractMedia}); pictures and blip
- *  fills now carry only zip paths, so the render path reads image bytes lazily
- *  through this. `maxZipEntryBytes` mirrors the worker's per-entry guard and is
- *  optional; omission selects the shared standard policy default. */
-export function extractImage(
-  buffer: ArrayBuffer | Uint8Array | Buffer,
-  path: string,
-  maxZipEntryBytes?: number,
-): Uint8Array {
-  ensureInit();
-  const bytes =
-    buffer instanceof Uint8Array
-      ? buffer
-      : new Uint8Array(buffer as ArrayBuffer);
-  return (
-    pptxWasm as unknown as {
-      extract_image: (b: Uint8Array, p: string, max?: bigint) => Uint8Array;
-    }
-  ).extract_image(
-    bytes,
-    path,
-    typeof maxZipEntryBytes === 'number' && maxZipEntryBytes > 0
-      ? BigInt(maxZipEntryBytes)
-      : undefined,
+/** Materialize a complete caller-owned presentation through the same retained
+ * archive and acknowledged slide producer as {@link openPptxPresentation}. */
+export async function materializePptxPresentation(
+  buffer: ArrayBuffer | Uint8Array,
+  options: OpenPptxPresentationOptions = {},
+): Promise<Presentation> {
+  return usingOwnedSession(
+    () => openPptxPresentationImpl(buffer, options),
+    async (session) => {
+      const slides: Slide[] = [];
+      for await (const slide of session.slides()) slides.push(slide);
+      return session.materialize(slides);
+    },
   );
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array | Buffer): Uint8Array {
+function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 

@@ -356,6 +356,39 @@ describe('canonical producer with a real document model', () => {
     ]);
   });
 
+  it('derives bookmark page metadata after header stories join the retained graph', () => {
+    const section = {
+      pageWidth: 200, pageHeight: 100,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const headerDestination = ordinaryParagraph('header destination');
+    headerDestination.bookmarks = ['header-destination'];
+    const model = {
+      section,
+      body: [ordinaryBodyParagraph('body')],
+      headers: {
+        default: { body: [headerDestination as unknown as BodyElement] },
+        first: null,
+        even: null,
+      },
+      footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const services = createLayoutServices(model, { measureContext: measureContext() });
+
+    const layout = layoutDocument(model, services, { currentDateMs: 0 });
+
+    expect(layout.pages[0]?.bookmarkStarts).toEqual([
+      expect.objectContaining({
+        name: 'header-destination',
+        sectionOccurrenceId: layout.pages[0]?.sectionOccurrenceId,
+      }),
+    ]);
+    expect([...buildBookmarkPageMap(layout)]).toEqual([['header-destination', 0]]);
+  });
+
   it('composes compatible continuous sections as disjoint regions on one physical page', () => {
     const model = sectionBoundaryModel(ordinaryBodyParagraph('before'), 'continuous');
     const services = createLayoutServices(model, { measureContext: measureContext() });

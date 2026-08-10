@@ -227,6 +227,9 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     );
   }
   for (const line of node.lines) {
+    for (const rule of line.barTabRules ?? []) {
+      paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
+    }
     for (const placement of line.placements) {
       if (placement.kind === 'resource') {
         if (!context.resources) {
@@ -270,6 +273,9 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
             throw new Error('Retained tab leader geometry is missing');
           }
           for (const operation of placement.leaderGlyphs) paintRetainedGlyph(operation, context);
+        }
+        for (const decoration of placement.decorations ?? []) {
+          paintStrokeSegment(decoration, context);
         }
         continue;
       }

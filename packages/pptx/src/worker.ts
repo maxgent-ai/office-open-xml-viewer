@@ -109,12 +109,13 @@ self.onmessage = async (
 
       if (request.kind === 'parse') {
         preflightBuilder = null;
-        const [maxEntry, maxTotal] = resourcePolicyForWasm(request.resourcePolicy);
+        const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
         const bootstrap = host.run(() => {
           const archive = new PptxArchive(
             new Uint8Array(request.buffer),
             maxEntry,
             maxTotal,
+            maxEntries,
           );
           host.setArchive(archive);
           return JSON.parse(

@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-core",
   "private": true,
-  "version": "0.75.0",
+  "version": "0.77.0",
   "description": "Shared rendering primitives and types (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -27,8 +27,14 @@
     "./testing": "./src/testing/index.ts",
     "./internal/bounded-async-lru-cache": "./src/internal/bounded-async-lru-cache.ts",
     "./internal/bounded-raw-part-cache": "./src/internal/bounded-raw-part-cache.ts",
+    "./internal/canvas-viewer-mechanics": "./src/internal/canvas-viewer-mechanics.ts",
+    "./internal/chart-context": "./src/internal/chart-context.ts",
+    "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
+    "./internal/owned-session": "./src/internal/owned-session.ts",
     "./internal/resource-measurement": "./src/internal/resource-measurement.ts",
+    "./internal/runtime-generation": "./src/internal/runtime-generation.ts",
     "./internal/script-preload-accumulator": "./src/internal/script-preload-accumulator.ts",
+    "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",
     "./mathjax-stix2": "./assets/mathjax-stix2.js"
   },
   "scripts": {
@@ -39,7 +45,8 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "@typescript/native": "npm:typescript@^7.0.2",
+    "typescript": "^7.0.2",
+    "typescript-compiler-api": "npm:@typescript/typescript6@^6.0.2",
     "esbuild": "^0.25.0",
     "@mathjax/src": "^4.0.0",
     "@mathjax/mathjax-stix2-font": "^4.1.0"

@@ -1,12 +1,10 @@
 ---
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
-import FrameworkSection from '../components/FrameworkSection.astro';
 import ApiReference from '../components/ApiReference.astro';
 import { docxSnippets } from '../lib/demo-snippets';
 ---
-<FormatPage format="docx" name="DOCX" ext=".docx"
-  tagline="Render .docx documents to Canvas.">
+<FormatPage format="docx" name="DOCX" ext=".docx">
   <DemoBlock
     format="docx" kind="demo" badge="Story · Demo"
     title="Single viewer with navigation"
@@ -31,6 +29,5 @@ import { docxSnippets } from '../lib/demo-snippets';
     description="Combine both: a DocxDocument for the thumbnail rail and a DocxViewer for the detail pane. Click a thumbnail to jump the preview with goToPage()."
     code={docxSnippets.masterdetail}
   />
-  <FrameworkSection format="docx" />
   <ApiReference format="docx" />
 </FormatPage>

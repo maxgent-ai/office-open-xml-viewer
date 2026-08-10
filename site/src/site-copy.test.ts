@@ -7,7 +7,6 @@ const sources = [
   './pages/xlsx.astro',
   './pages/pptx.astro',
   './layouts/FormatPage.astro',
-  './components/FrameworkSection.astro',
   './lib/announcements.ts',
 ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 
@@ -24,9 +23,8 @@ describe('official-site copy', () => {
     }
   });
 
-  it('keeps concrete navigation and lifecycle guidance', () => {
+  it('keeps concrete navigation and diagnostics guidance', () => {
     expect(sources).toContain('Format documentation:');
-    expect(sources).toContain('call <code>destroy()</code> on unmount');
     expect(sources).toContain('content-free usage metrics');
   });
 });

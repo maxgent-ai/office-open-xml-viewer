@@ -12,6 +12,146 @@ import {
 } from './affine.js';
 import type { CanvasPaintContext } from './types.js';
 
+type CompoundBand = Readonly<{ offsetDev: number; widthDev: number }>;
+
+/** ECMA-376 §17.18.2 names the ordered thin/thick rails and gap class. The
+ * token supplies relative band weights; device-pixel flooring keeps every
+ * authored rail and gap visible at small zoom levels. */
+function compoundBorderBands(
+  authoredStyle: string,
+  widthDev: number,
+  dpr: number,
+): Readonly<{ bands: readonly CompoundBand[]; spanDev: number }> | null {
+  const triple = authoredStyle === 'triple';
+  const match = /^(thinThick|thickThin|thinThickThin)(Small|Medium|Large)Gap$/.exec(authoredStyle);
+  if (!triple && !match) return null;
+  const railWeights = triple ? [1, 1, 1]
+    : match?.[1] === 'thinThick' ? [1, 2]
+      : match?.[1] === 'thickThin' ? [2, 1]
+        : [1, 2, 1];
+  const gapWeight = triple || match?.[2] === 'Small' ? 1
+    : match?.[2] === 'Medium' ? 2 : 3;
+  const totalWeight = railWeights.reduce((sum, weight) => sum + weight, 0)
+    + gapWeight * (railWeights.length - 1);
+  const unitDev = widthDev / totalWeight;
+  const railsDev = railWeights.map((weight) => Math.max(1, Math.round(unitDev * weight * dpr)));
+  const gapDev = Math.max(1, Math.round(unitDev * gapWeight * dpr));
+  let cursorDev = 0;
+  const bands = railsDev.map((railDev, index) => {
+    const band = { offsetDev: cursorDev, widthDev: railDev };
+    cursorDev += railDev + (index < railsDev.length - 1 ? gapDev : 0);
+    return band;
+  });
+  return { bands, spanDev: cursorDev };
+}
+
+function compoundFrameBandsOutsideToInside(
+  compound: Readonly<{ bands: readonly CompoundBand[]; spanDev: number }>,
+): readonly CompoundBand[] {
+  // ST_Border names compound rails from the cell interior toward the exterior
+  // (thinThick = thin inside, thick outside). Closed table frames start at the
+  // exterior edge, so reverse both order and offsets while retaining gaps.
+  return [...compound.bands].reverse().map((band) => ({
+    offsetDev: compound.spanDev - band.offsetDev - band.widthDev,
+    widthDev: band.widthDev,
+  }));
+}
+
+/** Paint a rectangular compound border as closed rails. A compound ST_Border
+ * token orders its bands from the inside of the box toward the outside, so the
+ * frame maps them to outside-in offsets and mirrors the bottom/right edges.
+ * Painting the
+ * four sides of each rail with overlapping corner rectangles preserves that
+ * ordering and gives every rail a continuous join at all four corners. */
+export function paintCompoundBorderFrame(
+  bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+  border: Pick<BorderSegment, 'authoredStyle' | 'color' | 'widthPt' | 'style'>,
+  context: CanvasPaintContext,
+): boolean {
+  if (border.style !== 'compound') return false;
+  const pointToCss = context.pointToCss ?? scaleAffine(context.scale);
+  // A skewed or rotated retained frame is no longer axis-aligned in final CSS
+  // space. Its individual sides still retain the compound treatment below;
+  // the closed-frame optimization is deliberately limited to exact rectangles.
+  if (pointToCss.b !== 0 || pointToCss.c !== 0 || pointToCss.a <= 0 || pointToCss.d <= 0) {
+    return false;
+  }
+  const topLeft = mapAffinePoint(pointToCss, { xPt: bounds.xPt, yPt: bounds.yPt });
+  const bottomRight = mapAffinePoint(pointToCss, {
+    xPt: bounds.xPt + bounds.widthPt,
+    yPt: bounds.yPt + bounds.heightPt,
+  });
+  const horizontal = compoundBorderBands(
+    border.authoredStyle,
+    border.widthPt * pointToCss.d,
+    context.dpr,
+  );
+  const vertical = compoundBorderBands(
+    border.authoredStyle,
+    border.widthPt * pointToCss.a,
+    context.dpr,
+  );
+  if (!horizontal || !vertical || horizontal.bands.length !== vertical.bands.length) return false;
+  const horizontalFrameBands = compoundFrameBandsOutsideToInside(horizontal);
+  const verticalFrameBands = compoundFrameBandsOutsideToInside(vertical);
+
+  const fillFinalRect = (x: number, y: number, width: number, height: number): boolean => {
+    const corners = [
+      { xPt: x, yPt: y }, { xPt: x + width, yPt: y },
+      { xPt: x, yPt: y + height }, { xPt: x + width, yPt: y + height },
+    ].map((point) => inverseMapAffinePoint(pointToCss, point));
+    if (corners.some((point) => point === null)) return false;
+    const local = corners.filter((point): point is { xPt: number; yPt: number } => point !== null);
+    const xs = local.map((point) => point.xPt);
+    const ys = local.map((point) => point.yPt);
+    context.ctx.fillRect(
+      Math.min(...xs),
+      Math.min(...ys),
+      Math.max(...xs) - Math.min(...xs),
+      Math.max(...ys) - Math.min(...ys),
+    );
+    return true;
+  };
+
+  const leftStartDev = Math.round(topLeft.xPt * context.dpr - vertical.spanDev / 2);
+  const rightEndDev = Math.round(bottomRight.xPt * context.dpr + vertical.spanDev / 2);
+  const topStartDev = Math.round(topLeft.yPt * context.dpr - horizontal.spanDev / 2);
+  const bottomEndDev = Math.round(bottomRight.yPt * context.dpr + horizontal.spanDev / 2);
+  context.ctx.fillStyle = border.color;
+  for (let index = 0; index < horizontalFrameBands.length; index += 1) {
+    const horizontalBand = horizontalFrameBands[index]!;
+    const verticalBand = verticalFrameBands[index]!;
+    const leftDev = leftStartDev + verticalBand.offsetDev;
+    const rightDev = rightEndDev - verticalBand.offsetDev;
+    const topDev = topStartDev + horizontalBand.offsetDev;
+    const bottomDev = bottomEndDev - horizontalBand.offsetDev;
+    const leftCss = leftDev / context.dpr;
+    const rightCss = rightDev / context.dpr;
+    const topCss = topDev / context.dpr;
+    const bottomCss = bottomDev / context.dpr;
+    const verticalWidthCss = verticalBand.widthDev / context.dpr;
+    const horizontalWidthCss = horizontalBand.widthDev / context.dpr;
+    // Horizontal rails span through the vertical rails, and vice versa. The
+    // overlap is intentional: it closes both the inner and outer corner pixels.
+    if (!fillFinalRect(leftCss, topCss, rightCss - leftCss, horizontalWidthCss)) return false;
+    if (!fillFinalRect(
+      leftCss,
+      bottomCss - horizontalWidthCss,
+      rightCss - leftCss,
+      horizontalWidthCss,
+    )) return false;
+    if (!fillFinalRect(leftCss, topCss, verticalWidthCss, bottomCss - topCss)) return false;
+    if (!fillFinalRect(
+      rightCss - verticalWidthCss,
+      topCss,
+      verticalWidthCss,
+      bottomCss - topCss,
+    )) return false;
+  }
+  context.ctx.setLineDash([]);
+  return true;
+}
+
 /** Logical CSS width whose raster footprint is exactly one device pixel. */
 export function oneDevicePixelCssWidth(
   context: Pick<CanvasPaintContext, 'dpr'>,
@@ -60,6 +200,50 @@ export function paintStrokeSegment(
   const normalScale = horizontal
     ? Math.hypot(pointToCss.c, pointToCss.d)
     : vertical ? Math.hypot(pointToCss.a, pointToCss.b) : 0;
+  const compound = segment.style === 'compound' && axisAligned && normalScale > 0
+    ? compoundBorderBands(segment.authoredStyle, segment.widthPt * normalScale, context.dpr)
+    : null;
+  if (compound) {
+    ctx.fillStyle = segment.color;
+    const fillFinalRect = (x: number, y: number, width: number, height: number): void => {
+      const corners = [
+        { xPt: x, yPt: y }, { xPt: x + width, yPt: y },
+        { xPt: x, yPt: y + height }, { xPt: x + width, yPt: y + height },
+      ].map((point) => inverseMapAffinePoint(pointToCss, point));
+      if (corners.some((point) => point === null)) return;
+      const local = corners.filter((point): point is { xPt: number; yPt: number } => point !== null);
+      const xs = local.map((point) => point.xPt);
+      const ys = local.map((point) => point.yPt);
+      ctx.fillRect(Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    };
+    const startDev = Math.round(
+      (finalHorizontal ? finalPath[0]!.yPt : finalPath[0]!.xPt) * context.dpr
+        - compound.spanDev / 2,
+    );
+    for (const band of compound.bands) {
+      const bandStartCss = (startDev + band.offsetDev) / context.dpr;
+      const bandWidthCss = band.widthDev / context.dpr;
+      if (finalHorizontal) {
+        const x = Math.min(finalPath[0]!.xPt, finalPath[1]!.xPt);
+        fillFinalRect(x, bandStartCss, Math.abs(finalDx), bandWidthCss);
+      } else if (finalVertical) {
+        const y = Math.min(finalPath[0]!.yPt, finalPath[1]!.yPt);
+        fillFinalRect(bandStartCss, y, bandWidthCss, Math.abs(finalDy));
+      } else {
+        const offsetPt = (band.offsetDev - compound.spanDev / 2) / context.dpr / normalScale;
+        const widthPt = band.widthDev / context.dpr / normalScale;
+        if (horizontal) {
+          ctx.fillRect(Math.min(path[0]!.xPt, path[1]!.xPt), path[0]!.yPt + offsetPt,
+            Math.abs(path[1]!.xPt - path[0]!.xPt), widthPt);
+        } else {
+          ctx.fillRect(path[0]!.xPt + offsetPt, Math.min(path[0]!.yPt, path[1]!.yPt),
+            widthPt, Math.abs(path[1]!.yPt - path[0]!.yPt));
+        }
+      }
+    }
+    ctx.setLineDash([]);
+    return;
+  }
   if (segment.style === 'double' && axisAligned && normalScale > 0) {
     ctx.fillStyle = segment.color;
     if (finalHorizontal || finalVertical) {

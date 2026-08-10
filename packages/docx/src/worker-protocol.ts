@@ -7,6 +7,8 @@ import type {
   PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import type { DocxElementContextOptions } from './element-context';
+import type { DocxElementContext, DocxPagePoint } from './selection-context';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -44,6 +46,13 @@ export type RenderWorkerRequest =
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.
   | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
+  | {
+      type: 'hitTestElement';
+      id: number;
+      pageIndex: number;
+      point: DocxPagePoint;
+      opts: DocxElementContextOptions;
+    }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
   | { type: 'toMarkdown'; id: number };
@@ -73,4 +82,5 @@ export type RenderWorkerResponse =
   // The worker projects structured-clone-safe run geometry from the same
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }
-  | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] };
+  | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
+  | { type: 'elementHit'; id: number; context: DocxElementContext | null };

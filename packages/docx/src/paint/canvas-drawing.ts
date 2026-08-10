@@ -1,6 +1,12 @@
 import type { DrawingLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
-import { canvasFontString, paintDrawingMLShape, resolveFill } from '@silurus/ooxml-core';
+import {
+  canvasFontString,
+  clipDrawingMLShape,
+  paintDrawingMLShape,
+  resolveFill,
+  withDrawingMLShapeTransform,
+} from '@silurus/ooxml-core';
 import { paintRetainedResource } from './canvas-resource.js';
 
 export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintContext): void {
@@ -9,6 +15,44 @@ export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintCont
     if (command.kind === 'drawingml-shape') {
       // Page setup already maps retained point coordinates to device pixels. A
       // second scale here would multiply stroke widths and arrowhead geometry.
+      paintDrawingMLShape(
+        context.ctx as CanvasRenderingContext2D,
+        command.plan,
+        1,
+      );
+      continue;
+    }
+    if (command.kind === 'drawingml-image-fill') {
+      if (!context.resources) throw new Error(`Missing retained resource painter for ${command.resourceKey}`);
+      const { x, y, w, h } = command.plan.rect;
+      const fillRect = command.fillRect ?? { l: 0, t: 0, r: 0, b: 0 };
+      const destination = {
+        xPt: x + fillRect.l * w,
+        yPt: y + fillRect.t * h,
+        widthPt: w * (1 - fillRect.l - fillRect.r),
+        heightPt: h * (1 - fillRect.t - fillRect.b),
+      };
+      if (destination.widthPt > 0 && destination.heightPt > 0) {
+        withDrawingMLShapeTransform(
+          context.ctx as CanvasRenderingContext2D,
+          command.plan,
+          () => {
+            clipDrawingMLShape(
+              context.ctx as CanvasRenderingContext2D,
+              command.plan,
+            );
+            paintRetainedResource(
+              command.resourceKey,
+              'image',
+              destination,
+              undefined,
+              context,
+            );
+          },
+        );
+      }
+      // The retained plan has a null base fill; this second pass paints only
+      // the authored outline/arrow decorations in the same transform.
       paintDrawingMLShape(
         context.ctx as CanvasRenderingContext2D,
         command.plan,

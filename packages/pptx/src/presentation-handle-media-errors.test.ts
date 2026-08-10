@@ -150,13 +150,13 @@ afterEach(() => {
 });
 
 describe('presentation media failure reporting', () => {
-  it('reports fetchMedia failures with the media path instead of silently skipping them', async () => {
+  it('rejects initial fetchMedia failures without also calling onError', async () => {
     installDom();
     const onError = vi.fn();
     const canvasContext = makeContext();
     const canvas = makeCanvas(canvasContext);
 
-    await createPresentationHandle(
+    const promise = createPresentationHandle(
       canvas as unknown as HTMLCanvasElement,
       [mediaElement()],
       options({
@@ -167,10 +167,9 @@ describe('presentation media failure reporting', () => {
       }),
     );
 
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0].message).toContain('ppt/media/clip.mp3');
-    expect(onError.mock.calls[0][0].message).toContain('archive read failed');
-    expect(canvasContext.fillText).toHaveBeenLastCalledWith(
+    await expect(promise).rejects.toThrow(/ppt\/media\/clip\.mp3.*archive read failed/);
+    expect(onError).not.toHaveBeenCalled();
+    expect(canvasContext.fillText).not.toHaveBeenCalledWith(
       'Media unavailable',
       expect.any(Number),
       expect.any(Number),

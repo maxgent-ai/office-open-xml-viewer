@@ -94,6 +94,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "ooxml-common",
+ "quick-xml",
  "roxmltree",
  "serde",
  "serde_json",
@@ -215,8 +216,12 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "ooxml-common"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
+ "quick-xml",
  "roxmltree",
  "serde",
+ "serde_json",
  "zip",
 ]
 
@@ -251,6 +256,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -438,6 +452,7 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "ooxml-common",
+ "quick-xml",
  "roxmltree",
  "serde",
  "serde_json",

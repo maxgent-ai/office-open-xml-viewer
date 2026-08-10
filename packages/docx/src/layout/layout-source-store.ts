@@ -97,6 +97,7 @@ export interface LayoutSourceDocumentFacts {
   readonly characterSpacingControl?: string;
   readonly mathDefJc?: string;
   readonly documentHasEastAsianText: boolean;
+  readonly normalStyleFontSizePt: number;
   readonly compat: DocumentLayoutSettings['compat'];
 }
 
@@ -252,6 +253,9 @@ function validateResourceManifests(
             }, textBoxParagraph.image.imagePath));
           }
         }
+      }
+      if (run.type === 'shape' && run.fill?.fillType === 'image') {
+        addImage(imageResourceKey(runSource, run.fill.imagePath));
       }
     });
   }

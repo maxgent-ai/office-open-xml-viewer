@@ -1166,36 +1166,120 @@ pub(crate) fn read_zip_head(
 //  Table style data model
 // ===========================
 
-/// Resolved fills and borders extracted from a single <a:tblStyle> definition.
+/// Text component of one DrawingML `CT_TablePartStyle` (§21.1.3.11).
+#[derive(Debug, Clone, Default)]
+struct TableTextStyle {
+    color: Option<String>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+}
+
+impl TableTextStyle {
+    fn overlay(&mut self, role: &Self) {
+        if role.color.is_some() {
+            self.color = role.color.clone();
+        }
+        if role.bold.is_some() {
+            self.bold = role.bold;
+        }
+        if role.italic.is_some() {
+            self.italic = role.italic;
+        }
+    }
+}
+
+/// Presence-preserving table-style line. `NoLine` is an authored
+/// `<a:ln><a:noFill/></a:ln>` or `<a:lnRef idx="0">`; it must clear a lower
+/// precedence role, while `Unspecified` inherits it.
+#[derive(Debug, Clone, Default)]
+enum TableLineStyle {
+    #[default]
+    Unspecified,
+    NoLine,
+    Stroke(Box<Stroke>),
+}
+
+impl TableLineStyle {
+    fn from_stroke(stroke: Option<Stroke>) -> Self {
+        stroke.map(Box::new).map(Self::Stroke).unwrap_or_default()
+    }
+
+    fn overlay(&mut self, role: &Self) {
+        if !matches!(role, Self::Unspecified) {
+            *self = role.clone();
+        }
+    }
+
+    fn apply_to(&self, target: &mut Option<Stroke>) {
+        match self {
+            Self::Unspecified => {}
+            Self::NoLine => *target = None,
+            Self::Stroke(stroke) => *target = Some((**stroke).clone()),
+        }
+    }
+}
+
+/// ECMA-376 `CT_TableCellBorderStyle` (§20.1.4.2.4): all six orthogonal and
+/// both diagonal members are retained on every one of the thirteen roles.
+#[derive(Debug, Clone, Default)]
+struct TableCellBorderStyle {
+    left: TableLineStyle,
+    right: TableLineStyle,
+    top: TableLineStyle,
+    bottom: TableLineStyle,
+    inside_h: TableLineStyle,
+    inside_v: TableLineStyle,
+    diagonal_tl: TableLineStyle,
+    diagonal_tr: TableLineStyle,
+}
+
+/// One of the thirteen `CT_TablePartStyle` roles in `CT_TableStyle`. Keeping
+/// fill, text, and borders together prevents vertical bands and corner roles
+/// from silently supporting only text while row roles support paint.
+#[derive(Debug, Clone, Default)]
+struct TablePartStyle {
+    fill: Option<Fill>,
+    text: TableTextStyle,
+    borders: TableCellBorderStyle,
+}
+
 #[derive(Debug, Clone, Default)]
 struct TableStyleDef {
-    whole_fill: Option<Fill>,
-    whole_inside_h: Option<Stroke>,
-    whole_inside_v: Option<Stroke>,
-    /// Outer top/bottom edge border (from wholeTbl tcBdr top/bottom)
-    whole_outer_h: Option<Stroke>,
-    /// Outer left/right edge border (from wholeTbl tcBdr left/right)
-    whole_outer_v: Option<Stroke>,
-    band1h_fill: Option<Fill>,
-    band2h_fill: Option<Fill>,
-    first_row_fill: Option<Fill>,
-    first_row_border_b: Option<Stroke>,
-    last_row_fill: Option<Fill>,
-    first_col_fill: Option<Fill>,
-    last_col_fill: Option<Fill>,
-    /// Default text colour per role, from `<a:tcTxStyle>` (schemeClr/srgbClr).
-    /// e.g. wholeTbl → dk1, firstRow header → lt1 (white). Hex, no `#`.
-    whole_text_color: Option<String>,
-    first_row_text_color: Option<String>,
-    last_row_text_color: Option<String>,
-    first_col_text_color: Option<String>,
-    last_col_text_color: Option<String>,
-    /// Default bold per role, from `<a:tcTxStyle b="on">` (ECMA-376 §20.1.4.2.28).
-    /// e.g. a firstRow header is commonly bold.
-    first_row_bold: Option<bool>,
-    last_row_bold: Option<bool>,
-    first_col_bold: Option<bool>,
-    last_col_bold: Option<bool>,
+    whole_tbl: TablePartStyle,
+    band1_h: TablePartStyle,
+    band2_h: TablePartStyle,
+    band1_v: TablePartStyle,
+    band2_v: TablePartStyle,
+    first_row: TablePartStyle,
+    last_row: TablePartStyle,
+    first_col: TablePartStyle,
+    last_col: TablePartStyle,
+    nw_cell: TablePartStyle,
+    ne_cell: TablePartStyle,
+    sw_cell: TablePartStyle,
+    se_cell: TablePartStyle,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TableStyleFlags {
+    first_row: bool,
+    last_row: bool,
+    first_col: bool,
+    last_col: bool,
+    band_row: bool,
+    band_col: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedTableCellStyle {
+    fill: Option<Fill>,
+    text: TableTextStyle,
+    border_l: TableLineStyle,
+    border_r: TableLineStyle,
+    border_t: TableLineStyle,
+    border_b: TableLineStyle,
+    diagonal_tl: TableLineStyle,
+    diagonal_tr: TableLineStyle,
 }
 
 // ===========================
@@ -1459,6 +1543,7 @@ fn parse_slide(
         master_bold,
         master_italic,
         master_caps,
+        master_reflection,
         master_color,
         ..
     } = bundle;
@@ -1470,7 +1555,7 @@ fn parse_slide(
     // placeholder colors) resolve against the override mapping (§20.1.6.8).
     // Otherwise fall back to the master bundle's values. (Master bullet colors
     // flow through `parsed_layout`, already override-adjusted by the caller.)
-    let theme: &HashMap<String, String> = eff.map(|e| &e.theme).unwrap_or(theme);
+    let theme: &PptxTheme = eff.map(|e| &e.theme).unwrap_or(theme);
     let master_xml: Option<&str> = master_xml.as_deref();
     let master_dir: &str = master_dir.as_str();
     let master_bg: Option<Fill> = match eff {
@@ -1497,6 +1582,11 @@ fn parse_slide(
     }
     for (t, c) in master_caps.iter() {
         lph.by_type_caps.entry(t.clone()).or_insert(c.clone());
+    }
+    for (t, reflection) in master_reflection.iter() {
+        lph.by_type_reflection
+            .entry(t.clone())
+            .or_insert_with(|| reflection.clone());
     }
     for (t, c) in master_color.iter() {
         lph.by_type_master_color
@@ -1605,31 +1695,37 @@ fn parse_slide(
 
     // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
     // These are decorative background elements defined in the slide layout
-    // (e.g. coloured bands, logos) that are not placeholder anchors.
-    if let Some(lxml) = layout_xml {
-        note_layout_master_parse();
-        if let Ok(ldoc) = parse_preflighted_pptx_xml(lxml) {
-            let lroot = ldoc.root_element();
-            if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
-                let empty_lph = LayoutPlaceholders::default();
-                for node in lsp_tree.children().filter(|n| n.is_element()) {
-                    let start = elements.len();
-                    parse_sp_tree_node(
-                        node,
-                        &empty_lph,
-                        layout_dir,
-                        layout_rels,
-                        smartart_drawings,
-                        zip,
-                        theme,
-                        &mut elements,
-                        true, // skip placeholder shapes
-                        None, // no inherited group fill at top level
-                        ooxml_common::depth::DepthGuard::root(),
-                    );
-                    element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
-                        origin: SlideElementOrigin::Layout,
-                    }));
+    // (e.g. coloured bands, logos) that are not placeholder anchors. ECMA-376
+    // §19.3.1.38 scopes showMasterSp to shapes on the master slide, so the
+    // selected layout's own shapes remain visible.
+    {
+        if let Some(lxml) = layout_xml {
+            note_layout_master_parse();
+            if let Ok(ldoc) = parse_preflighted_pptx_xml(lxml) {
+                let lroot = ldoc.root_element();
+                if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
+                    let empty_lph = LayoutPlaceholders::default();
+                    for node in lsp_tree.children().filter(|n| n.is_element()) {
+                        let start = elements.len();
+                        parse_sp_tree_node(
+                            node,
+                            &empty_lph,
+                            layout_dir,
+                            layout_rels,
+                            smartart_drawings,
+                            zip,
+                            theme,
+                            &mut elements,
+                            true, // skip placeholder shapes
+                            None, // no inherited group fill at top level
+                            ooxml_common::depth::DepthGuard::root(),
+                        );
+                        element_sources.extend((start..elements.len()).map(|_| {
+                            SlideElementSource {
+                                origin: SlideElementOrigin::Layout,
+                            }
+                        }));
+                    }
                 }
             }
         }
@@ -2078,7 +2174,7 @@ struct PresentationShared {
     slide_height: i64,
     slide_descriptors: Vec<SlideDescriptor>,
     pres_rels: HashMap<String, String>,
-    theme: HashMap<String, String>,
+    theme: PptxTheme,
     comment_authors: Option<HashMap<String, String>>,
     pres_master_path: Option<String>,
     master_cache: HashMap<String, ParsedMaster>,
@@ -2157,11 +2253,12 @@ fn bootstrap_presentation(
     // Used for the deck-wide defaults on `Presentation` (default text color,
     // major/minor fonts, hyperlink colors) and as the fallback theme for any
     // master that declares no /theme relationship of its own.
-    let theme_xml = find_rel_target_by_type(&pres_rels_xml, "/theme")
-        .map(|t| resolve_path("ppt", &t))
-        .and_then(|path| read_zip_str(zip, &path).ok())
+    let theme_path = find_rel_target_by_type(&pres_rels_xml, "/theme")
+        .map(|target| resolve_path("ppt", &target));
+    let theme = theme_path
+        .as_deref()
+        .map(|path| parse_theme_part(path, zip))
         .unwrap_or_default();
-    let theme = parse_theme_colors(&theme_xml);
 
     // --- Presentation-level fallback master ---
     // The first slide master referenced by the presentation. Used for slides
@@ -2562,19 +2659,18 @@ fn produce_slide_unit_with_journal(
         // a clrMapOvr slide passes the OVERRIDE-adjusted pair so its layout colors
         // flip with the override (mirrors the master theme-dependent recompute
         // above), everything else is the frozen bundle maps.
-        let (layout_theme, layout_master_bullets): (
-            &HashMap<String, String>,
-            &HashMap<String, LevelBullets>,
-        ) = match effective_master.as_ref() {
-            Some(e) => (&e.theme, &e.master_level_bullets),
-            None => (&bundle.theme, &bundle.master_level_bullets),
-        };
+        let (layout_theme, layout_master_bullets): (&PptxTheme, &HashMap<String, LevelBullets>) =
+            match effective_master.as_ref() {
+                Some(e) => (&e.theme, &e.master_level_bullets),
+                None => (&bundle.theme, &bundle.master_level_bullets),
+            };
         // Build a `ParsedLayout` from a layout XML string with the resolved
         // theme/bullets and this bundle's remaining (theme-independent) maps.
         let build_parsed_layout = |lx: &str, zip: &mut PptxZip| -> ParsedLayout {
             parse_layout(
                 lx,
                 &bundle.master_font_sizes,
+                &bundle.master_font_families,
                 &bundle.master_level_font_sizes,
                 &bundle.master_level_indents,
                 layout_master_bullets,
@@ -3591,6 +3687,49 @@ mod tests {
         assert!(BulletProps::default().is_inherit());
     }
 
+    /// PowerPoint paints one marker glyph when a flattened SmartArt cache
+    /// serializes a duplicated string-valued buChar. Preserve other authored
+    /// multi-character values because ECMA-376 types the attribute as a string.
+    #[test]
+    fn character_bullet_collapses_only_a_duplicated_marker() {
+        let doc = roxmltree::Document::parse(
+            r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="••"/></a:pPr>"#,
+        )
+        .expect("valid paragraph properties");
+        let theme = HashMap::new();
+        let mut resolve_blip = |_: &str| None;
+        match parse_bullet(Some(doc.root_element()), &theme, &mut resolve_blip) {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
+            other => panic!("expected Char, got {other:?}"),
+        }
+
+        let multi_char_doc = roxmltree::Document::parse(
+            r#"<a:pPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:buChar char="🡆x"/></a:pPr>"#,
+        )
+        .expect("valid multi-character marker");
+        match parse_bullet(
+            Some(multi_char_doc.root_element()),
+            &theme,
+            &mut resolve_blip,
+        ) {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "🡆x"),
+            other => panic!("expected Char, got {other:?}"),
+        }
+    }
+
+    /// PowerPoint serializes an unbound placeholder as idx=2^32-1. That value
+    /// is a sentinel rather than a layout slot, so the paragraph still inherits
+    /// its bullet marker from the master bodyStyle.
+    #[test]
+    fn max_placeholder_idx_uses_type_style_fallback() {
+        let slide_sp = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Unbound body"/><p:cNvSpPr/><p:nvPr><p:ph idx="4294967295"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:buClr><a:srgbClr val="C00000"/></a:buClr></a:pPr><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let data = build_align_pptx(slide_sp, "", &txstyles_body_lvl1(r#"<a:buChar char="•"/>"#));
+        let b = first_para_bullet(&data);
+        assert_eq!(b["type"], "char");
+        assert_eq!(b["char"], "•");
+        assert_eq!(b["color"], "C00000");
+    }
+
     /// §21.1.2.4.9 — `<a:buSzPct val>` accepts both the Transitional integer
     /// (thousandths of a percent, `"100000"` = 100%, what PowerPoint writes) and
     /// the Strict percentage string (`"111%"`, as in the spec example).
@@ -3914,6 +4053,36 @@ mod tests {
         }
     }
 
+    /// ECMA-376 §20.1.2.3.34 defines tint as the retained fraction of the
+    /// source colour. SmartArt writes explicit gradient stops that depend on
+    /// that direction: a 15% tint must be much nearer white than a 50% tint.
+    /// PowerPoint performs the blend in linear sRGB before applying satMod.
+    #[test]
+    fn test_parse_smartart_gradient_retains_tint_fraction_in_linear_srgb() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <gradFill><gsLst>
+            <gs pos="0"><schemeClr val="accent4"><tint val="50000"/><satMod val="300000"/></schemeClr></gs>
+            <gs pos="35000"><schemeClr val="accent4"><tint val="37000"/><satMod val="300000"/></schemeClr></gs>
+            <gs pos="100000"><schemeClr val="accent4"><tint val="15000"/><satMod val="350000"/></schemeClr></gs>
+          </gsLst><lin ang="16200000" scaled="1"/></gradFill>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::from([("accent4".to_owned(), "8064A2".to_owned())]);
+
+        match parse_fill(doc.root_element(), &theme) {
+            Some(Fill::Gradient { stops, .. }) => {
+                assert_eq!(
+                    stops
+                        .iter()
+                        .map(|stop| stop.color.as_str())
+                        .collect::<Vec<_>>(),
+                    ["C9B5E8", "D9CBEE", "F0EAF9"]
+                );
+            }
+            other => panic!("expected SmartArt gradient, got {other:?}"),
+        }
+    }
+
     /// ECMA-376 §21.1.2.3.10 — strike="dblStrike" produces strike_double=true,
     /// while strike="sngStrike" leaves strike_double=false. The plain
     /// `strikethrough` flag is true in both cases.
@@ -4040,6 +4209,281 @@ mod tests {
             }
             other => panic!("expected Fill::Image, got {other:?}"),
         }
+    }
+
+    /// ECMA-376 Part 1 §19.3.1.3: bgRef values 1001 and above index the
+    /// theme's bgFillStyleLst (1001 = first entry). The referenced fill keeps
+    /// its gradient geometry while each phClr is substituted with the bgRef
+    /// colour before applying the style's colour transforms.
+    #[test]
+    fn test_parse_background_bg_ref_resolves_theme_style_matrix() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+          <a:themeElements>
+            <a:clrScheme name="C">
+              <a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+              <a:dk2><a:srgbClr val="7DAFC3"/></a:dk2><a:lt2><a:srgbClr val="E5E4DF"/></a:lt2>
+              <a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+              <a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4>
+              <a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6>
+              <a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink>
+            </a:clrScheme>
+            <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+            <a:fmtScheme name="S">
+              <a:fillStyleLst/>
+              <a:lnStyleLst/><a:effectStyleLst/>
+              <a:bgFillStyleLst>
+                <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                <a:gradFill rotWithShape="1"><a:gsLst>
+                  <a:gs pos="20000"><a:schemeClr val="phClr"><a:tint val="80000"/></a:schemeClr></a:gs>
+                  <a:gs pos="100000"><a:schemeClr val="phClr"><a:lumMod val="80000"/></a:schemeClr></a:gs>
+                </a:gsLst><a:path path="circle"/></a:gradFill>
+              </a:bgFillStyleLst>
+            </a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        let mut theme = parse_theme_colors(theme_xml);
+        theme.insert("bg2".to_owned(), "7DAFC3".to_owned());
+        let background_xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:bg><p:bgRef idx="1002"><a:schemeClr val="bg2"/></p:bgRef></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(background_xml).unwrap();
+        let mut resolve = |_rid: &str| -> Option<String> { None };
+        let fill = parse_background(doc.root_element(), &theme, &mut resolve)
+            .expect("bgRef 1002 should resolve the second bgFillStyleLst entry");
+        match fill {
+            Fill::Gradient {
+                stops,
+                grad_type,
+                path,
+                rot_with_shape,
+                ..
+            } => {
+                assert_eq!(grad_type, "radial");
+                assert_eq!(path.as_deref(), Some("circle"));
+                assert_eq!(rot_with_shape, Some(true));
+                assert_eq!(stops.len(), 2);
+                assert_ne!(
+                    stops[0].color, "7DAFC3",
+                    "style transforms must be retained"
+                );
+                assert_ne!(
+                    stops[1].color, "7DAFC3",
+                    "style transforms must be retained"
+                );
+            }
+            other => panic!("expected theme gradient, got {other:?}"),
+        }
+    }
+
+    /// A style-matrix blipFill owns its relationship in the theme part. The
+    /// slide/master relationship resolver must not be used for that embedded
+    /// image when a bgRef selects the style.
+    #[test]
+    fn test_parse_background_bg_ref_resolves_theme_owned_image() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="T">
+          <a:themeElements><a:clrScheme name="C"/>
+            <a:fontScheme name="F"><a:majorFont/><a:minorFont/></a:fontScheme>
+            <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/>
+              <a:bgFillStyleLst><a:blipFill><a:blip r:embed="rIdImage"><a:duotone>
+                <a:schemeClr val="phClr"/><a:srgbClr val="FFFFFF"/>
+              </a:duotone></a:blip>
+                <a:tile sx="95000" sy="95000" algn="t"/></a:blipFill></a:bgFillStyleLst>
+            </a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        let mut theme = parse_theme_colors(theme_xml);
+        theme.insert(
+            "+themeRel-rIdImage".to_owned(),
+            "ppt/media/theme-background.jpeg".to_owned(),
+        );
+        theme.insert("bg2".to_owned(), "F0C000".to_owned());
+        let background_xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:bg><p:bgRef idx="1001"><a:schemeClr val="bg2"/></p:bgRef></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(background_xml).unwrap();
+        let mut wrong_part_resolver = |_rid: &str| -> Option<String> { None };
+
+        match parse_background(doc.root_element(), &theme, &mut wrong_part_resolver) {
+            Some(Fill::Image {
+                image_path,
+                tile,
+                duotone,
+                ..
+            }) => {
+                assert_eq!(image_path, "ppt/media/theme-background.jpeg");
+                assert_eq!(tile.expect("tile descriptor").algn.as_deref(), Some("t"));
+                let duotone = duotone.expect("placeholder-aware duotone");
+                assert_eq!(duotone.clr1, "F0C000");
+                assert_eq!(duotone.clr2, "FFFFFF");
+            }
+            other => panic!("expected theme-owned image fill, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 §20.1.2.3.34 defines tint as retained input colour: an 80%
+    /// tint keeps 80% of the source and adds 20% white. PowerPoint performs
+    /// that blend in linear sRGB for ordinary presentation backgrounds as well
+    /// as theme style-matrix fills.
+    #[test]
+    fn test_parse_background_uses_powerpoint_linear_tint_semantics() {
+        let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg2"><a:tint val="80000"/></a:schemeClr></a:solidFill></p:bgPr></p:bg>
+        </p:cSld>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let theme = HashMap::from([("bg2".to_owned(), "7DAFC3".to_owned())]);
+        let mut resolve = |_rid: &str| -> Option<String> { None };
+        match parse_background(doc.root_element(), &theme, &mut resolve) {
+            Some(Fill::Solid { color }) => assert_eq!(color, "A3C3D1"),
+            other => panic!("expected linear-tint solid fill, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 §20.1.4.2.10: a shape fillRef selects fillStyleLst by its
+    /// one-based idx and substitutes the reference colour for phClr. The style
+    /// remains a gradient; reducing it to a solid accent loses the authored
+    /// appearance (the failure reported for Apache POI customGeo.pptx).
+    #[test]
+    fn test_shape_fill_ref_resolves_theme_gradient() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T">
+          <a:themeElements><a:clrScheme name="C">
+            <a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+            <a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+            <a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+            <a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+            <a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6>
+            <a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+          </a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme>
+          <a:fmtScheme name="S"><a:fillStyleLst>
+            <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+            <a:gradFill><a:gsLst>
+              <a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/></a:schemeClr></a:gs>
+              <a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="15000"/></a:schemeClr></a:gs>
+            </a:gsLst><a:lin ang="16200000"/></a:gradFill>
+          </a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+          </a:themeElements>
+        </a:theme>"#;
+        let theme = parse_theme_colors(theme_xml);
+        let shape_xml = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:nvSpPr><p:cNvPr id="2" name="Styled ellipse"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></p:spPr>
+          <p:style><a:fillRef idx="2"><a:schemeClr val="accent1"/></a:fillRef></p:style>
+        </p:sp>"#;
+        let doc = roxmltree::Document::parse(shape_xml).unwrap();
+        let fill_ref = doc
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "fillRef")
+            .unwrap();
+        assert!(matches!(
+            parse_style_matrix_fill(fill_ref, &theme, false),
+            Some(Fill::Gradient { .. })
+        ));
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        let shape = parse_shape(
+            doc.root_element(),
+            &LayoutPlaceholders::default(),
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("shape should parse");
+        match shape.fill {
+            Some(Fill::Gradient { stops, .. }) => {
+                assert_eq!(stops.len(), 2);
+                assert_eq!(stops[0].color, "C2CDE1");
+                assert_eq!(stops[1].color, "EFF1F7");
+            }
+            other => panic!("expected style-matrix gradient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shape_fill_ref_uses_the_normative_background_style_index_range() {
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:themeElements><a:clrScheme name="C"/><a:fontScheme name="F"><a:majorFont/><a:minorFont/></a:fontScheme>
+          <a:fmtScheme name="S"><a:fillStyleLst>
+            <a:solidFill><a:srgbClr val="112233"/></a:solidFill>
+          </a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst>
+            <a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill>
+          </a:bgFillStyleLst></a:fmtScheme></a:themeElements>
+        </a:theme>"#;
+        let theme = parse_theme_colors(theme_xml);
+        let refs = roxmltree::Document::parse(
+            r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:fillRef idx="1000"/><a:fillRef idx="1001"/>
+            </root>"#,
+        )
+        .unwrap();
+        let mut refs = refs
+            .root_element()
+            .children()
+            .filter(|node| node.is_element());
+
+        assert!(matches!(
+            parse_style_matrix_fill(refs.next().unwrap(), &theme, false),
+            Some(Fill::None)
+        ));
+        assert!(matches!(
+            parse_style_matrix_fill(refs.next().unwrap(), &theme, false),
+            Some(Fill::Solid { color }) if color == "ABCDEF"
+        ));
+    }
+
+    /// ECMA-376 §19.3.1.52 / §21.1.2.3.7: a title with no local Latin
+    /// typeface inherits titleStyle's +mj-lt, resolved through the current
+    /// master's major Latin theme font.
+    #[test]
+    fn test_master_title_font_family_inherits_theme_major_latin() {
+        let theme = parse_theme_colors(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>
+              <a:clrScheme name="C"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="111111"/></a:dk2><a:lt2><a:srgbClr val="EEEEEE"/></a:lt2><a:accent1><a:srgbClr val="111111"/></a:accent1><a:accent2><a:srgbClr val="222222"/></a:accent2><a:accent3><a:srgbClr val="333333"/></a:accent3><a:accent4><a:srgbClr val="444444"/></a:accent4><a:accent5><a:srgbClr val="555555"/></a:accent5><a:accent6><a:srgbClr val="666666"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme>
+              <a:fontScheme name="F"><a:majorFont><a:latin typeface="Arial Black"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>
+              <a:fmtScheme name="S"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+            </a:themeElements></a:theme>"#,
+        );
+        let master_xml = r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld><p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr><a:latin typeface="+mj-lt"/></a:defRPr></a:lvl1pPr></p:titleStyle></p:txStyles>
+        </p:sldMaster>"#;
+        let master_doc = roxmltree::Document::parse(master_xml).unwrap();
+        let families = parse_master_font_families(master_doc.root_element(), &theme);
+        assert_eq!(
+            families.get("title").map(String::as_str),
+            Some("Arial Black")
+        );
+        assert_eq!(
+            families.get("ctrTitle").map(String::as_str),
+            Some("Arial Black")
+        );
+
+        let placeholders = LayoutPlaceholders {
+            by_type_font_family: families,
+            ..LayoutPlaceholders::default()
+        };
+        let shape_xml = r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="500000"/></a:xfrm></p:spPr>
+          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr/><a:t>Trade show</a:t></a:r></a:p></p:txBody>
+        </p:sp>"#;
+        let doc = roxmltree::Document::parse(shape_xml).unwrap();
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        let shape = parse_shape(
+            doc.root_element(),
+            &placeholders,
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("title should parse");
+        let paragraph = &shape.text_body.expect("text body").paragraphs[0];
+        assert_eq!(paragraph.def_font_family.as_deref(), Some("Arial Black"));
     }
 
     /// ECMA-376 §20.1.8.23 — a background `<a:blipFill>` whose `<a:blip>` carries
@@ -4297,6 +4741,8 @@ mod tests {
         assert_eq!(v["numType"], "arabicPeriod");
         // The buClr resolves to the srgbClr literal (uppercase hex, no '#').
         assert_eq!(v["color"], "C00000");
+        assert_eq!(v["sizePct"], 100.0);
+        assert_eq!(v["fontFamily"], "+mj-lt");
     }
 
     /// §21.1.2.4.10 (buClrTx) — with no explicit `<a:buClr>` the auto-number
@@ -4625,7 +5071,11 @@ mod tests {
     fn test_pic_effect_lst_resolves_all_effects() {
         let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <effectLst>
-                <outerShdw blurRad="50800" dist="38100" dir="2700000"><srgbClr val="000000"><alpha val="40000"/></srgbClr></outerShdw>
+                <outerShdw blurRad="50800" dist="38100" dir="2700000"
+                            sx="50000" sy="150000" kx="1200000" ky="-600000"
+                            algn="tr" rotWithShape="0">
+                    <srgbClr val="000000"><alpha val="40000"/></srgbClr>
+                </outerShdw>
                 <innerShdw blurRad="63500" dist="50800" dir="5400000"><srgbClr val="111111"/></innerShdw>
                 <glow rad="63500"><srgbClr val="FFCC00"/></glow>
                 <softEdge rad="25400"/>
@@ -4641,6 +5091,12 @@ mod tests {
         assert_eq!(shadow.blur, 50_800);
         assert_eq!(shadow.dist, 38_100);
         assert!((shadow.alpha - 0.4).abs() < 0.01);
+        assert_eq!(shadow.sx, Some(0.5));
+        assert_eq!(shadow.sy, Some(1.5));
+        assert_eq!(shadow.kx, Some(20.0));
+        assert_eq!(shadow.ky, Some(-10.0));
+        assert_eq!(shadow.algn.as_deref(), Some("tr"));
+        assert_eq!(shadow.rot_with_shape, Some(false));
 
         let inner = eff.inner_shadow.expect("innerShdw should resolve");
         assert_eq!(inner.blur, 63_500);
@@ -4798,6 +5254,7 @@ mod tests {
                 stops,
                 angle,
                 grad_type,
+                ..
             }) => {
                 assert_eq!(angle, 90.0);
                 assert_eq!(grad_type, "linear");
@@ -4996,9 +5453,11 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,
+                None,
                 [None; 9],
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -5080,6 +5539,7 @@ mod tests {
             layout_doc.root_element(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &master_indents,
             &HashMap::new(),
             &HashMap::new(),
@@ -5152,6 +5612,7 @@ mod tests {
             parse_layout(
                 layout,
                 &m_f64,
+                &m_str,
                 &m_lfs,
                 &m_li,
                 &m_lb,
@@ -5545,7 +6006,7 @@ mod tests {
         let xml = r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
           <a:tblStyle styleId="{TEST}" styleName="Medium Style 1 - Accent 2">
             <a:wholeTbl>
-              <a:tcTxStyle>
+              <a:tcTxStyle b="def" i="on">
                 <a:fontRef idx="minor"><a:scrgbClr r="0" g="0" b="0"/></a:fontRef>
                 <a:schemeClr val="dk1"/>
               </a:tcTxStyle>
@@ -5557,6 +6018,7 @@ mod tests {
               </a:tcStyle>
             </a:wholeTbl>
             <a:band1H>
+              <a:tcTxStyle b="on"><a:fontRef idx="minor"/><a:schemeClr val="accent2"/></a:tcTxStyle>
               <a:tcStyle>
                 <a:tcBdr/>
                 <a:fill><a:solidFill><a:schemeClr val="accent2"><a:tint val="20000"/></a:schemeClr></a:solidFill></a:fill>
@@ -5572,6 +6034,7 @@ mod tests {
                 <a:fill><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></a:fill>
               </a:tcStyle>
             </a:firstRow>
+            <a:nwCell><a:tcTxStyle b="off"><a:fontRef idx="minor"/><a:schemeClr val="dk1"/></a:tcTxStyle></a:nwCell>
           </a:tblStyle>
         </a:tblStyleLst>"#;
 
@@ -5584,12 +6047,12 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            solid(&def.whole_fill).as_deref(),
+            solid(&def.whole_tbl.fill).as_deref(),
             Some("FFFFFF"),
             "wholeTbl fill should be lt1 white"
         );
         assert_eq!(
-            solid(&def.first_row_fill).as_deref(),
+            solid(&def.first_row.fill).as_deref(),
             Some("B83903"),
             "firstRow header fill should be accent2 orange"
         );
@@ -5597,28 +6060,317 @@ mod tests {
         // ECMA-376 tint (val·input + (1-val)·white), giving a near-white wash —
         // NOT the saturated linear-lerp. 0.2·B83903 + 0.8·white = F1D7CD.
         assert_eq!(
-            solid(&def.band1h_fill).as_deref(),
+            solid(&def.band1_h.fill).as_deref(),
             Some("F1D7CD"),
             "band1H tint should be the literal near-white wash, not a saturated lerp"
         );
 
         // Text colours from tcTxStyle.
         assert_eq!(
-            def.whole_text_color.as_deref(),
+            def.whole_tbl.text.color.as_deref(),
             Some("000000"),
             "wholeTbl text colour should be dk1 black"
         );
         assert_eq!(
-            def.first_row_text_color.as_deref(),
+            def.first_row.text.color.as_deref(),
             Some("FFFFFF"),
             "firstRow header text colour should be lt1 white"
         );
 
         // firstRow `<a:tcTxStyle b="on">` → bold header.
         assert_eq!(
-            def.first_row_bold,
+            def.first_row.text.bold,
             Some(true),
             "firstRow header should be bold from tcTxStyle b=on"
+        );
+        assert_eq!(
+            def.whole_tbl.text.bold, None,
+            "b=def inherits instead of forcing off"
+        );
+        assert_eq!(def.whole_tbl.text.italic, Some(true));
+        assert_eq!(def.band1_h.text.color.as_deref(), Some("B83903"));
+        assert_eq!(def.band1_h.text.bold, Some(true));
+        assert_eq!(def.nw_cell.text.bold, Some(false));
+    }
+
+    #[test]
+    fn table_style_preserves_vertical_bands_corners_and_all_eight_border_roles() {
+        let theme = HashMap::new();
+        let xml = r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:tblStyle styleId="{FULL}" styleName="Full">
+            <a:wholeTbl><a:tcStyle><a:tcBdr>
+              <a:left><a:ln w="100"><a:solidFill><a:srgbClr val="110000"/></a:solidFill></a:ln></a:left>
+              <a:right><a:ln w="200"><a:solidFill><a:srgbClr val="220000"/></a:solidFill></a:ln></a:right>
+              <a:top><a:ln w="300"><a:solidFill><a:srgbClr val="330000"/></a:solidFill></a:ln></a:top>
+              <a:bottom><a:ln w="400"><a:solidFill><a:srgbClr val="440000"/></a:solidFill></a:ln></a:bottom>
+              <a:insideH><a:ln w="500"><a:solidFill><a:srgbClr val="550000"/></a:solidFill></a:ln></a:insideH>
+              <a:insideV><a:ln w="600"><a:solidFill><a:srgbClr val="660000"/></a:solidFill></a:ln></a:insideV>
+              <a:tl2br><a:ln w="700"><a:solidFill><a:srgbClr val="770000"/></a:solidFill></a:ln></a:tl2br>
+              <a:tr2bl><a:ln w="800"><a:solidFill><a:srgbClr val="880000"/></a:solidFill></a:ln></a:tr2bl>
+            </a:tcBdr></a:tcStyle></a:wholeTbl>
+            <a:band1V><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="00AA00"/></a:solidFill></a:fill></a:tcStyle></a:band1V>
+            <a:band2V><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="00BB00"/></a:solidFill></a:fill></a:tcStyle></a:band2V>
+            <a:nwCell><a:tcStyle><a:tcBdr><a:bottom><a:ln><a:noFill/></a:ln></a:bottom></a:tcBdr>
+              <a:fill><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fill></a:tcStyle></a:nwCell>
+          </a:tblStyle>
+        </a:tblStyleLst>"#;
+        let style = parse_table_styles_xml(xml, &theme)
+            .remove("{FULL}")
+            .expect("style parsed");
+        let solid_color = |fill: &Option<Fill>| match fill {
+            Some(Fill::Solid { color }) => Some(color.clone()),
+            _ => None,
+        };
+        assert_eq!(solid_color(&style.band1_v.fill).as_deref(), Some("00AA00"));
+        assert_eq!(solid_color(&style.band2_v.fill).as_deref(), Some("00BB00"));
+        assert_eq!(solid_color(&style.nw_cell.fill).as_deref(), Some("ABCDEF"));
+        assert!(matches!(
+            style.nw_cell.borders.bottom,
+            TableLineStyle::NoLine
+        ));
+        for border in [
+            &style.whole_tbl.borders.left,
+            &style.whole_tbl.borders.right,
+            &style.whole_tbl.borders.top,
+            &style.whole_tbl.borders.bottom,
+            &style.whole_tbl.borders.inside_h,
+            &style.whole_tbl.borders.inside_v,
+            &style.whole_tbl.borders.diagonal_tl,
+            &style.whole_tbl.borders.diagonal_tr,
+        ] {
+            assert!(matches!(border, TableLineStyle::Stroke(_)));
+        }
+    }
+
+    #[test]
+    fn table_style_refs_use_complete_theme_fill_and_line_recipes() {
+        let theme = crate::theme::PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="table"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:accent1><a:srgbClr val="112233"/></a:accent1></a:clrScheme>
+                <a:fontScheme name="table"><a:majorFont/><a:minorFont/></a:fontScheme>
+                <a:fmtScheme name="table">
+                  <a:fillStyleLst><a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs><a:gs pos="100000"><a:srgbClr val="ABCDEF"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill></a:fillStyleLst>
+                  <a:lnStyleLst><a:ln w="25400" cap="rnd"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="dash"/><a:round/></a:ln><a:ln><a:noFill/></a:ln></a:lnStyleLst>
+                  <a:effectStyleLst/><a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let styles = parse_table_styles_xml(
+            r#"<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:tblStyle styleId="{REF}"><a:wholeTbl><a:tcStyle><a:tcBdr><a:left><a:lnRef idx="1"><a:srgbClr val="445566"/></a:lnRef></a:left></a:tcBdr><a:fillRef idx="1"><a:srgbClr val="778899"/></a:fillRef></a:tcStyle></a:wholeTbl><a:firstRow><a:tcStyle><a:tcBdr><a:left><a:lnRef idx="2"/></a:left></a:tcBdr></a:tcStyle></a:firstRow></a:tblStyle></a:tblStyleLst>"#,
+            &theme,
+        );
+        let style = styles.get("{REF}").expect("table style");
+        assert!(
+            matches!(style.whole_tbl.fill, Some(Fill::Gradient { ref stops, angle, .. }) if stops[0].color == "778899" && angle == 90.0)
+        );
+        assert!(
+            matches!(style.whole_tbl.borders.left, TableLineStyle::Stroke(ref stroke) if stroke.color == "445566" && stroke.width == 25400 && stroke.dash_style.as_deref() == Some("dash") && stroke.line_cap.as_deref() == Some("round"))
+        );
+        assert!(matches!(
+            style.first_row.borders.left,
+            TableLineStyle::NoLine
+        ));
+        let resolved = resolve_table_cell_style(
+            style,
+            TableStyleFlags {
+                first_row: true,
+                ..Default::default()
+            },
+            0,
+            0,
+            2,
+            2,
+        );
+        assert!(matches!(resolved.border_l, TableLineStyle::NoLine));
+    }
+
+    #[test]
+    fn table_style_cascade_orders_bands_conditionals_and_corner_and_keeps_asymmetric_edges() {
+        let mut style = TableStyleDef::default();
+        let solid_color = |fill: &Option<Fill>| match fill {
+            Some(Fill::Solid { color }) => Some(color.clone()),
+            _ => None,
+        };
+        let fill = |color: &str| {
+            Some(Fill::Solid {
+                color: color.to_owned(),
+            })
+        };
+        let line = |color: &str| {
+            TableLineStyle::Stroke(Box::new(Stroke {
+                color: color.to_owned(),
+                width: 100,
+                fill: None,
+                dash_style: None,
+                custom_dash: Vec::new(),
+                line_cap: None,
+                line_join: None,
+                miter_limit: None,
+                alignment: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            }))
+        };
+        style.whole_tbl.fill = fill("WHOLE");
+        style.whole_tbl.borders.left = line("LEFT");
+        style.whole_tbl.borders.right = line("RIGHT");
+        style.whole_tbl.borders.top = line("TOP");
+        style.whole_tbl.borders.bottom = line("BOTTOM");
+        style.whole_tbl.borders.inside_h = line("INSIDE-H");
+        style.whole_tbl.borders.inside_v = line("INSIDE-V");
+        style.band1_h.fill = fill("BAND-ROW");
+        style.band1_v.fill = fill("BAND-COL");
+        style.first_row.fill = fill("FIRST-ROW");
+        style.first_col.fill = fill("FIRST-COL");
+        style.nw_cell.fill = fill("CORNER");
+        style.nw_cell.borders.bottom = TableLineStyle::NoLine;
+
+        let resolved = resolve_table_cell_style(
+            &style,
+            TableStyleFlags {
+                first_row: true,
+                first_col: true,
+                band_row: true,
+                band_col: true,
+                ..Default::default()
+            },
+            0,
+            0,
+            3,
+            3,
+        );
+        assert_eq!(solid_color(&resolved.fill).as_deref(), Some("CORNER"));
+        assert!(matches!(resolved.border_b, TableLineStyle::NoLine));
+        assert!(
+            matches!(resolved.border_l, TableLineStyle::Stroke(ref stroke) if stroke.color == "LEFT")
+        );
+        assert!(
+            matches!(resolved.border_t, TableLineStyle::Stroke(ref stroke) if stroke.color == "TOP")
+        );
+
+        let bottom_right = resolve_table_cell_style(&style, TableStyleFlags::default(), 2, 2, 3, 3);
+        assert!(
+            matches!(bottom_right.border_r, TableLineStyle::Stroke(ref stroke) if stroke.color == "RIGHT")
+        );
+        assert!(
+            matches!(bottom_right.border_b, TableLineStyle::Stroke(ref stroke) if stroke.color == "BOTTOM")
+        );
+
+        let first_vertical_band = resolve_table_cell_style(
+            &style,
+            TableStyleFlags {
+                band_col: true,
+                ..Default::default()
+            },
+            1,
+            0,
+            3,
+            3,
+        );
+        assert_eq!(
+            solid_color(&first_vertical_band.fill).as_deref(),
+            Some("BAND-COL")
+        );
+        let second_vertical_band = resolve_table_cell_style(
+            &style,
+            TableStyleFlags {
+                band_col: true,
+                ..Default::default()
+            },
+            1,
+            1,
+            3,
+            3,
+        );
+        assert_eq!(
+            solid_color(&second_vertical_band.fill).as_deref(),
+            Some("WHOLE"),
+            "an unspecified band2V inherits wholeTbl"
+        );
+    }
+
+    /// ECMA-376 §21.1.3.17 (`CT_TableCellProperties`) — direct cell fill and
+    /// line choices are the final formatting tier. Explicit noFill/no-line must
+    /// suppress, rather than inherit, a lower-precedence table-style value.
+    #[test]
+    fn table_cell_direct_formatting_overrides_style_including_explicit_no_line() {
+        let xml = r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:tcPr>
+            <a:lnL><a:noFill/></a:lnL>
+            <a:lnR w="250"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:lnR>
+            <a:lnTlToBr><a:noFill/></a:lnTlToBr>
+            <a:noFill/>
+          </a:tcPr>
+        </a:tc>"#;
+        let doc = roxmltree::Document::parse(xml).expect("valid table cell");
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).expect("empty OOXML zip");
+        let mut cell = parse_table_cell(doc.root_element(), &theme, &rels, "ppt/slides", &mut zip);
+
+        assert!(cell.has_direct_fill);
+        assert!(cell.has_direct_border_l);
+        assert!(cell.has_direct_border_r);
+        assert!(cell.has_direct_diagonal_tl);
+        assert!(matches!(cell.fill, Some(Fill::None)));
+        assert!(cell.border_l.is_none(), "direct no-line paints no stroke");
+        assert_eq!(
+            cell.border_r.as_ref().map(|line| line.color.as_str()),
+            Some("0000FF")
+        );
+
+        let style_line = |color: &str| {
+            TableLineStyle::Stroke(Box::new(Stroke {
+                color: color.to_owned(),
+                width: 100,
+                fill: None,
+                dash_style: None,
+                custom_dash: Vec::new(),
+                line_cap: None,
+                line_join: None,
+                miter_limit: None,
+                alignment: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            }))
+        };
+        let effective = ResolvedTableCellStyle {
+            fill: Some(Fill::Solid {
+                color: "FF0000".to_owned(),
+            }),
+            border_l: style_line("STYLE-LEFT"),
+            border_r: style_line("STYLE-RIGHT"),
+            border_t: style_line("STYLE-TOP"),
+            border_b: style_line("STYLE-BOTTOM"),
+            diagonal_tl: style_line("STYLE-DIAGONAL"),
+            ..Default::default()
+        };
+        apply_resolved_table_cell_style(&mut cell, effective);
+
+        assert!(matches!(cell.fill, Some(Fill::None)));
+        assert!(
+            cell.border_l.is_none(),
+            "direct no-line suppresses style line"
+        );
+        assert_eq!(
+            cell.border_r.as_ref().map(|line| line.color.as_str()),
+            Some("0000FF")
+        );
+        assert!(
+            cell.diagonal_tl.is_none(),
+            "direct diagonal no-line suppresses style line"
+        );
+        assert_eq!(
+            cell.border_t.as_ref().map(|line| line.color.as_str()),
+            Some("STYLE-TOP")
+        );
+        assert_eq!(
+            cell.border_b.as_ref().map(|line| line.color.as_str()),
+            Some("STYLE-BOTTOM")
         );
     }
 
@@ -5646,12 +6398,14 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,               // inherited_font_size
+                None,               // inherited_font_family
                 [None; 9],          // inherited_level_font_sizes
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
                 None, // inherited_bold
                 None, // inherited_italic
                 None, // inherited_caps
+                None, // inherited_reflection
                 None, // inherited_anchor
                 None, // inherited_text_insets
                 None, // inherited_alignment
@@ -5717,9 +6471,11 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,
+                None,
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -5800,9 +6556,11 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,
+                None,
                 [None; 9],
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -5887,9 +6645,11 @@ mod tests {
                 &rels,
                 "ppt/slides",
                 None,
+                None,
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -6042,7 +6802,7 @@ mod tests {
         assert_eq!(lr.rig, "threePt");
         assert_eq!(lr.dir, "t");
 
-        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        let sp3d = parse_sp3d(sppr, &HashMap::new()).expect("sp3d should parse");
         assert_eq!(sp3d.contour_w, 6350);
         assert_eq!(sp3d.prst_material, "matte");
         assert_eq!(sp3d.z, 0); // default
@@ -6085,7 +6845,7 @@ mod tests {
         // No <a:rot> → None (renderer uses the preset base orientation).
         assert!(scene.camera.rot.is_none());
 
-        let sp3d = parse_sp3d(sppr).unwrap();
+        let sp3d = parse_sp3d(sppr, &HashMap::new()).unwrap();
         assert_eq!(sp3d.z, 0);
         assert_eq!(sp3d.extrusion_h, 0);
         assert_eq!(sp3d.contour_w, 0);
@@ -6104,7 +6864,7 @@ mod tests {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let sppr = parse_sppr_frag(&doc);
         assert!(parse_scene3d(sppr).is_none());
-        assert!(parse_sp3d(sppr).is_none());
+        assert!(parse_sp3d(sppr, &HashMap::new()).is_none());
     }
 
     // ===== sp3d contour colour (ECMA-376 §20.1.5.12 contourClr) =====
@@ -6116,19 +6876,26 @@ mod tests {
             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
           <p:spPr>
-            <a:sp3d contourW="6350" prstMaterial="matte">
+            <a:sp3d contourW="6350" extrusionH="12700" prstMaterial="matte">
               <a:bevelT w="101600" h="101600"/>
-              <a:contourClr><a:srgbClr val="969696"/></a:contourClr>
+              <a:contourClr><a:schemeClr val="accent1"/></a:contourClr>
+              <a:extrusionClr><a:schemeClr val="accent2"/></a:extrusionClr>
             </a:sp3d>
           </p:spPr>
         </root>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let sppr = parse_sppr_frag(&doc);
-        let sp3d = parse_sp3d(sppr).expect("sp3d should parse");
+        let theme = HashMap::from([
+            ("accent1".to_owned(), "969696".to_owned()),
+            ("accent2".to_owned(), "4472C4".to_owned()),
+        ]);
+        let sp3d = parse_sp3d(sppr, &theme).expect("sp3d should parse");
         assert_eq!(sp3d.contour_w, 6350);
         assert_eq!(sp3d.contour_clr.as_deref(), Some("969696"));
+        assert_eq!(sp3d.extrusion_clr.as_deref(), Some("4472C4"));
         let json = serde_json::to_string(&sp3d).unwrap();
         assert!(json.contains("\"contourClr\":\"969696\""), "{json}");
+        assert!(json.contains("\"extrusionClr\":\"4472C4\""), "{json}");
     }
 
     #[test]
@@ -6140,7 +6907,7 @@ mod tests {
         </root>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let sppr = parse_sppr_frag(&doc);
-        let sp3d = parse_sp3d(sppr).unwrap();
+        let sp3d = parse_sp3d(sppr, &HashMap::new()).unwrap();
         assert!(sp3d.contour_clr.is_none());
         // Omitted from JSON when absent.
         let json = serde_json::to_string(&sp3d).unwrap();
@@ -6326,6 +7093,7 @@ mod tests {
     /// `showMasterSp` attribute so the test can exercise the suppression path.
     fn build_master_sp_pptx(
         layout_show_master_sp: Option<bool>,
+        slide_show_master_sp: Option<bool>,
         include_layout_and_slide_shapes: bool,
     ) -> Vec<u8> {
         use zip::write::SimpleFileOptions;
@@ -6343,6 +7111,11 @@ mod tests {
             Some(true) => r#" showMasterSp="1""#.to_string(),
             Some(false) => r#" showMasterSp="0""#.to_string(),
             None => String::new(),
+        };
+        let slide_attr = match slide_show_master_sp {
+            Some(true) => r#" showMasterSp="1""#,
+            Some(false) => r#" showMasterSp="0""#,
+            None => "",
         };
         let layout_shape = if include_layout_and_slide_shapes {
             r#"<p:sp><p:nvSpPr><p:cNvPr id="20" name="LayoutBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="300000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
@@ -6441,7 +7214,7 @@ mod tests {
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"{slide_attr}>
   <p:cSld><p:spTree>
     <p:nvGrpSpPr><p:cNvPr id="1" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
     <p:grpSpPr/>
@@ -6491,7 +7264,7 @@ mod tests {
     /// and the slide has no elements.
     #[test]
     fn master_sptree_pic_appears_on_slide() {
-        let data = build_master_sp_pptx(None, false);
+        let data = build_master_sp_pptx(None, None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6528,7 +7301,7 @@ mod tests {
 
     #[test]
     fn element_sources_distinguish_composite_paint_origins() {
-        let data = build_master_sp_pptx(None, true);
+        let data = build_master_sp_pptx(None, None, true);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6552,7 +7325,7 @@ mod tests {
     /// decorative shapes for slides using that layout.
     #[test]
     fn master_sptree_hidden_when_layout_show_master_sp_false() {
-        let data = build_master_sp_pptx(Some(false), false);
+        let data = build_master_sp_pptx(Some(false), None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
 
@@ -6571,11 +7344,25 @@ mod tests {
         );
     }
 
+    /// ECMA-376 §19.3.1.38 scopes showMasterSp to shapes on the master slide.
+    /// Layout-local decorations remain part of the selected layout.
+    #[test]
+    fn slide_show_master_sp_false_hides_master_but_keeps_layout_decorations() {
+        let data = build_master_sp_pptx(None, Some(false), true);
+        let pres = parse_presentation_from_bytes(&data).expect("parse");
+        let slide = &pres.slides[0];
+
+        assert_eq!(slide.elements.len(), 2);
+        assert_eq!(slide.element_sources.len(), 2);
+        assert_eq!(slide.element_sources[0].origin, SlideElementOrigin::Layout);
+        assert_eq!(slide.element_sources[1].origin, SlideElementOrigin::Slide);
+    }
+
     /// showMasterSp="1" (explicit true) on the layout keeps master shapes —
     /// guards against an inverted boolean parse.
     #[test]
     fn master_sptree_shown_when_layout_show_master_sp_true() {
-        let data = build_master_sp_pptx(Some(true), false);
+        let data = build_master_sp_pptx(Some(true), None, false);
         let pres = parse_presentation_from_bytes(&data).expect("parse");
         let slide = &pres.slides[0];
         assert!(
@@ -7060,6 +7847,71 @@ mod tests {
         assert!(
             pic.svg_image_path.is_none(),
             "svg_image_path must be None without an svgBlip extension"
+        );
+    }
+
+    /// p:pic carries the same CT_ShapeStyle references as p:sp. A picture with
+    /// no local line/effect component must therefore inherit lnRef/effectRef,
+    /// including effect-style 3D colours resolved through phClr.
+    #[test]
+    fn picture_inherits_line_effect_and_3d_from_style_matrix() {
+        let pic_xml = r#"<p:pic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:nvPicPr><p:cNvPr id="5" name="StyledPic"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+  <p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300000" cy="300000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+  <p:style>
+    <a:lnRef idx="2"><a:schemeClr val="accent2"/></a:lnRef>
+    <a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef>
+    <a:effectRef idx="1"><a:schemeClr val="accent1"/></a:effectRef>
+    <a:fontRef idx="minor"><a:schemeClr val="tx1"/></a:fontRef>
+  </p:style>
+</p:pic>"#;
+        let doc = roxmltree::Document::parse(pic_xml).unwrap();
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_owned(), "../media/image1.png".to_owned());
+        let theme = PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Test">
+                  <a:accent1><a:srgbClr val="112233"/></a:accent1>
+                  <a:accent2><a:srgbClr val="445566"/></a:accent2>
+                </a:clrScheme>
+                <a:fmtScheme name="Test">
+                  <a:fillStyleLst/>
+                  <a:lnStyleLst>
+                    <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                    <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                  </a:lnStyleLst>
+                  <a:effectStyleLst><a:effectStyle>
+                    <a:effectLst><a:outerShdw blurRad="12700"><a:schemeClr val="phClr"/></a:outerShdw></a:effectLst>
+                    <a:scene3d><a:camera prst="orthographicFront"/></a:scene3d>
+                    <a:sp3d extrusionH="25400"><a:extrusionClr><a:schemeClr val="phClr"/></a:extrusionClr></a:sp3d>
+                  </a:effectStyle></a:effectStyleLst>
+                  <a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let data = build_blip_media_zip(b"png", b"<svg/>");
+        let mut zip = PptxZip::new(Cursor::new(data)).unwrap();
+
+        let pic = parse_picture(doc.root_element(), "ppt/slides", &rels, &theme, &mut zip)
+            .expect("styled picture should parse");
+
+        let stroke = pic.stroke.expect("lnRef should supply a picture border");
+        assert_eq!(stroke.width, 19_050);
+        assert_eq!(stroke.color, "445566");
+        assert_eq!(pic.shadow.expect("effectRef shadow").color, "112233");
+        assert_eq!(
+            pic.scene3d.expect("effectRef scene3d").camera.prst,
+            "orthographicFront"
+        );
+        assert_eq!(
+            pic.sp3d.expect("effectRef sp3d").extrusion_clr.as_deref(),
+            Some("112233")
         );
     }
 
@@ -8423,7 +9275,7 @@ mod tests {
   </pathLst>
 </custGeom>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let subpaths = parse_cust_geom(doc.root_element());
+        let subpaths = parse_cust_geom(doc.root_element(), 100.0, 100.0);
         let json = serde_json::to_string(&subpaths).expect("custGeom should serialize");
 
         // The two camelCase keys the TS renderer reads must be present…
@@ -8461,7 +9313,7 @@ mod tests {
   </pathLst>
 </custGeom>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let subpaths = parse_cust_geom(doc.root_element());
+        let subpaths = parse_cust_geom(doc.root_element(), 200.0, 100.0);
         let json = serde_json::to_string(&subpaths).unwrap();
         let back: Vec<Vec<PathCmd>> =
             serde_json::from_str(&json).expect("camelCase JSON must deserialize back");
@@ -8484,6 +9336,103 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// ECMA-376 Part 1 §20.1.9.11: custom-geometry path coordinates and arc
+    /// arguments may reference ordered `avLst`/`gdLst` formulas. They are
+    /// evaluated in shape space and then normalized by each path's coordinate
+    /// system before crossing the WASM boundary.
+    #[test]
+    fn custom_geometry_resolves_guides_in_path_commands() {
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <avLst><gd name="adj" fmla="val 100"/></avLst>
+  <gdLst>
+    <gd name="halfW" fmla="*/ w 1 2"/>
+    <gd name="x" fmla="?: adj halfW 0"/>
+    <gd name="radius" fmla="*/ h 1 4"/>
+    <gd name="quarterTurn" fmla="val cd4"/>
+    <gd name="negativeQuarter" fmla="+- 0 0 quarterTurn"/>
+  </gdLst>
+  <pathLst>
+    <path w="200" h="100">
+      <moveTo><pt x="x" y="radius"/></moveTo>
+      <arcTo wR="radius" hR="radius" stAng="quarterTurn" swAng="negativeQuarter"/>
+    </path>
+  </pathLst>
+</custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).expect("valid custom geometry");
+        let subpaths = parse_cust_geom(doc.root_element(), 400.0, 200.0);
+        assert_eq!(subpaths.len(), 1);
+        match &subpaths[0][0] {
+            PathCmd::MoveTo { x, y } => {
+                assert!((*x - 1.0).abs() < 1e-9, "x = {x}");
+                assert!((*y - 0.5).abs() < 1e-9, "y = {y}");
+            }
+            other => panic!("expected resolved moveTo, got {other:?}"),
+        }
+        match &subpaths[0][1] {
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                assert!((*wr - 0.25).abs() < 1e-9, "wr = {wr}");
+                assert!((*hr - 0.5).abs() < 1e-9, "hr = {hr}");
+                assert!((*st_ang - 90.0).abs() < 1e-9, "st_ang = {st_ang}");
+                assert!((*sw_ang + 90.0).abs() < 1e-9, "sw_ang = {sw_ang}");
+            }
+            other => panic!("expected resolved arcTo, got {other:?}"),
+        }
+    }
+
+    /// ECMA-376 Part 1 §20.1.9.15: an omitted path coordinate-system size
+    /// has the schema default zero. In that case guide values remain in shape
+    /// coordinates, so normalization must use the shape extents rather than an
+    /// artificial one-unit path.
+    #[test]
+    fn custom_geometry_without_path_size_uses_shape_extents() {
+        let xml = r#"<custGeom xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <gdLst>
+    <gd name="halfW" fmla="*/ w 1 2"/>
+    <gd name="halfH" fmla="*/ h 1 2"/>
+  </gdLst>
+  <pathLst>
+    <path>
+      <moveTo><pt x="halfW" y="halfH"/></moveTo>
+      <lnTo><pt x="r" y="b"/></lnTo>
+    </path>
+  </pathLst>
+</custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).expect("valid custom geometry");
+        let subpaths = parse_cust_geom(doc.root_element(), 400.0, 200.0);
+
+        assert!(matches!(
+            subpaths[0].as_slice(),
+            [
+                PathCmd::MoveTo { x, y },
+                PathCmd::LineTo { x: x2, y: y2 }
+            ] if (*x - 0.5).abs() < 1e-9
+                && (*y - 0.5).abs() < 1e-9
+                && (*x2 - 1.0).abs() < 1e-9
+                && (*y2 - 1.0).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn custom_geometry_preserves_quadratic_bezier() {
+        let xml = r#"<custGeom><pathLst><path w="100" h="200">
+          <moveTo><pt x="0" y="0"/></moveTo>
+          <quadBezTo><pt x="50" y="200"/><pt x="100" y="0"/></quadBezTo>
+        </path></pathLst></custGeom>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let paths = parse_cust_geom(doc.root_element(), 100.0, 200.0);
+        assert!(matches!(
+            paths[0][1],
+            PathCmd::QuadBezTo { x1, y1, x, y }
+                if (x1 - 0.5).abs() < 1e-9 && (y1 - 1.0).abs() < 1e-9
+                    && (x - 1.0).abs() < 1e-9 && y.abs() < 1e-9
+        ));
     }
 
     /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39) — the

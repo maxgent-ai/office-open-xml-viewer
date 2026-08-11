@@ -35,6 +35,8 @@ const XLSX_GOOGLE_FONTS_OLD: Record<string, FontPreloadEntry> = {
 const EXPECTED_ADDED = new Set([
   'calibri light',
   'cambria math',
+  'franklin gothic book',
+  'franklin gothic medium',
   'nunito sans',
   'nunito',
   'open sans',
@@ -63,5 +65,8 @@ describe('XLSX_GOOGLE_FONTS — shared registry consolidation (oracle)', () => {
     // The two Office face names reduce to their base family's substitute.
     expect(XLSX_GOOGLE_FONTS['calibri light']).toEqual(XLSX_GOOGLE_FONTS['calibri']);
     expect(XLSX_GOOGLE_FONTS['cambria math']).toEqual(XLSX_GOOGLE_FONTS['cambria']);
+    expect(XLSX_GOOGLE_FONTS['franklin gothic medium']).toMatchObject({
+      loadFamily: 'Libre Franklin',
+    });
   });
 });

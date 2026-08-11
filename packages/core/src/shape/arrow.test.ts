@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { lineEndRetract, retractLineEndpoint } from './arrow';
+import {
+  drawArrowHead,
+  lineEndPaintExtent,
+  lineEndRetract,
+  retractLineEndpoint,
+} from './arrow';
 import type { ArrowEnd, Stroke } from '../types/common';
 
 const stroke: Stroke = { color: '#000000', width: 10 };
@@ -30,6 +35,16 @@ describe('lineEndRetract — how far to pull the leader line back from the tip',
   });
 });
 
+describe('lineEndPaintExtent', () => {
+  it('covers the decoration and its centered outline around the tip', () => {
+    // med length = 60, centered outline adds 5.
+    expect(lineEndPaintExtent(end('triangle'), stroke, 1)).toBe(65);
+    // large width has half-span 40; small length is 40, plus 5 outline.
+    expect(lineEndPaintExtent(end('arrow', 'lg', 'sm'), stroke, 1)).toBe(45);
+    expect(lineEndPaintExtent(end('none'), stroke, 1)).toBe(0);
+  });
+});
+
 describe('retractLineEndpoint — pull a point toward its neighbour by `amount`', () => {
   it('returns the point unchanged when amount is 0', () => {
     expect(retractLineEndpoint({ x: 0, y: 0 }, { x: 10, y: 0 }, 0)).toEqual({ x: 0, y: 0 });
@@ -51,5 +66,77 @@ describe('retractLineEndpoint — pull a point toward its neighbour by `amount`'
     const p = retractLineEndpoint({ x: 0, y: 0 }, { x: 3, y: 4 }, 2.5);
     expect(p.x).toBeCloseTo(1.5, 5);
     expect(p.y).toBeCloseTo(2.0, 5);
+  });
+});
+
+describe('drawArrowHead — open arrow geometry', () => {
+  it('strokes one joined path with rounded exposed ends', () => {
+    const operations: Array<{ name: string; args: unknown[] }> = [];
+    let lineCap: CanvasLineCap = 'butt';
+    let lineJoin: CanvasLineJoin = 'miter';
+    const ctx = {
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      get lineCap() { return lineCap; },
+      set lineCap(value: CanvasLineCap) {
+        lineCap = value;
+        operations.push({ name: 'lineCap', args: [value] });
+      },
+      get lineJoin() { return lineJoin; },
+      set lineJoin(value: CanvasLineJoin) {
+        lineJoin = value;
+        operations.push({ name: 'lineJoin', args: [value] });
+      },
+      save() { operations.push({ name: 'save', args: [] }); },
+      restore() { operations.push({ name: 'restore', args: [] }); },
+      translate(...args: unknown[]) { operations.push({ name: 'translate', args }); },
+      rotate(...args: unknown[]) { operations.push({ name: 'rotate', args }); },
+      setLineDash(...args: unknown[]) { operations.push({ name: 'setLineDash', args }); },
+      beginPath() { operations.push({ name: 'beginPath', args: [] }); },
+      moveTo(...args: unknown[]) { operations.push({ name: 'moveTo', args }); },
+      lineTo(...args: unknown[]) { operations.push({ name: 'lineTo', args }); },
+      stroke() { operations.push({ name: 'stroke', args: [] }); },
+    } as unknown as CanvasRenderingContext2D;
+
+    drawArrowHead(ctx, 20, 30, 0, end('arrow'), stroke, 1);
+
+    expect(operations).toEqual(expect.arrayContaining([
+      { name: 'lineCap', args: ['round'] },
+      { name: 'lineJoin', args: ['round'] },
+    ]));
+    expect(operations.filter(({ name }) => name === 'moveTo')).toEqual([
+      { name: 'moveTo', args: [-60, -30] },
+    ]);
+    expect(operations.filter(({ name }) => name === 'lineTo')).toEqual([
+      { name: 'lineTo', args: [0, 0] },
+      { name: 'lineTo', args: [-60, 30] },
+    ]);
+  });
+
+  it('uses the resolved stroke paint for the arrow head', () => {
+    const gradient = { addColorStop() {} } as unknown as CanvasGradient;
+    const ctx = {
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      lineCap: 'butt',
+      lineJoin: 'miter',
+      save() {},
+      restore() {},
+      translate() {},
+      rotate() {},
+      setLineDash() {},
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      closePath() {},
+      fill() {},
+    } as unknown as CanvasRenderingContext2D;
+
+    drawArrowHead(ctx, 20, 30, 0, end('triangle'), stroke, 1, gradient);
+
+    expect(ctx.fillStyle).toBe(gradient);
+    expect(ctx.strokeStyle).toBe(gradient);
   });
 });

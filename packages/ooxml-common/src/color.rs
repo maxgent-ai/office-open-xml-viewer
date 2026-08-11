@@ -1,14 +1,13 @@
 //! OOXML color transforms (lumMod, lumOff, satMod, satOff, hueMod, hueOff,
 //! shade, tint, alpha and friends) shared between the docx and pptx parsers.
 //!
-//! Word and PowerPoint diverge on the `tint` transform — Word reads `val` as
-//! the *retained fraction of the input color* (the literal ECMA-376
-//! §20.1.2.3.34 reading: `result = val·input + (1-val)·white`), while
-//! PowerPoint applies it as a `lerp(input, white, val)` in linear sRGB. Empirical
-//! comparison against PDF exports confirms each app does its own thing — see
-//! `TintMode` and the per-app `apply_color_transforms_with` flag.
+//! Word and PowerPoint diverge on the color space used by the `tint` and
+//! `shade` transforms. Both read `val` as the retained fraction of the input,
+//! but Word applies the blend to encoded sRGB channels while PowerPoint applies
+//! it in linear sRGB. Empirical comparison against PDF exports confirms the
+//! color-space split — see `TintMode`.
 //!
-//! Everything else (shade, lumMod/Off, satMod/Off, hueMod/Off, alpha
+//! Everything else (lumMod/Off, satMod/Off, hueMod/Off, alpha
 //! family) is identical between the two and lives here uncopied.
 
 use roxmltree::Node;
@@ -74,9 +73,32 @@ pub enum TintMode {
     /// rendering of resume / cover templates that use accent recolors with
     /// tint values.
     WordLiteral,
-    /// PowerPoint: `lerp(input, white, val)` in linear sRGB. Matches
+    /// PowerPoint: `val·input + (1-val)·white` in linear sRGB. Matches
     /// PowerPoint's rendering of SmartArt accent recolors pixel-for-pixel.
     PowerPointLinear,
+}
+
+/// Apply a DrawingML tint to normalized RGB channels without quantizing the
+/// intermediate result. Exposed for generated preset tables, which carry the
+/// same transforms as XML-backed colours but have no `roxmltree::Node`.
+pub fn apply_tint_channels(rgb: (f64, f64, f64), val: f64, tint_mode: TintMode) -> (f64, f64, f64) {
+    let (r, g, b) = rgb;
+    match tint_mode {
+        TintMode::WordLiteral => (
+            val * r + (1.0 - val),
+            val * g + (1.0 - val),
+            val * b + (1.0 - val),
+        ),
+        TintMode::PowerPointLinear => {
+            // PowerPoint retains `val` of the input in LINEAR sRGB. Verified
+            // against PDF exports of SmartArt accent recolors; treating val as
+            // the amount of white reverses common gradient stops.
+            let apply = |channel: f64| {
+                linear_to_srgb((val * srgb_to_linear(channel) + (1.0 - val)).clamp(0.0, 1.0))
+            };
+            (apply(r), apply(g), apply(b))
+        }
+    }
 }
 
 /// Apply OOXML color transforms to `hex` based on the modifier elements
@@ -164,31 +186,22 @@ pub fn apply_color_transforms(hex: &str, node: Node, tint_mode: TintMode) -> Str
             "shade" => {
                 // ECMA-376 §20.1.2.3.31: result = val·input + (1-val)·black.
                 let val = attr_pct(&t, "val", 100_000.0);
-                rf *= val;
-                gf *= val;
-                bf *= val;
+                if tint_mode == TintMode::PowerPointLinear {
+                    let apply = |channel: f64| {
+                        linear_to_srgb((srgb_to_linear(channel) * val).clamp(0.0, 1.0))
+                    };
+                    rf = apply(rf);
+                    gf = apply(gf);
+                    bf = apply(bf);
+                } else {
+                    rf *= val;
+                    gf *= val;
+                    bf *= val;
+                }
             }
             "tint" => {
                 let val = attr_pct(&t, "val", 0.0);
-                match tint_mode {
-                    TintMode::WordLiteral => {
-                        // `result = val·input + (1-val)·white` per literal spec.
-                        rf = val * rf + (1.0 - val);
-                        gf = val * gf + (1.0 - val);
-                        bf = val * bf + (1.0 - val);
-                    }
-                    TintMode::PowerPointLinear => {
-                        // PowerPoint reads val as the lerp fraction toward
-                        // white in LINEAR sRGB. Verified against PDF
-                        // exports of SmartArt accent recolors.
-                        let lr = srgb_to_linear(rf);
-                        let lg = srgb_to_linear(gf);
-                        let lb = srgb_to_linear(bf);
-                        rf = linear_to_srgb((lr + (1.0 - lr) * val).clamp(0.0, 1.0));
-                        gf = linear_to_srgb((lg + (1.0 - lg) * val).clamp(0.0, 1.0));
-                        bf = linear_to_srgb((lb + (1.0 - lb) * val).clamp(0.0, 1.0));
-                    }
-                }
+                (rf, gf, bf) = apply_tint_channels((rf, gf, bf), val, tint_mode);
             }
             "alpha" => {
                 // ECMA-376 §20.1.2.3.1 — sets absolute alpha.
@@ -431,6 +444,35 @@ pub trait ThemeResolver {
     /// Resolve a scheme/logical color name to its base hex (no `#`). `name` is
     /// the raw `<a:schemeClr val>` string.
     fn resolve_scheme_color(&self, name: &str) -> Option<String>;
+}
+
+/// Resolve colors inside a theme style-matrix recipe. `phClr` is substituted
+/// with the color authored on the corresponding `fillRef`/`lnRef`; every other
+/// scheme color continues through the host resolver. This distinction matters
+/// for recipes that use a fixed theme color: they remain resolvable even when
+/// the reference itself carries no optional color child.
+pub struct StyleMatrixColorResolver<'a, R: ?Sized> {
+    delegate: &'a R,
+    placeholder_color: Option<&'a str>,
+}
+
+impl<'a, R: ThemeResolver + ?Sized> StyleMatrixColorResolver<'a, R> {
+    pub fn new(delegate: &'a R, placeholder_color: Option<&'a str>) -> Self {
+        Self {
+            delegate,
+            placeholder_color,
+        }
+    }
+}
+
+impl<R: ThemeResolver + ?Sized> ThemeResolver for StyleMatrixColorResolver<'_, R> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        if name == "phClr" {
+            self.placeholder_color.map(str::to_owned)
+        } else {
+            self.delegate.resolve_scheme_color(name)
+        }
+    }
 }
 
 /// Resolve a located color container to a hex string, sharing the DrawingML
@@ -902,8 +944,8 @@ mod tests {
         assert_eq!(parse(&unknown, TintMode::WordLiteral), None);
     }
 
-    /// The two TintModes diverge on `<a:tint>`: Word reads val as retained input
-    /// (a near-white wash at 20%), PowerPoint lerps toward white in linear sRGB.
+    /// The two TintModes diverge on `<a:tint>`: both retain the input fraction,
+    /// but Word blends encoded channels while PowerPoint blends linear sRGB.
     /// The two must produce DIFFERENT hex for the same input, proving the mode
     /// is threaded through parse_color_node.
     #[test]
@@ -914,10 +956,26 @@ mod tests {
         let word = parse(&xml, TintMode::WordLiteral).unwrap();
         let ppt = parse(&xml, TintMode::PowerPointLinear).unwrap();
         assert_ne!(word, ppt);
+        assert_eq!(word, "DAE3F3");
+        assert_eq!(ppt, "E9EBF5");
         // Both are 6-char uppercase hex with no '#'.
         assert_eq!(word.len(), 6);
         assert!(!word.contains('#'));
         assert!(word.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    /// PowerPoint applies `shade` in linear sRGB before subsequent HSL
+    /// transforms. Word's encoded-channel interpretation remains unchanged.
+    #[test]
+    fn parse_color_node_shade_mode_diverges() {
+        let xml = format!(
+            r#"<a:solidFill xmlns:a="{NS}"><a:srgbClr val="4F81BD"><a:shade val="45000"/><a:satMod val="135000"/></a:srgbClr></a:solidFill>"#
+        );
+        let word = parse(&xml, TintMode::WordLiteral).unwrap();
+        let ppt = parse(&xml, TintMode::PowerPointLinear).unwrap();
+
+        assert_eq!(word, "1B395E");
+        assert_eq!(ppt, "275791");
     }
 
     /// alpha < 1 yields an 8-char RRGGBBAA hex (transform emits the alpha byte).

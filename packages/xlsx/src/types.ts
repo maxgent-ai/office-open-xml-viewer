@@ -3,7 +3,11 @@ import type {
   ChartModel,
   MathNode,
   SpaceLine,
+  Fill,
+  ArrowEnd,
 } from '@silurus/ooxml-core';
+
+export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
 import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionIdentity,
@@ -421,6 +425,11 @@ export interface DataValidation {
 // re-exported below (with back-compat aliases) so downstream code keeps a stable
 // import surface.
 export type {
+  ArrowEnd,
+  GradientFill,
+  GradientStop,
+  PatternFill,
+  SolidFill,
   ChartModel,
   ChartSeries,
   ChartSeriesDataLabels,
@@ -468,9 +477,22 @@ export interface ShapeInfo {
   flipH?: boolean;
   flipV?: boolean;
   fillColor?: string;
+  /** Complete authored DrawingML fill; `fillColor` remains a compatibility fallback. */
+  fill?: ShapeFill;
   strokeColor?: string;
   /** Stroke width in EMU. 0 = no stroke. */
   strokeWidth: number;
+  /** Authored non-solid DrawingML line paint. */
+  strokeFill?: Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
+  strokeDashStyle?: string;
+  strokeCustomDash?: Array<{ dash: number; space: number }>;
+  strokeLineCap?: 'butt' | 'round' | 'square';
+  strokeLineJoin?: 'round' | 'bevel' | 'miter';
+  strokeMiterLimit?: number;
+  strokeAlignment?: 'ctr' | 'in';
+  strokeCmpd?: string;
+  strokeHeadEnd?: ArrowEnd;
+  strokeTailEnd?: ArrowEnd;
   geom: ShapeGeom;
   /** Optional text body (`<xdr:txBody>`, ECMA-376 §20.5.2.34). Present for
    *  text boxes (`txBox="1"`) and any other shape that carries visible text. */

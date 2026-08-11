@@ -791,6 +791,25 @@ pub trait ColorResolver {
     /// and applies the surrounding lumMod/lumOff/tint/shade transforms.
     fn resolve_solid_fill(&self, node: Node) -> Option<String>;
 
+    /// Resolve a theme scheme slot to its base color (no leading `#`). Chart
+    /// parts can carry their own `<c:clrMapOvr>` (§21.2.2.30), whose
+    /// `CT_ColorMapping` attributes remap logical names such as `accent1` to a
+    /// scheme slot such as `accent2`. The shared chart parser performs that
+    /// logical-name remapping; the host still owns the theme storage lookup.
+    ///
+    /// Resolvers that do not expose a theme palette may keep the default. The
+    /// chart-local wrapper then falls back to their ordinary fill resolver.
+    fn resolve_scheme_color(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// Color-transform behavior used after resolving a chart-local mapped
+    /// scheme color. Charts use the PowerPoint/Excel DrawingML behavior by
+    /// default; a host with different semantics can override it.
+    fn tint_mode(&self) -> crate::color::TintMode {
+        crate::color::TintMode::PowerPointLinear
+    }
+
     /// Resolve the first `<a:solidFill>` among `parent`'s **direct children** to
     /// a hex string (no leading `#`) using the full DrawingML color grammar,
     /// including `lumMod`/`lumOff`/`tint`/`shade` transforms.
@@ -834,8 +853,7 @@ pub trait ColorResolver {
     /// (no leading `#`) lets the renderer draw the correct default palette
     /// without needing theme access.
     ///
-    /// Defaults to `None` so a resolver whose renderer already owns a default
-    /// palette (pptx) leaves the series color unset and lets that palette apply.
+    /// Defaults to `None` for callers that do not carry a theme palette.
     fn resolve_series_accent(&self, _idx: usize) -> Option<String> {
         None
     }
@@ -848,6 +866,95 @@ pub trait ColorResolver {
     /// a solid hex or `noFill` → `None` — regardless of this default.)
     fn default_chart_bg(&self) -> Option<String> {
         None
+    }
+}
+
+/// The direct `CT_ColorMapping` carried by `<c:chartSpace><c:clrMapOvr>`
+/// (ECMA-376 §21.2.2.30; `dml-chart.xsd::CT_ChartSpace`). Unlike PresentationML
+/// `<p:clrMapOvr>`, this element is not a `CT_ColorMappingOverride` choice: its
+/// twelve logical-to-scheme attributes live directly on the chart element.
+#[derive(Debug)]
+struct ChartColorMapping {
+    entries: Vec<(String, String)>,
+}
+
+impl ChartColorMapping {
+    fn from_chart_space(chart_root: Node) -> Option<Self> {
+        let node = child(chart_root, "clrMapOvr")?;
+        let entries = crate::color::SCHEME_DEFAULT_SLOTS
+            .iter()
+            .filter_map(|(logical, _)| {
+                node.attribute(*logical)
+                    .map(|slot| ((*logical).to_owned(), slot.to_owned()))
+            })
+            .collect();
+        Some(Self { entries })
+    }
+
+    fn map<'a>(&'a self, logical: &'a str) -> &'a str {
+        self.entries
+            .iter()
+            .find(|(name, _)| name == logical)
+            .map(|(_, slot)| slot.as_str())
+            .unwrap_or(logical)
+    }
+}
+
+/// Chart-scoped resolver that applies `c:clrMapOvr` before delegating theme
+/// slot lookup to the pptx/xlsx host resolver. Keeping this wrapper here makes
+/// the mapping behavior identical for both package formats.
+struct ChartMappedColorResolver<'a> {
+    base: &'a dyn ColorResolver,
+    mapping: ChartColorMapping,
+}
+
+impl crate::color::ThemeResolver for ChartMappedColorResolver<'_> {
+    fn resolve_scheme_color(&self, logical: &str) -> Option<String> {
+        let mapped = self.mapping.map(logical);
+        self.base.resolve_scheme_color(mapped)
+    }
+}
+
+impl ColorResolver for ChartMappedColorResolver<'_> {
+    fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+        crate::color::parse_color_node(node, self, self.base.tint_mode())
+            .or_else(|| self.base.resolve_solid_fill(node))
+    }
+
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        crate::color::ThemeResolver::resolve_scheme_color(self, name)
+    }
+
+    fn tint_mode(&self) -> crate::color::TintMode {
+        self.base.tint_mode()
+    }
+
+    fn resolve_shape_fill(&self, parent: Node) -> Option<String> {
+        parent
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+            .and_then(|fill| self.resolve_solid_fill(fill))
+            .or_else(|| self.base.resolve_shape_fill(parent))
+    }
+
+    fn theme_major_font_latin(&self) -> Option<String> {
+        self.base.theme_major_font_latin()
+    }
+
+    fn theme_minor_font_latin(&self) -> Option<String> {
+        self.base.theme_minor_font_latin()
+    }
+
+    fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+        let logical = format!("accent{}", idx % 6 + 1);
+        let mapped = self.mapping.map(&logical);
+        self.base
+            .resolve_scheme_color(mapped)
+            .or_else(|| self.base.resolve_series_accent(idx))
+    }
+
+    fn default_chart_bg(&self) -> Option<String> {
+        self.base.default_chart_bg()
     }
 }
 
@@ -1747,6 +1854,20 @@ pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
     child(axis_node, "majorGridlines").is_some()
 }
 
+/// Whether declared major gridlines have a paintable line. DrawingML
+/// `<a:noFill>` suppresses the stroke even though `<c:majorGridlines>` remains
+/// present in the chart model. Keep this distinct from
+/// [`axis_has_major_gridlines`], which intentionally reports XML presence.
+fn axis_major_gridlines_visible(axis_node: Node) -> bool {
+    let Some(gridlines) = child(axis_node, "majorGridlines") else {
+        return false;
+    };
+    let no_fill = child(gridlines, "spPr")
+        .and_then(|sp_pr| child(sp_pr, "ln"))
+        .is_some_and(|ln| child(ln, "noFill").is_some());
+    !no_fill
+}
+
 /// `<c:catAx|valAx><c:majorGridlines><c:spPr><a:ln>` gridline style (ECMA-376
 /// §21.2.2.100, `CT_ChartLines` → DrawingML §20.1.2.2.24). The `<c:spPr>` on the
 /// gridlines element styles the gridline stroke exactly like `<c:spPr>` on an
@@ -1755,9 +1876,9 @@ pub fn axis_has_major_gridlines(axis_node: Node) -> bool {
 /// `<a:solidFill>` (e.g. `accent3`), and the `<a:ln w>` width in EMU when
 /// present. `(None, None)` when the axis omits `<c:majorGridlines>` or the
 /// element carries no `<c:spPr><a:ln>` — the renderer then keeps its faint
-/// default gridline. `<a:noFill>` is not exposed here: gridline PRESENCE is
-/// already modeled by [`axis_has_major_gridlines`], so a no-fill gridline only
-/// means "no explicit colour", handled by the `None` colour fallback.
+/// default gridline. Visibility is modeled separately by
+/// [`axis_major_gridlines_visible`] so `<a:noFill>` suppresses the stroke rather
+/// than falling through to a default colour.
 pub fn extract_gridline_style(
     axis_node: Node,
     resolver: &dyn ColorResolver,
@@ -3316,6 +3437,15 @@ pub fn parse_chart_part_with_references(
     references: &mut dyn ChartReferenceResolver,
 ) -> Option<ChartModel> {
     let root = chart_root;
+    let mapped_resolver =
+        ChartColorMapping::from_chart_space(chart_root).map(|mapping| ChartMappedColorResolver {
+            base: color_resolver,
+            mapping,
+        });
+    let color_resolver: &dyn ColorResolver = mapped_resolver
+        .as_ref()
+        .map(|resolver| resolver as &dyn ColorResolver)
+        .unwrap_or(color_resolver);
 
     // Determine chart type by finding the first recognized chart element
     let find_chart = |name: &str| {
@@ -4054,9 +4184,20 @@ pub fn parse_chart_part_with_references(
     let val_axis_major_tick_mark = read_major_tick_mark(val_ax);
     let cat_axis_major_tick_mark = read_major_tick_mark(cat_ax);
 
-    // Axis tick-label font size from `<c:txPr>` (in OOXML hundredths of a point).
-    let cat_axis_font_size_hpt = cat_ax.and_then(extract_axis_tick_label_size);
-    let val_axis_font_size_hpt = val_ax.and_then(extract_axis_tick_label_size);
+    // Axis-local text properties override the chart-wide `<c:chartSpace><c:txPr>`
+    // defaults. Microsoft documents the latter as the OfficeArt text properties
+    // for the entire chart, so an axis without its own `<c:txPr>` must inherit
+    // these values rather than fall back to renderer constants.
+    let chart_text_font_size_hpt = extract_axis_tick_label_size(root);
+    let chart_text_font_color = extract_axis_tick_label_color(root, color_resolver);
+    let chart_text_font_bold = extract_axis_tick_label_bold(root);
+    let chart_text_font_face = extract_axis_tick_label_face(root);
+    let cat_axis_font_size_hpt = cat_ax
+        .and_then(extract_axis_tick_label_size)
+        .or(chart_text_font_size_hpt);
+    let val_axis_font_size_hpt = val_ax
+        .and_then(extract_axis_tick_label_size)
+        .or(chart_text_font_size_hpt);
 
     // Data-label font size — first `<c:dLbls><c:txPr>` defRPr/rPr@sz we find.
     let data_label_font_size_hpt = extract_data_label_font_size(root);
@@ -4078,14 +4219,35 @@ pub fn parse_chart_part_with_references(
     // tick labels and `<c:spPr><a:ln>` styles the axis rule. Shared helpers so
     // the gray "2025年3月期" category labels and the light-gray category-axis
     // line in sample-2 slide-16's horizontal bar chart resolve the same way.
-    let cat_axis_font_color = cat_ax.and_then(|n| extract_axis_tick_label_color(n, color_resolver));
-    let val_axis_font_color = val_ax.and_then(|n| extract_axis_tick_label_color(n, color_resolver));
-    let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) = cat_ax
+    // `CT_ChartSpace.style` is optional. PowerPoint treats its omission as the
+    // legacy default chart style: black 0.75 pt axes/gridlines and black chart
+    // text. This form is common in charts produced by non-Office generators.
+    // Resolve that implicit Office formatting here so all three host formats
+    // consume the same canonical model; explicit chart styles keep their
+    // existing path until the numbered built-in style table is modeled.
+    let uses_implicit_legacy_style = child(root, "style").is_none();
+    let cat_axis_font_color = cat_ax
+        .and_then(|n| extract_axis_tick_label_color(n, color_resolver))
+        .or_else(|| chart_text_font_color.clone())
+        .or_else(|| (uses_implicit_legacy_style && cat_ax.is_some()).then(|| "000000".to_string()));
+    let val_axis_font_color = val_ax
+        .and_then(|n| extract_axis_tick_label_color(n, color_resolver))
+        .or_else(|| chart_text_font_color.clone())
+        .or_else(|| (uses_implicit_legacy_style && val_ax.is_some()).then(|| "000000".to_string()));
+    let (mut cat_axis_line_color, mut cat_axis_line_width_emu, cat_axis_line_hidden) = cat_ax
         .map(|n| extract_axis_line_style(n, color_resolver))
         .unwrap_or((None, None, false));
-    let (val_axis_line_color, val_axis_line_width_emu, val_axis_line_hidden) = val_ax
+    let (mut val_axis_line_color, mut val_axis_line_width_emu, val_axis_line_hidden) = val_ax
         .map(|n| extract_axis_line_style(n, color_resolver))
         .unwrap_or((None, None, false));
+    if uses_implicit_legacy_style && cat_ax.is_some() && !cat_axis_line_hidden {
+        cat_axis_line_color.get_or_insert_with(|| "000000".to_string());
+        cat_axis_line_width_emu.get_or_insert(9_525);
+    }
+    if uses_implicit_legacy_style && val_ax.is_some() && !val_axis_line_hidden {
+        val_axis_line_color.get_or_insert_with(|| "000000".to_string());
+        val_axis_line_width_emu.get_or_insert(9_525);
+    }
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(extract_axis_format_code);
@@ -4109,8 +4271,9 @@ pub fn parse_chart_part_with_references(
             title: t,
             hidden: axis_is_deleted(ax),
             format_code: extract_axis_format_code(ax),
-            font_color: extract_axis_tick_label_color(ax, color_resolver),
-            font_size_hpt: extract_axis_tick_label_size(ax),
+            font_color: extract_axis_tick_label_color(ax, color_resolver)
+                .or_else(|| chart_text_font_color.clone()),
+            font_size_hpt: extract_axis_tick_label_size(ax).or(chart_text_font_size_hpt),
             line_color,
             line_width_emu,
             line_hidden,
@@ -4261,8 +4424,12 @@ pub fn parse_chart_part_with_references(
     // ooxml-common helpers so the two parsers stay in lockstep. The chart-title
     // bold helper expects the `<c:title>`'s parent, so pass `title_node_opt`'s
     // parent (the element that holds it as a direct child).
-    let cat_axis_font_bold = cat_ax.and_then(extract_axis_tick_label_bold);
-    let val_axis_font_bold = val_ax.and_then(extract_axis_tick_label_bold);
+    let cat_axis_font_bold = cat_ax
+        .and_then(extract_axis_tick_label_bold)
+        .or(chart_text_font_bold);
+    let val_axis_font_bold = val_ax
+        .and_then(extract_axis_tick_label_bold)
+        .or(chart_text_font_bold);
     let title_font_bold = title_node_opt
         .and_then(|t| t.parent())
         .and_then(extract_chart_title_bold);
@@ -4289,8 +4456,12 @@ pub fn parse_chart_part_with_references(
     // (`<c:dLbls><c:txPr>…<a:latin>`) and legend text props, all via the shared
     // ooxml-common extractors so pptx/xlsx stay in lockstep. Absent faces stay
     // None; the renderer falls back to the theme body/heading font.
-    let cat_axis_font_face = cat_ax.and_then(extract_axis_tick_label_face);
-    let val_axis_font_face = val_ax.and_then(extract_axis_tick_label_face);
+    let cat_axis_font_face = cat_ax
+        .and_then(extract_axis_tick_label_face)
+        .or_else(|| chart_text_font_face.clone());
+    let val_axis_font_face = val_ax
+        .and_then(extract_axis_tick_label_face)
+        .or_else(|| chart_text_font_face.clone());
     let data_label_font_face = extract_data_label_face(root);
     let (legend_font_face, legend_font_size_hpt, legend_font_bold) =
         extract_legend_text_props(root);
@@ -4313,17 +4484,25 @@ pub fn parse_chart_part_with_references(
     // `<c:majorGridlines>` presence: Office writes it on the value axis by
     // default (renderer keeps its historical always-on when the field is None),
     // so we only emit `Some(false)` when a value axis EXISTS without the element.
-    let val_axis_major_gridlines = val_ax.map(|ax| axis_has_major_gridlines(ax));
-    let cat_axis_major_gridlines = cat_ax.map(|ax| axis_has_major_gridlines(ax));
+    let val_axis_major_gridlines = val_ax.map(axis_major_gridlines_visible);
+    let cat_axis_major_gridlines = cat_ax.map(axis_major_gridlines_visible);
     // `<c:majorGridlines><c:spPr><a:ln>` colour/width — the explicit gridline
     // style (e.g. sample-1 slide 5's `accent3` 0.25 pt value-axis gridlines).
     // `(None, None)` when absent, so the renderer keeps its faint default.
-    let (val_axis_gridline_color, val_axis_gridline_width_emu) = val_ax
+    let (mut val_axis_gridline_color, mut val_axis_gridline_width_emu) = val_ax
         .map(|ax| extract_gridline_style(ax, color_resolver))
         .unwrap_or((None, None));
-    let (cat_axis_gridline_color, cat_axis_gridline_width_emu) = cat_ax
+    let (mut cat_axis_gridline_color, mut cat_axis_gridline_width_emu) = cat_ax
         .map(|ax| extract_gridline_style(ax, color_resolver))
         .unwrap_or((None, None));
+    if uses_implicit_legacy_style && val_axis_major_gridlines == Some(true) {
+        val_axis_gridline_color.get_or_insert_with(|| "000000".to_string());
+        val_axis_gridline_width_emu.get_or_insert(9_525);
+    }
+    if uses_implicit_legacy_style && cat_axis_major_gridlines == Some(true) {
+        cat_axis_gridline_color.get_or_insert_with(|| "000000".to_string());
+        cat_axis_gridline_width_emu.get_or_insert(9_525);
+    }
     let val_axis_minor_gridlines = val_ax.map(|ax| axis_has_minor_gridlines(ax));
     let val_axis_major_unit = val_ax.and_then(extract_axis_major_unit);
     let val_axis_minor_unit = val_ax.and_then(extract_axis_minor_unit);
@@ -5603,6 +5782,17 @@ mod tests {
             }
         }
 
+        fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+            match name {
+                "accent1" => Some("4472C4".to_string()),
+                "accent2" => Some("ED7D31".to_string()),
+                "accent3" => Some("A5A5A5".to_string()),
+                "tx1" | "dk1" => Some("000000".to_string()),
+                "bg1" | "lt1" => Some("FFFFFF".to_string()),
+                _ => None,
+            }
+        }
+
         fn theme_major_font_latin(&self) -> Option<String> {
             Some("Calibri Light".to_string())
         }
@@ -5621,6 +5811,39 @@ mod tests {
 
     fn chart_space_of(xml: &str) -> Document<'_> {
         Document::parse(xml).expect("parse chartSpace fixture")
+    }
+
+    /// §21.2.2.30 / `CT_ChartSpace`: chart-local `clrMapOvr` is a direct
+    /// `CT_ColorMapping`. It replaces the application's logical color mapping,
+    /// so an authored `schemeClr accent1` resolves through the declared
+    /// `accent1=accent2` slot mapping for both pptx and xlsx callers.
+    #[test]
+    fn chart_color_map_override_remaps_explicit_and_default_series_accents() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:clrMapOvr bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"
+                accent1="accent2" accent2="accent2" accent3="accent3"
+                accent4="accent4" accent5="accent5" accent6="accent6"
+                hlink="hlink" folHlink="folHlink"/>
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+                <c:ser><c:idx val="6"/><c:order val="1"/>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:barChart></c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let chart = parse_chart_part(doc.root_element(), &FixtureResolver).expect("chart parses");
+
+        assert_eq!(chart.series[0].color.as_deref(), Some("ED7D31"));
+        assert_eq!(chart.series[1].color.as_deref(), Some("ED7D31"));
     }
 
     #[test]
@@ -5791,6 +6014,57 @@ mod tests {
         assert_eq!(m.chart_border_width_emu, Some(19050));
         assert!(!m.cat_axis_hidden);
         assert!(!m.val_axis_hidden);
+    }
+
+    /// A chart without `<c:style>` is valid (`CT_ChartSpace.style` is optional).
+    /// PowerPoint opens this legacy/default-style form with black 0.75 pt axes
+    /// and major gridlines. Non-Office generators commonly emit precisely this
+    /// minimal form, so the shared parser must resolve the implicit formatting
+    /// once for DOCX, XLSX, and PPTX rather than leave each renderer to guess.
+    #[test]
+    fn parse_chart_part_resolves_styleless_legacy_axis_defaults() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                <c:plotArea>
+                  <c:barChart>
+                    <c:barDir val="col"/><c:grouping val="clustered"/>
+                    <c:ser><c:idx val="0"/>
+                      <c:cat><c:strLit><c:pt idx="0"><c:v>T1</c:v></c:pt></c:strLit></c:cat>
+                      <c:val><c:numLit><c:pt idx="0"><c:v>10</c:v></c:pt></c:numLit></c:val>
+                    </c:ser>
+                  </c:barChart>
+                  <c:catAx><c:delete val="0"/><c:majorTickMark val="out"/></c:catAx>
+                  <c:valAx><c:delete val="0"/><c:majorGridlines/><c:majorTickMark val="out"/></c:valAx>
+                </c:plotArea>
+              </c:chart>
+              <c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr sz="1800"/></a:pPr></a:p></c:txPr>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let m = parse_chart_part(doc.root_element(), &FixtureResolver).expect("bar chart parses");
+
+        assert_eq!(m.cat_axis_font_size_hpt, Some(1800));
+        assert_eq!(m.val_axis_font_size_hpt, Some(1800));
+        assert_eq!(m.cat_axis_font_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_font_color.as_deref(), Some("000000"));
+        assert_eq!(m.cat_axis_line_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_line_color.as_deref(), Some("000000"));
+        assert_eq!(m.cat_axis_line_width_emu, Some(9525));
+        assert_eq!(m.val_axis_line_width_emu, Some(9525));
+        assert_eq!(m.val_axis_gridline_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_gridline_width_emu, Some(9525));
+
+        let no_fill_xml = xml.replace(
+            "<c:majorGridlines/>",
+            "<c:majorGridlines><c:spPr><a:ln><a:noFill/></a:ln></c:spPr></c:majorGridlines>",
+        );
+        let no_fill_doc = chart_space_of(&no_fill_xml);
+        let no_fill_model = parse_chart_part(no_fill_doc.root_element(), &FixtureResolver)
+            .expect("no-fill chart parses");
+        assert_eq!(no_fill_model.val_axis_major_gridlines, Some(false));
+        assert_eq!(no_fill_model.val_axis_gridline_color, None);
+        assert_eq!(no_fill_model.val_axis_gridline_width_emu, None);
     }
 
     /// (b) Combo chart: a bar series on the primary value axis plus a line

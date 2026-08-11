@@ -166,6 +166,98 @@ function effAdj(adj: (number | null | undefined)[], def: PresetDef, i: number): 
   return d ? Number(d[1].replace(/^val\s+/, '')) || 0 : 0;
 }
 
+function effectivePreset(
+  key: string,
+  w: number,
+  h: number,
+  adj: (number | null | undefined)[],
+): { def: PresetDef; adj: (number | null | undefined)[] } | null {
+  let def = PRESETS[key];
+  if (!def) return null;
+
+  // Suppress a wedge-callout tail whose tip sits inside the body (see note above).
+  if (key in WEDGE_CALLOUT_BASE) {
+    const a1 = effAdj(adj, def, 0); // dxPos fraction (×1e5) of width from centre
+    const a2 = effAdj(adj, def, 1); // dyPos fraction (×1e5) of height from centre
+    const xPos = w / 2 + (w * a1) / 100000;
+    const yPos = h / 2 + (h * a2) / 100000;
+    const tipInside = xPos >= 0 && xPos <= w && yPos >= 0 && yPos <= h;
+    if (tipInside) {
+      const baseKey = WEDGE_CALLOUT_BASE[key];
+      if (baseKey === 'roundrect') {
+        def = PRESETS.roundrect;
+        adj = [effAdj(adj, PRESETS[key], 2)]; // adj3 → corner radius
+      } else if (baseKey && PRESETS[baseKey]) {
+        def = PRESETS[baseKey];
+        adj = [];
+      } else {
+        def = RECT_DEF;
+        adj = [];
+      }
+    }
+  }
+
+  return { def, adj };
+}
+
+/**
+ * Conservative painted-path bounds for a preset geometry in canvas space.
+ *
+ * DrawingML adjustments can place vertices outside the shape's `<a:xfrm>`
+ * rectangle (wedge callout tips are the common example). Effect rasters must
+ * include those vertices or their shadow/reflection/soft edge is clipped.
+ * Curve control points and complete ellipse boxes are included deliberately:
+ * they may overestimate a curve's exact extrema, but never crop valid paint.
+ */
+export function getPresetGeometryBounds(
+  geom: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  adj: (number | null | undefined)[] = [],
+): { x: number; y: number; w: number; h: number } | null {
+  const selected = effectivePreset(geom.toLowerCase(), w, h, adj);
+  if (!selected) return null;
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  const include = (px: number, py: number) => {
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+    minX = Math.min(minX, px);
+    minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px);
+    maxY = Math.max(maxY, py);
+  };
+  const boundsCtx = {
+    moveTo: include,
+    lineTo: include,
+    bezierCurveTo(x1: number, y1: number, x2: number, y2: number, ex: number, ey: number) {
+      include(x1, y1);
+      include(x2, y2);
+      include(ex, ey);
+    },
+    quadraticCurveTo(x1: number, y1: number, ex: number, ey: number) {
+      include(x1, y1);
+      include(ex, ey);
+    },
+    ellipse(cx: number, cy: number, rx: number, ry: number) {
+      include(cx - Math.abs(rx), cy - Math.abs(ry));
+      include(cx + Math.abs(rx), cy + Math.abs(ry));
+    },
+    closePath() {},
+  } as unknown as CanvasRenderingContext2D;
+  const evaluator = evaluatorForDef(selected.def, w, h, selected.adj);
+  for (const path of selected.def.paths) {
+    applyPresetPath(boundsCtx, path, evaluator, x, y, w, h);
+  }
+
+  if (!Number.isFinite(minX)) return { x, y, w, h };
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
 /**
  * Render a preset shape onto the canvas. Handles all paths (including
  * secondary outline-only / highlight paths) with per-path fill/stroke
@@ -189,30 +281,10 @@ export function renderPresetShape(
   opts?: { skipTrailingStroke?: boolean },
 ): boolean {
   const key = geom.toLowerCase();
-  let def = PRESETS[key];
-  if (!def) return false;
-
-  // Suppress a wedge-callout tail whose tip sits inside the body (see note above).
-  if (key in WEDGE_CALLOUT_BASE) {
-    const a1 = effAdj(adj, def, 0); // dxPos fraction (×1e5) of width from centre
-    const a2 = effAdj(adj, def, 1); // dyPos fraction (×1e5) of height from centre
-    const xPos = w / 2 + (w * a1) / 100000;
-    const yPos = h / 2 + (h * a2) / 100000;
-    const tipInside = xPos >= 0 && xPos <= w && yPos >= 0 && yPos <= h;
-    if (tipInside) {
-      const baseKey = WEDGE_CALLOUT_BASE[key];
-      if (baseKey === 'roundrect') {
-        def = PRESETS.roundrect;
-        adj = [effAdj(adj, PRESETS[key], 2)]; // adj3 → corner radius
-      } else if (baseKey && PRESETS[baseKey]) {
-        def = PRESETS[baseKey];
-        adj = [];
-      } else {
-        def = RECT_DEF;
-        adj = [];
-      }
-    }
-  }
+  const selected = effectivePreset(key, w, h, adj);
+  if (!selected) return false;
+  const { def } = selected;
+  adj = selected.adj;
 
   const evaluator = evaluatorForDef(def, w, h, adj);
 

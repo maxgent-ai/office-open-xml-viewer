@@ -36,7 +36,7 @@ const brk = (): TextRun => ({ type: 'break' });
 const math = (): TextRun => ({ type: 'math', nodes: [], display: false });
 
 const autoNum = (numType = 'arabicPeriod', startAt: number | null = null): Bullet =>
-  ({ type: 'autoNum', numType, startAt, color: null });
+  ({ type: 'autoNum', numType, startAt, color: null, sizePct: null, fontFamily: null });
 const charBullet = (char = '•'): Bullet =>
   ({ type: 'char', char, color: null, sizePct: null, fontFamily: null });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
   applyReflection,
@@ -40,6 +41,8 @@ class RecordingCtx {
   restore() { this.ops.push({ op: 'restore' }); }
   translate(x: number, y: number) { this.ops.push({ op: 'translate', args: [x, y] }); }
   scale(x: number, y: number) { this.ops.push({ op: 'scale', args: [x, y] }); }
+  rotate(angle: number) { this.ops.push({ op: 'rotate', args: [angle] }); }
+  transform(...a: number[]) { this.ops.push({ op: 'transform', args: a }); }
   setTransform(...a: number[]) { this.ops.push({ op: 'setTransform', args: a }); }
   fillRect(...a: number[]) { this.ops.push({ op: 'fillRect', args: a }); }
   fill(...a: unknown[]) { this.ops.push({ op: 'fill', args: a }); }
@@ -119,6 +122,106 @@ describe('createAuxCanvas', () => {
     const ctx = { canvas: Object.create(BrokenCanvas.prototype) } as unknown as CanvasRenderingContext2D;
 
     expect(createAuxCanvasForContext(ctx, 10, 10)).toBeNull();
+  });
+});
+
+describe('applyOuterShadow (ECMA-376 §20.1.8.45)', () => {
+  let fake: { auxCtxs: RecordingCtx[] };
+  beforeEach(() => { fake = installFakeCanvas(); });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('resets the crop transform before recolouring, then blurs/offsets once', () => {
+    const live = new RecordingCtx();
+    const paint = vi.fn((c: unknown) => {
+      const target = c as RecordingCtx;
+      target.setTransform({ a: 2, b: 0, c: 0, d: 2, e: 400, f: 200 } as never);
+      target.ops.push({ op: 'paintShape' });
+    });
+    const shadow: Shadow = {
+      color: '000000', alpha: 0.38, blur: 38_100, dist: 19_050, dir: 90,
+    };
+
+    expect(applyOuterShadow(
+      live as never, paint as never, BBOX, shadow, SCALE, DEVICE_W, DEVICE_H,
+    )).toBe(true);
+
+    expect(paint).toHaveBeenCalledTimes(1);
+    expect(fake.auxCtxs).toHaveLength(1);
+    expect(fake.auxCtxs[0].usedCompositeOps).toContain('source-in');
+    const recolour = fake.auxCtxs[0].ops.findIndex(o => o.op === 'fillRect');
+    expect(recolour).toBeGreaterThan(0);
+    expect(fake.auxCtxs[0].ops[recolour - 1]).toMatchObject({
+      op: 'setTransform',
+      args: [1, 0, 0, 1, 0, 0],
+    });
+    expect(live.usedBlurFilters).toEqual(['blur(4px)']);
+    const finalBlit = live.ops.filter(o => o.op === 'drawImage');
+    expect(finalBlit).toHaveLength(1);
+    expect(finalBlit[0].args?.slice(1)).toEqual([84, 34]);
+    expect(live.ops.filter(o => o.op === 'translate')[0].args?.[1]).toBeCloseTo(2, 6);
+  });
+
+  it('uses one auxiliary surface and no filter for a sharp shadow', () => {
+    const live = new RecordingCtx();
+    const shadow: Shadow = {
+      color: '000000', alpha: 0.38, blur: 0, dist: 19_050, dir: 90,
+    };
+
+    expect(applyOuterShadow(
+      live as never, (() => {}) as never, BBOX, shadow, SCALE, DEVICE_W, DEVICE_H,
+    )).toBe(true);
+
+    expect(fake.auxCtxs).toHaveLength(1);
+    expect(fake.auxCtxs[0].usedBlurFilters).toEqual([]);
+    expect(live.usedBlurFilters).toEqual([]);
+    expect(live.ops.filter(o => o.op === 'drawImage')).toHaveLength(1);
+  });
+
+  it('applies alignment, scale, skew and shape-relative rotation before the blit', () => {
+    const live = new RecordingCtx();
+    const shadow: Shadow = {
+      color: '000000', alpha: 0.5, blur: 0, dist: 9525, dir: 0,
+      sx: 0.5, sy: 1.5, kx: 10, ky: -5, algn: 'tr', rotWithShape: true,
+    };
+
+    expect(applyOuterShadow(
+      live as never, (() => {}) as never, BBOX, shadow, SCALE, DEVICE_W, DEVICE_H, 90,
+      [75, 75],
+    )).toBe(true);
+
+    const transforms = live.ops.filter(o =>
+      o.op === 'translate' || o.op === 'rotate' || o.op === 'transform');
+    expect(transforms[0].args?.[0]).toBeCloseTo(0, 6);
+    expect(transforms[0].args?.[1]).toBeCloseTo(1, 6);
+    expect(transforms[1]).toEqual({ op: 'translate', args: [75, 75] });
+    expect(transforms[2].args?.[0]).toBeCloseTo(Math.PI / 2, 9);
+    expect(transforms[3].args).toEqual([
+      0.5,
+      Math.tan(-5 * Math.PI / 180),
+      Math.tan(10 * Math.PI / 180),
+      1.5,
+      0,
+      0,
+    ]);
+    expect(transforms[4].args?.[0]).toBeCloseTo(-Math.PI / 2, 9);
+    expect(transforms[5]).toEqual({ op: 'translate', args: [-75, -75] });
+  });
+
+  it('keeps direction and transform in page space when rotWithShape is false', () => {
+    const live = new RecordingCtx();
+    const shadow: Shadow = {
+      color: '000000', alpha: 0.5, blur: 0, dist: 9525, dir: 0,
+      rotWithShape: false,
+    };
+
+    expect(applyOuterShadow(
+      live as never, (() => {}) as never, BBOX, shadow, SCALE, DEVICE_W, DEVICE_H, 90,
+    )).toBe(true);
+
+    const transforms = live.ops.filter(o =>
+      o.op === 'translate' || o.op === 'rotate' || o.op === 'transform');
+    expect(transforms[0]).toEqual({ op: 'translate', args: [1, 0] });
+    expect(transforms.some(o => o.op === 'rotate')).toBe(false);
   });
 });
 

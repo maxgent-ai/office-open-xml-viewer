@@ -72,7 +72,7 @@ describe('PPTX editor shape hit testing', () => {
       slides: [{
         ...deck([direct, inherited]).slides[0],
         elementSources: [
-          { origin: 'slide', slideTreeIndex: 0 },
+          { origin: 'slide' },
           { origin: 'layout' },
         ],
       }],

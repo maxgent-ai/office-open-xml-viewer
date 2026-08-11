@@ -8,16 +8,30 @@ import {
 } from './constants';
 import type { OfficeCliBatch, OfficeCliCommand } from './types';
 
-/** Converts one user Command into one atomic native `officecli batch` command array. */
+/**
+ * 将一个用户 Command 转成原子的 native `officecli batch` 命令数组。
+ *
+ * 与 `applyCommand` 一致：按 mutation 顺序先翻译、再应用到临时 presentation，
+ * 使后续 mutation（尤其是连续 Add / Remove→Add）看到的索引与 zorder 基于前序变更后的状态。
+ */
 export function toOfficeCliBatch(
   presentation: Presentation,
   command: Command,
 ): OfficeCliBatch {
-  const [firstMutation, ...remainingMutations] = command.mutations;
+  let nextPresentation = presentation;
+  const translated: OfficeCliCommand[] = [];
+
+  for (const [mutationIndex, mutation] of command.mutations.entries()) {
+    translated.push(
+      translateMutation(nextPresentation, command.id, mutation, mutationIndex),
+    );
+    nextPresentation = mutation.apply(nextPresentation).presentation;
+  }
+
+  const [firstCommand, ...remainingCommands] = translated;
   const commands: NonEmptyReadonlyArray<OfficeCliCommand> = Object.freeze([
-    translateMutation(presentation, command.id, firstMutation, 0),
-    ...remainingMutations.map((mutation, index) =>
-      translateMutation(presentation, command.id, mutation, index + 1)),
+    firstCommand,
+    ...remainingCommands,
   ]);
 
   return Object.freeze({

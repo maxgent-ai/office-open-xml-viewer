@@ -12,7 +12,6 @@ export interface AddElementMutationJson {
   readonly target: ElementRef;
   readonly element: SlideElement;
   readonly presentationElementIndex: number;
-  readonly slideTreeIndex: number;
 }
 
 export interface UpdateTransformMutationJson {

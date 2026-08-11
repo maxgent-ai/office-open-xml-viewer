@@ -189,7 +189,10 @@ zip package itself.
 
 Editable slides must expose complete `elementSources` parallel to `elements`
 (same length). Mutations currently support **direct slide shapes** only
-(`origin: 'slide'` with a `slideTreeIndex`). Master/layout decorations are
+(`origin: 'slide'`). OfficeCLI `zorder` is derived as the ordinal among
+slide-origin entries before `presentationElementIndex` (1-based). This matches
+true spTree position for top-level 1:1 shapes; groups / hidden nodes that expand
+or skip break that equivalence. Master/layout decorations are
 visible in the model but reject edit attempts with
 `element.unsupportedOrigin`.
 
@@ -516,6 +519,9 @@ Document these in product code rather than papering over them:
 3. **Slide content only.** The host installs slide models; presentation theme /
    size fields on the session snapshot are not pushed into the viewer.
 4. **Slide-origin shapes only.** Master/layout elements are not editable.
+   OfficeCLI `zorder` is derived from `origin: 'slide'` ordinals before
+   `presentationElementIndex`; this matches spTree position for top-level 1:1
+   shapes, not for groups / hidden nodes that expand or skip.
 5. **Complete `elementSources` required** for any editable slide.
 6. **Bootstrap `Presentation`.** The viewer does not yet export a ready-made
    editor `Presentation` from a loaded package. Supply parser JSON (or an

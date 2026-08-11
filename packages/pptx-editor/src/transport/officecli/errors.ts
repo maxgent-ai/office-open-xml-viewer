@@ -8,6 +8,7 @@ export type OfficeCliTranslatorErrorCode =
   | 'target.unsupportedElement'
   | 'target.unsupportedOrigin'
   | 'target.unstableElementId'
+  | 'value.invalidIndex'
   | 'value.invalidTransform'
   | 'value.invalidText'
   | 'value.unsupportedFidelity';

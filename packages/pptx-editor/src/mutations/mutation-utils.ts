@@ -12,11 +12,7 @@ import { MutationExecutionError } from '../engine/errors';
 import { OfficeCliTranslatorError } from '../transport/officecli/errors';
 import type { OfficeCliProps } from '../transport/officecli/types';
 
-export type ResolvedMutationTarget = ResolvedElementRef & {
-  readonly source: ResolvedElementRef['source'] & {
-    readonly slideTreeIndex: number;
-  };
-};
+export type ResolvedMutationTarget = ResolvedElementRef;
 
 export function resolveMutationTarget(
   presentation: Presentation,
@@ -55,18 +51,14 @@ export function resolveMutationTarget(
       `Cannot resolve ${mutation.target.slideId}/${mutation.target.elementId}`,
     );
   }
-  const { slideTreeIndex } = resolved.source;
-  if (slideTreeIndex === undefined) {
+  if (resolved.source.origin !== ELEMENT_ORIGINS.SLIDE) {
     throw new MutationExecutionError(
-      'element.notDirectSlide',
+      'element.unsupportedOrigin',
       mutation,
-      `Element ${mutation.target.elementId} is not a direct slide shape`,
+      `Editing ${resolved.source.origin} elements is not supported`,
     );
   }
-  return {
-    ...resolved,
-    source: { ...resolved.source, slideTreeIndex },
-  };
+  return resolved;
 }
 
 export function resolveStableShapePath(
@@ -120,12 +112,12 @@ export function resolveStableShapePath(
       `OfficeCLI MVP cannot translate ${resolved.element.type} elements`,
     );
   }
-  if (resolved.source.slideTreeIndex === undefined) {
+  if (resolved.source.origin !== ELEMENT_ORIGINS.SLIDE) {
     throw officeCliError(
-      'target.notDirectSlide',
+      'target.unsupportedOrigin',
       context,
       mutation,
-      `Element ${mutation.target.elementId} is not a direct slide shape`,
+      `Editing ${resolved.source.origin} elements is not supported`,
     );
   }
   if (!resolved.element.id || !/^\d+$/.test(resolved.element.id)) {

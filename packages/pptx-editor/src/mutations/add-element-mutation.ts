@@ -1,9 +1,11 @@
 import type { Presentation, ShapeElement, SlideElement } from '@maxgent/ooxml/pptx';
 
 import {
+  deriveSlideTreeIndex,
   getElementSources,
   getSlideMutationId,
   insertSlideElement,
+  isSlideRegionInsertIndex,
   resolveElementRef,
 } from '../adapters/pptx-json-adapter';
 import { ELEMENT_ORIGINS } from '../domain/element-origin';
@@ -34,7 +36,6 @@ export interface AddElementMutationParams {
   readonly target: ElementRef;
   readonly element: SlideElement;
   readonly presentationElementIndex: number;
-  readonly slideTreeIndex: number;
 }
 
 export class AddElementMutation extends Mutation {
@@ -42,19 +43,16 @@ export class AddElementMutation extends Mutation {
   readonly target: ElementRef;
   readonly element: SlideElement;
   readonly presentationElementIndex: number;
-  readonly slideTreeIndex: number;
 
   constructor({
     target,
     element,
     presentationElementIndex,
-    slideTreeIndex,
   }: AddElementMutationParams) {
     super();
     this.target = freezeTarget(target);
     this.element = dropUnrestorableGeometry(element);
     this.presentationElementIndex = presentationElementIndex;
-    this.slideTreeIndex = slideTreeIndex;
     Object.freeze(this);
   }
 
@@ -84,29 +82,19 @@ export class AddElementMutation extends Mutation {
       );
     }
     const slide = presentation.slides[slideIndex];
-    if (!getElementSources(slide)) {
+    const elementSources = getElementSources(slide);
+    if (!elementSources) {
       throw new MutationExecutionError(
         'element.metadataUnavailable',
         this,
         `Slide ${this.target.slideId} has no complete element source metadata`,
       );
     }
-    if (
-      !Number.isInteger(this.presentationElementIndex)
-      || this.presentationElementIndex < 0
-      || this.presentationElementIndex > slide.elements.length
-    ) {
+    if (!isSlideRegionInsertIndex(elementSources, this.presentationElementIndex)) {
       throw new MutationExecutionError(
         'element.invalidIndex',
         this,
         `Cannot insert element at presentation index ${this.presentationElementIndex}`,
-      );
-    }
-    if (!Number.isInteger(this.slideTreeIndex) || this.slideTreeIndex < 0) {
-      throw new MutationExecutionError(
-        'element.invalidIndex',
-        this,
-        `Cannot insert element at slide-tree index ${this.slideTreeIndex}`,
       );
     }
 
@@ -116,7 +104,6 @@ export class AddElementMutation extends Mutation {
         slideIndex,
         this.element,
         this.presentationElementIndex,
-        this.slideTreeIndex,
       ),
       changedSlideIds: [this.target.slideId],
       changedElements: [this.target],
@@ -164,15 +151,48 @@ export class AddElementMutation extends Mutation {
         'OfficeCLI MVP cannot restore a shape containing math text runs',
       );
     }
+    const slideIndex = presentation.slides.findIndex(
+      (slide) => getSlideMutationId(slide) === this.target.slideId,
+    );
+    if (slideIndex < 0) {
+      throw officeCliError(
+        'target.slideNotFound',
+        context,
+        this,
+        `Cannot resolve slide ${this.target.slideId}`,
+      );
+    }
+    const elementSources = getElementSources(presentation.slides[slideIndex]);
+    if (!elementSources) {
+      throw officeCliError(
+        'target.metadataUnavailable',
+        context,
+        this,
+        `Slide ${this.target.slideId} has no complete element source metadata`,
+      );
+    }
+    if (!isSlideRegionInsertIndex(elementSources, this.presentationElementIndex)) {
+      throw officeCliError(
+        'value.invalidIndex',
+        context,
+        this,
+        `Cannot insert element at presentation index ${this.presentationElementIndex}`,
+      );
+    }
+    const slideTreeIndex = deriveSlideTreeIndex(
+      elementSources,
+      this.presentationElementIndex,
+    );
     // custGeom and adj values are dropped by dropUnrestorableGeometry in the
     // constructor (degraded restore by design), so no guard is needed here.
     // Per-run text formatting fidelity is not guarded either; plain-text
     // restore keeps the paragraph structure but drops run-level styling.
     const props: Record<string, string> = {
       id: this.target.elementId,
-      // OfficeCLI batch has no top-level insertion index; z-order is the
-      // 1-based spTree position (zorder=1 is the back of the shape tree).
-      zorder: String(this.slideTreeIndex + 1),
+      // OfficeCLI batch 没有顶层插入下标；z-order 是 1-based 的 spTree 位置
+      //（zorder=1 在形状树最底层）。由 presentationElementIndex 之前的
+      // origin:'slide' 序位推导而来。
+      zorder: String(slideTreeIndex + 1),
       preset: this.element.geometry,
       x: `${this.element.x}emu`,
       y: `${this.element.y}emu`,

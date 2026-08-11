@@ -20,9 +20,8 @@ export function deck(elements: SlideElement[]): Presentation {
       partName: 'ppt/slides/slide1.xml',
       background: null,
       elements,
-      elementSources: elements.map((_, slideTreeIndex) => ({
+      elementSources: elements.map(() => ({
         origin: 'slide',
-        slideTreeIndex,
       })),
     }],
   };

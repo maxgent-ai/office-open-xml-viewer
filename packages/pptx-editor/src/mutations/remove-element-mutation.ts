@@ -46,7 +46,6 @@ export class RemoveElementMutation extends Mutation {
       target: this.target,
       element: resolved.element,
       presentationElementIndex: resolved.presentationElementIndex,
-      slideTreeIndex: resolved.source.slideTreeIndex,
     });
   }
 

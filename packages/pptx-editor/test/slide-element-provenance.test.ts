@@ -9,7 +9,7 @@ import { toOfficeCliBatch } from '../src/transport/officecli/officecli-translato
 import { deck, shape } from './fixtures/presentation';
 
 describe('slide element provenance', () => {
-  it('restores a direct slide shape using its slide-tree index', () => {
+  it('restores a direct slide shape using a derived slide-tree index', () => {
     const layoutDecoration = shape('7', 'layout');
     const target = shape('7', 'slide');
     const laterSlideShape = shape('8', 'later');
@@ -20,8 +20,8 @@ describe('slide element provenance', () => {
         ...base.slides[0],
         elementSources: [
           { origin: 'layout' },
-          { origin: 'slide', slideTreeIndex: 0 },
-          { origin: 'slide', slideTreeIndex: 1 },
+          { origin: 'slide' },
+          { origin: 'slide' },
         ],
       }],
     } as Presentation;
@@ -31,8 +31,8 @@ describe('slide element provenance', () => {
 
     expect(inverse).toMatchObject({
       presentationElementIndex: 1,
-      slideTreeIndex: 0,
     });
+    expect(inverse).not.toHaveProperty('slideTreeIndex');
     expect(inverse.toOfficeCli(presentation, {
       commandId: 'undo-remove-1',
       mutationIndex: 0,
@@ -41,7 +41,7 @@ describe('slide element provenance', () => {
     const removed = new RemoveElementMutation({ target: ref }).apply(presentation).presentation;
     expect(removed.slides[0].elementSources).toEqual([
       { origin: 'layout' },
-      { origin: 'slide', slideTreeIndex: 0 },
+      { origin: 'slide' },
     ]);
 
     const restored = inverse.apply(removed).presentation;
@@ -52,8 +52,8 @@ describe('slide element provenance', () => {
     ]);
     expect(restored.slides[0].elementSources).toEqual([
       { origin: 'layout' },
-      { origin: 'slide', slideTreeIndex: 0 },
-      { origin: 'slide', slideTreeIndex: 1 },
+      { origin: 'slide' },
+      { origin: 'slide' },
     ]);
   });
 

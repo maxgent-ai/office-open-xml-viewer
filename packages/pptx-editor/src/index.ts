@@ -34,8 +34,10 @@ export type { Command, NonEmptyReadonlyArray } from './domain/command';
 export {
   POSITIONAL_ELEMENT_ID_PREFIX,
   createElementRef,
+  deriveSlideTreeIndex,
   getElementMutationId,
   getSlideMutationId,
+  isSlideRegionInsertIndex,
 } from './adapters/pptx-json-adapter';
 export type { ResolvedElementRef } from './adapters/pptx-json-adapter';
 

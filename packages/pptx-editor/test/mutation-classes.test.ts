@@ -50,7 +50,6 @@ describe('Mutation classes', () => {
       target: ref,
       element,
       presentationElementIndex: 0,
-      slideTreeIndex: 0,
     }))) as MutationJson;
 
     const mutation = mutationFromJson(serialized);

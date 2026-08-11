@@ -4,6 +4,8 @@ import type { PictureElement, Presentation } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
+import { applyCommand } from '../../src/engine/mutation-engine';
+import { createUndoRedoEntry } from '../../src/history/command-inverter';
 import { AddElementMutation } from '../../src/mutations/add-element-mutation';
 import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
 import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
@@ -73,7 +75,6 @@ describe('toOfficeCliBatch', () => {
         target: ref,
         element: restored,
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     });
 
@@ -125,7 +126,6 @@ describe('toOfficeCliBatch', () => {
         target: ref,
         element: styled,
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     });
 
@@ -170,7 +170,6 @@ describe('toOfficeCliBatch', () => {
           },
         }),
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     });
     expect(gradientBatch.commands[0]).toMatchObject({
@@ -185,7 +184,6 @@ describe('toOfficeCliBatch', () => {
           fill: { fillType: 'pattern', preset: 'diagBrick', fg: 'FF0000', bg: 'FFFFFF' },
         }),
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     });
     expect(patternBatch.commands[0]).toMatchObject({
@@ -209,7 +207,6 @@ describe('toOfficeCliBatch', () => {
         adj2: 40000,
       }),
       presentationElementIndex: 1,
-      slideTreeIndex: 1,
     });
 
     // The snapshot itself is sanitized so the optimistic apply() result
@@ -260,7 +257,6 @@ describe('toOfficeCliBatch', () => {
         target: ref,
         element: shape('9', 'guarded', overrides),
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     })).toThrowError(expect.objectContaining<Partial<OfficeCliTranslatorError>>({
       code: 'value.unsupportedFidelity',
@@ -288,6 +284,123 @@ describe('toOfficeCliBatch', () => {
       {
         command: 'remove',
         path: '/slide[1]/shape[@id=7]',
+      },
+    ]);
+  });
+
+  it('advances presentation between mutations so consecutive Adds see updated indexes', () => {
+    const existing = shape('7', 'kept');
+    const presentation = deck([existing]);
+    const first = shape('8', 'first-add');
+    const second = shape('9', 'second-add');
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'multi-add-1',
+      mutations: [
+        new AddElementMutation({
+          target: {
+            origin: 'slide',
+            slideId: 'ppt/slides/slide1.xml',
+            elementId: '8',
+          },
+          element: first,
+          presentationElementIndex: 1,
+        }),
+        new AddElementMutation({
+          target: {
+            origin: 'slide',
+            slideId: 'ppt/slides/slide1.xml',
+            elementId: '9',
+          },
+          element: second,
+          presentationElementIndex: 2,
+        }),
+      ],
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'add',
+        parent: '/slide[1]',
+        type: 'shape',
+        props: expect.objectContaining({ id: '8', zorder: '2' }),
+      },
+      {
+        command: 'add',
+        parent: '/slide[1]',
+        type: 'shape',
+        props: expect.objectContaining({ id: '9', zorder: '3' }),
+      },
+    ]);
+  });
+
+  it('advances presentation for Remove→Add so the restore uses post-remove indexes', () => {
+    const keep = shape('7', 'keep');
+    const victim = shape('8', 'victim');
+    const presentation = deck([keep, victim]);
+    const victimRef = createElementRef(presentation.slides[0], victim, 1);
+    const remove = new RemoveElementMutation({ target: victimRef });
+    const restore = remove.inverse(presentation);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'remove-add-1',
+      mutations: [remove, restore],
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'remove',
+        path: '/slide[1]/shape[@id=8]',
+      },
+      {
+        command: 'add',
+        parent: '/slide[1]',
+        type: 'shape',
+        props: expect.objectContaining({
+          id: '8',
+          zorder: '2',
+          text: 'victim',
+        }),
+      },
+    ]);
+  });
+
+  it('advances presentation when translating a compound undo (Add then text restore)', () => {
+    const keep = shape('7', 'keep');
+    const victim = shape('8', 'before');
+    const presentation = deck([keep, victim]);
+    const victimRef = createElementRef(presentation.slides[0], victim, 1);
+    const forward: Command = {
+      id: 'edit-1',
+      mutations: [
+        new UpdateTextMutation({ target: victimRef, value: 'after' }),
+        new RemoveElementMutation({ target: victimRef }),
+      ],
+    };
+    const entry = createUndoRedoEntry(presentation, forward);
+    expect(entry).toBeDefined();
+    const afterForward = applyCommand(presentation, forward).presentation;
+
+    const batch = toOfficeCliBatch(afterForward, {
+      id: 'undo-1',
+      mutations: entry!.inverseMutations,
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'add',
+        parent: '/slide[1]',
+        type: 'shape',
+        props: expect.objectContaining({
+          id: '8',
+          zorder: '2',
+          text: 'after',
+        }),
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=8]',
+        props: { text: 'before' },
       },
     ]);
   });

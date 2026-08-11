@@ -94,7 +94,6 @@ describe('AddElementMutation × OfficeCLI 真实执行', () => {
         target: newElementRef(presentation, '7777'),
         element,
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     }));
 
@@ -127,7 +126,6 @@ describe('AddElementMutation × OfficeCLI 真实执行', () => {
         target: newElementRef(presentation, '8888'),
         element: shape('8888', 'middle', { ...shapeOverrides() }),
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     }));
 
@@ -145,11 +143,11 @@ describe('AddElementMutation × OfficeCLI 真实执行', () => {
     flushDeck(pptxPath);
     const presentation = parseDeck(pptxPath);
 
-    // Precondition: the title placeholder materializes inside the slide
-    // spTree, so it occupies slideTreeIndex 0 ahead of the extra shape.
+    // 前置条件：标题占位符落在 slide spTree 内、且位于额外 shape 之前
+    //（两者均为 origin:'slide'）。
     expect(presentation.slides[0].elementSources).toEqual([
-      { origin: 'slide', slideTreeIndex: 0 },
-      { origin: 'slide', slideTreeIndex: 1 },
+      { origin: 'slide' },
+      { origin: 'slide' },
     ]);
     const placeholderId = (presentation.slides[0].elements[0] as { id?: string }).id;
 
@@ -159,7 +157,6 @@ describe('AddElementMutation × OfficeCLI 真实执行', () => {
         target: newElementRef(presentation, '9999'),
         element: shape('9999', 'between', { ...shapeOverrides() }),
         presentationElementIndex: 1,
-        slideTreeIndex: 1,
       })],
     }));
 

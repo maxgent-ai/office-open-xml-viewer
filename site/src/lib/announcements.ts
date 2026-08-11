@@ -28,6 +28,62 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v0771-rendering-fidelity',
+    date: '2026-08-11',
+    label: 'Release note',
+    version: 'v0.77.1',
+    title: 'DrawingML and PowerPoint fidelity in v0.77.1',
+    summary: 'v0.77.1 improves shared DrawingML geometry, theme styles and gradients, and fixes PowerPoint effects, charts, tables and text without changing the v0.77 API.',
+    audience: 'Applications that display DOCX, XLSX or PPTX files. No source changes are required when upgrading from v0.77.0.',
+    sections: [
+      {
+        title: 'In short',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/node', 'office-open-xml-viewer (VS Code extension)'],
+        rationale: 'DrawingML concepts shared by Word, Excel and PowerPoint should be parsed once and retain the information each renderer needs.',
+        kind: 'summary',
+        paragraphs: [
+          'This patch is compatible with v0.77.0. It changes rendering and parser fidelity only; it does not rename or remove public APIs.',
+          'The largest improvements are visible in presentations that rely on theme fills, custom geometry, table and chart defaults, shadows, 3-D effects or reflected text. Shared DrawingML line and gradient fixes also benefit Word and Excel documents that use the same OOXML features.',
+        ],
+        bullets: [
+          'DOCX, XLSX and PPTX now share custom-geometry guide evaluation and complete theme line and gradient models.',
+          'PowerPoint theme backgrounds, image fills, chart defaults, table styles, bullets and terminal whitespace follow their authored or inherited values more closely.',
+          'Shadows and related effects use the complete painted silhouette, including protruding callout leaders, strokes and line ends.',
+          'Text reflections stay sharp where they meet the source and become blurrier with distance while keeping bounded rendering work.',
+        ],
+      },
+      {
+        title: 'Shared DrawingML improvements',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/node'],
+        rationale: 'Custom geometry, themes, line styles and gradients are DrawingML features used by all three Office formats.',
+        paragraphs: [
+          'The parsers now evaluate custom-geometry formulas and quadratic Bézier paths through one shared implementation, including the standard fallback when a path omits its own coordinate size.',
+          'Theme fill and line recipes retain their colors, dashes, joins, line ends and gradient geometry. Chart color-map overrides and XLSX theme relationships are resolved before rendering instead of being replaced with a flat fallback color.',
+          'Theme XML retention, gradient tiles and projected effect surfaces remain bounded so these fidelity improvements do not remove the existing protections for large or hostile documents.',
+        ],
+      },
+      {
+        title: 'PowerPoint rendering fixes',
+        modules: ['@silurus/ooxml/pptx', '@silurus/ooxml/node', 'office-open-xml-viewer (VS Code extension)'],
+        rationale: 'PowerPoint builds the final appearance by combining inherited theme, layout and local properties before applying effects to the complete painted object.',
+        paragraphs: [
+          'Presentation backgrounds and shape fills now preserve theme images and PowerPoint color transforms. Hidden layout graphics stay hidden, while charts and tables inherit the intended axes, labels, banding, text, borders and fills.',
+          'Outer shadows, reflections, soft edges and 3-D effects are composited after the full fill, stroke, callout and arrowhead silhouette is known. This prevents effects from disappearing, being clipped, or being applied separately to only part of an object.',
+          'Text layout retains authored bullet and auto-number formatting, ignores paragraph-ending whitespace that should not create another line, and renders floor reflections with a legible contact edge and increasing blur farther from the text.',
+        ],
+      },
+      {
+        title: 'Compatibility and verification',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'A patch release must improve rendering without requiring application code changes.',
+        paragraphs: [
+          'The v0.77 public API remains unchanged. Existing Viewer, document, selection and MCP integrations continue to use the same calls and types.',
+          'The renderer changes were checked with parser and TypeScript test suites, public API checks, focused PowerPoint/PDF comparisons, independent adversarial reviews, and the complete private DOCX/XLSX/PPTX visual regression corpus using v0.77.0 as the previous-renderer baseline.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v077-migration-guide',
     date: '2026-08-10',
     label: 'Release note',

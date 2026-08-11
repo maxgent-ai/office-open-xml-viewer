@@ -31,6 +31,7 @@ import {
   EMU_PER_PT as PT_TO_EMU,
   mathToMathML,
   recolorSvg,
+  applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
   applyReflection,
@@ -38,15 +39,19 @@ import {
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
+  getPresetGeometryBounds,
+  getCustomGeometryBounds,
   getConnectorAnchors,
   getCustGeomEndpoints,
   drawArrowHead,
+  lineEndPaintExtent,
   lineEndRetract,
   retractLineEndpoint,
   computeScene3dQuad,
   isScene3dNonIdentity,
   drawProjected,
   expandProjectedQuad,
+  projectQuadPoint,
   createAuxCanvas,
   applyBevelShading,
   applyExtrusion,
@@ -96,6 +101,7 @@ import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { paintDistanceAwareReflectionBlur } from './reflection-blur';
 import { classifyPptxHyperlink } from './hyperlink';
 import { drawPlayBadge } from './media-chrome';
 import {
@@ -241,12 +247,13 @@ function resolveFill(fill: Fill | null): string | null {
 
 /** Context-aware fill resolver that creates a CanvasGradient for gradient
  * fills and a CanvasPattern for preset pattern fills. */
-function resolveShapeFill(
+export function resolveShapeFill(
   fill: Fill | null,
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
+  shapeRotationDeg = 0,
 ): string | CanvasGradient | CanvasPattern | null {
-  return resolveFillCore(fill, ctx, x, y, w, h);
+  return resolveFillCore(fill, ctx, x, y, w, h, shapeRotationDeg);
 }
 
 // ===== Text layout helpers =====
@@ -404,6 +411,8 @@ type LayoutSegment = {
   baseline?: number;
   /** Run-level glyph drop shadow (rPr > effectLst > outerShdw). */
   shadow?: import('@silurus/ooxml-core').Shadow;
+  /** Run-level mirrored glyph reflection (rPr > effectLst > reflection). */
+  reflection?: import('@silurus/ooxml-core').Reflection;
   /** Run-level glyph outline (rPr > a:ln). Width in EMU; renderer scales. */
   outline?: import('@silurus/ooxml-core').TextOutline;
   /**
@@ -487,6 +496,8 @@ const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
   'calibri light': 'Carlito',
   'cambria': 'Caladea',
   'cambria math': 'Caladea',
+  'franklin gothic book': 'Libre Franklin',
+  'franklin gothic medium': 'Libre Franklin',
   // Common Arabic-script faces that hosts rarely ship. Map them to Noto
   // substitutes so RTL slides (e.g. sample-10, which requests Sakkal Majalla /
   // Univers Next Arabic) render with a real web font instead of an oversized
@@ -570,10 +581,152 @@ function hyperlinkKey(t: HyperlinkTarget | undefined): string {
   return t.kind === 'external' ? `e:${t.url}` : `i:${t.ref}`;
 }
 
-function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
+/**
+ * Preserve a weight encoded in a specific Office face name when that face is
+ * unavailable and the canvas falls through to a generic/substitute family.
+ * PowerPoint themes commonly name faces such as "Franklin Gothic Medium" with
+ * no separate `b` attribute; treating the missing face as weight 400 makes the
+ * fallback visibly lighter than the authored face.
+ */
+function namedFaceWeight(family: string): number | null {
+  const name = family.toLowerCase();
+  if (/\b(thin|hairline)\b/.test(name)) return 100;
+  if (/\b(extra[- ]?light|ultra[- ]?light)\b/.test(name)) return 200;
+  if (/\blight\b/.test(name)) return 300;
+  if (/\b(black|heavy)\b/.test(name)) return 900;
+  if (/\b(extra[- ]?bold|ultra[- ]?bold)\b/.test(name)) return 800;
+  if (/\b(semi[- ]?bold|demi[- ]?bold)\b/.test(name)) return 600;
+  if (/\bbold\b/.test(name)) return 700;
+  // Office face names such as Franklin Gothic Medium refer to a distinct,
+  // visibly heavier cut. Libre Franklin 600 is the closest web substitute;
+  // 500 makes both the glyphs and their authored reflections too thin.
+  if (/\bmedium\b/.test(name)) return 600;
+  return null;
+}
+
+/**
+ * Paint one text segment's DrawingML reflection in a bbox-sized device-pixel
+ * surface. Shape/picture reflections deliberately use the full-canvas core
+ * helper for long-standing VRT stability, but doing that once per text segment
+ * would allocate a slide-sized canvas for every reflected run. Text reflection
+ * is new, so keep its working set proportional to the glyph bounds.
+ *
+ * The callback paints in absolute device coordinates after the crop offset has
+ * been folded into its transform. The final mirror is therefore composited at
+ * identity, exactly like the shape effect pipeline.
+ */
+function applyTextRunReflection(
+  liveCtx: CanvasRenderingContext2D,
+  paintText: (ctx: CanvasRenderingContext2D) => void,
+  bbox: { x: number; y: number; w: number; h: number },
+  reflection: import('@silurus/ooxml-core').Reflection,
+  effectScale: number,
+  liveTransform: DOMMatrix,
+  deviceW: number,
+  deviceH: number,
+): void {
+  const blur = Math.max(0, reflection.blur * effectScale);
+  const margin = Math.ceil(blur * 3) + 2;
+  const cropX = Math.max(0, Math.floor(bbox.x - margin));
+  const cropY = Math.max(0, Math.floor(bbox.y - margin));
+  const cropRight = Math.min(deviceW, Math.ceil(bbox.x + bbox.w + margin));
+  const cropBottom = Math.min(deviceH, Math.ceil(bbox.y + bbox.h + margin));
+  const cropW = Math.max(1, cropRight - cropX);
+  const cropH = Math.max(1, cropBottom - cropY);
+  const source = createAuxCanvas(cropW, cropH);
+  const sourceCtx = source?.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!source || !sourceCtx) return;
+
+  sourceCtx.save();
+  sourceCtx.setTransform(
+    liveTransform.a,
+    liveTransform.b,
+    liveTransform.c,
+    liveTransform.d,
+    liveTransform.e - cropX,
+    liveTransform.f - cropY,
+  );
+  paintText(sourceCtx);
+  sourceCtx.restore();
+
+  const localTop = bbox.y - cropY;
+  const localBottom = localTop + bbox.h;
+  let aux = source;
+  let auxCtx = sourceCtx;
+  if (blur > 0) {
+    const progressive = createAuxCanvas(cropW, cropH);
+    const progressiveCtx = progressive?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (progressive && progressiveCtx) {
+      aux = progressive;
+      auxCtx = progressiveCtx;
+    }
+  }
+  if (aux !== source) {
+    paintDistanceAwareReflectionBlur(
+      auxCtx,
+      source,
+      { x: bbox.x - cropX, y: localTop, w: bbox.w, h: bbox.h },
+      blur,
+      cropW,
+    );
+  }
+  const stPos = Math.max(0, Math.min(1, reflection.stPos));
+  const endPos = Math.max(0, Math.min(1, reflection.endPos));
+  // Chromium's OffscreenCanvas clears the destination for a gradient-filled
+  // `destination-in` pass (the equivalent HTMLCanvas path works), making
+  // worker-rendered reflections disappear. This surface contains only freshly
+  // rasterized text, so it is origin-clean: apply the alpha ramp directly to
+  // its pixel alpha. The work is bounded to the cropped glyph box, not the
+  // entire slide.
+  const span = Math.max(1, localBottom - localTop);
+  try {
+    const pixels = auxCtx.getImageData(0, 0, cropW, cropH);
+    for (let row = 0; row < cropH; row++) {
+      const position = Math.max(0, Math.min(1, (localBottom - (row + 0.5)) / span));
+      let alpha: number;
+      if (position <= stPos) alpha = reflection.stA;
+      else if (position >= endPos || endPos <= stPos) alpha = reflection.endA;
+      else {
+        const t = (position - stPos) / (endPos - stPos);
+        alpha = reflection.stA + (reflection.endA - reflection.stA) * t;
+      }
+      const factor = Math.max(0, Math.min(1, alpha));
+      for (let offset = row * cropW * 4 + 3; offset < (row + 1) * cropW * 4; offset += 4) {
+        pixels.data[offset] = Math.round(pixels.data[offset] * factor);
+      }
+    }
+    auxCtx.putImageData(pixels, 0, 0);
+  } catch {
+    // Text surfaces should remain origin-clean. If a host canvas implementation
+    // cannot expose pixels, keep a uniformly faded reflection instead of
+    // dropping the authored effect entirely.
+    auxCtx.save();
+    auxCtx.globalCompositeOperation = 'destination-in';
+    auxCtx.fillStyle = `rgba(0,0,0,${Math.max(0, Math.min(1, reflection.stA))})`;
+    auxCtx.fillRect(0, 0, cropW, cropH);
+    auxCtx.restore();
+  }
+
+  const dist = reflection.dist * effectScale;
+  const dirRad = (reflection.dir * Math.PI) / 180;
+  const bottom = bbox.y + bbox.h;
+  liveCtx.save();
+  liveCtx.setTransform(1, 0, 0, 1, 0, 0);
+  liveCtx.translate(
+    bbox.x + Math.cos(dirRad) * dist,
+    bottom + Math.sin(dirRad) * dist,
+  );
+  liveCtx.scale(reflection.sx, reflection.sy);
+  liveCtx.translate(-bbox.x, -bottom);
+  liveCtx.drawImage(aux as CanvasImageSource, cropX, cropY);
+  liveCtx.restore();
+}
+
+export function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
-  const weight = bold   ? 'bold '   : '';
   const normalized = normalizeFontFamily(family, rc);
+  const inferredWeight = namedFaceWeight(normalized);
+  const weight = bold ? 'bold ' : inferredWeight ? `${inferredWeight} ` : '';
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
@@ -715,6 +868,23 @@ export function layoutParagraph(
   firstLineIndentPx: number = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
+  // PowerPoint does not give paragraph-terminal whitespace any advance. In
+  // particular, a trailing space that lands exactly beyond the wrap boundary
+  // must not create a visually empty continuation line. Trim the terminal
+  // suffix across formatting-run boundaries without touching interior spaces
+  // or explicit line-break runs.
+  const terminalText = new Map<TextRun, string>();
+  let scanningTerminalWhitespace = true;
+  for (let i = para.runs.length - 1; i >= 0 && scanningTerminalWhitespace; i--) {
+    const run = para.runs[i];
+    if (run.type === 'break') continue;
+    if (run.type === 'math') break;
+    // Only ordinary U+0020 spaces participate in the observed PowerPoint
+    // terminal-space compatibility rule. Non-breaking spaces remain visible.
+    const trimmed = run.text.replace(/ +$/u, '');
+    if (trimmed !== run.text) terminalText.set(run, trimmed);
+    if (trimmed.length > 0 || run.fieldType != null) scanningTerminalWhitespace = false;
+  }
   // The first line's wrap budget is narrower by a POSITIVE first-line indent
   // (it occupies indentPx of the line); continuation lines use the full width.
   // `lines.length === 0` ⇒ still filling the first line (newLine() pushes to it).
@@ -829,6 +999,7 @@ export function layoutParagraph(
       underlineStyle?: string;
       underlineColor?: string;
       shadow?: import('@silurus/ooxml-core').Shadow;
+      reflection?: import('@silurus/ooxml-core').Reflection;
       outline?: import('@silurus/ooxml-core').TextOutline;
       highlight?: string;
       /** Raw normalized family for the design-line-height floor (see LayoutSegment). */
@@ -850,6 +1021,7 @@ export function layoutParagraph(
     const underlineStyle = extras?.underlineStyle;
     const underlineColor = extras?.underlineColor;
     const shadow = extras?.shadow;
+    const reflection = extras?.reflection;
     const outline = extras?.outline;
     const highlight = extras?.highlight;
     const fontFamily = extras?.fontFamily;
@@ -870,6 +1042,7 @@ export function layoutParagraph(
       (a.letterSpacingPx ?? 0) === lsPx &&
       a.baseline === baseline &&
       a.shadow === shadow &&
+      a.reflection === reflection &&
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
       (a.fontFamily ?? '') === (fontFamily ?? '') &&
@@ -883,7 +1056,7 @@ export function layoutParagraph(
     if (last && sameMeta(last)) {
       last.text += text;
     } else {
-      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
+      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
     }
   };
 
@@ -922,6 +1095,7 @@ export function layoutParagraph(
       underlineStyle: seg.underlineStyle,
       underlineColor: seg.underlineColor,
       shadow: seg.shadow,
+      reflection: seg.reflection,
       outline: seg.outline,
       highlight: seg.highlight,
       fontFamily: seg.fontFamily,
@@ -1004,7 +1178,7 @@ export function layoutParagraph(
     // ~80% size is the long-established Office fallback when the font lacks
     // smcp; we just upper-case for now and rely on the configured size.
     const caps = run.caps;
-    let baseText = run.text;
+    let baseText = terminalText.get(run) ?? run.text;
     if (caps === 'all' || caps === 'small') baseText = baseText.toUpperCase();
 
     // Resolve field values (e.g. slidenum → actual slide number)
@@ -1026,6 +1200,7 @@ export function layoutParagraph(
       underlineStyle: run.underlineStyle,
       underlineColor: run.underlineColor ? hexToRgba(run.underlineColor) : undefined,
       shadow: run.shadow,
+      reflection: run.reflection,
       outline: run.outline,
       // Raw latin/primary family for the design-line-height floor. CJK per-char
       // pushes below override this to `familyEa` when they draw with `fontEa`,
@@ -1550,7 +1725,7 @@ function applyShadow(ctx: CanvasRenderingContext2D, shadow: Shadow | null, scale
   const dirRad = (shadow.dir * Math.PI) / 180;
   const dist = emuToPx(shadow.dist, scale);
   ctx.shadowColor = hexToRgba(shadow.color, shadow.alpha);
-  ctx.shadowBlur = emuToPx(shadow.blur, scale);
+  ctx.shadowBlur = 0;
   ctx.shadowOffsetX = Math.cos(dirRad) * dist;
   ctx.shadowOffsetY = Math.sin(dirRad) * dist;
 }
@@ -2326,6 +2501,246 @@ export function splitScene3dShapeTransform(
   };
 }
 
+interface EffectTransform {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+/**
+ * Axis-aligned device-pixel bounds of a shape after the current Canvas
+ * transform. DrawingML group transforms are already folded into that matrix;
+ * effect surfaces must therefore be cropped from these transformed bounds,
+ * not from the shape's group-local coordinates.
+ */
+export function transformedEffectBounds(
+  transform: EffectTransform,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): { x: number; y: number; w: number; h: number } {
+  const points = [
+    { x, y },
+    { x: x + w, y },
+    { x, y: y + h },
+    { x: x + w, y: y + h },
+  ].map((point) => ({
+    x: transform.a * point.x + transform.c * point.y + transform.e,
+    y: transform.b * point.x + transform.d * point.y + transform.f,
+  }));
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+type EffectPaint = (target: CanvasRenderingContext2D) => void;
+
+interface RasterEffects {
+  shadow?: ShapeElement['shadow'];
+  innerShadow?: ShapeElement['innerShadow'];
+  glow?: ShapeElement['glow'];
+  softEdge?: ShapeElement['softEdge'];
+  reflection?: ShapeElement['reflection'];
+}
+
+const ALIGNMENT_UV: Record<NonNullable<Shadow['algn']>, readonly [number, number]> = {
+  tl: [0, 0], t: [0.5, 0], tr: [1, 0],
+  l: [0, 0.5], ctr: [0.5, 0.5], r: [1, 0.5],
+  bl: [0, 1], b: [0.5, 1], br: [1, 1],
+};
+
+function transformPoint(transform: EffectTransform, x: number, y: number): [number, number] {
+  return [
+    transform.a * x + transform.c * y + transform.e,
+    transform.b * x + transform.d * y + transform.f,
+  ];
+}
+
+function authoredAlignmentAnchor(
+  transform: EffectTransform,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  algn: Shadow['algn'],
+): [number, number] {
+  const [u, v] = ALIGNMENT_UV[algn ?? 'b'];
+  return transformPoint(transform, x + u * w, y + v * h);
+}
+
+export function projectedEffectGeometry(
+  camera: CameraInput,
+  transform: EffectTransform,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  edgePadCss: number,
+  algn: Shadow['algn'],
+): { bbox: { x: number; y: number; w: number; h: number }; anchor: [number, number] } {
+  const face = computeScene3dQuad(camera, w, h).corners;
+  const painted = edgePadCss > 0
+    ? expandProjectedQuad(face, edgePadCss / w, edgePadCss / h) ?? face
+    : face;
+  const devicePoints = painted.map((point) => transformPoint(transform, x + point.x, y + point.y));
+  const xs = devicePoints.map(([px]) => px);
+  const ys = devicePoints.map(([, py]) => py);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  const [u, v] = ALIGNMENT_UV[algn ?? 'b'];
+  const projectedAnchor = projectQuadPoint(face, u, v);
+  return {
+    bbox: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+    anchor: projectedAnchor
+      ? transformPoint(transform, x + projectedAnchor.x, y + projectedAnchor.y)
+      : authoredAlignmentAnchor(transform, x, y, w, h, algn),
+  };
+}
+
+/** Cache an expensive projected body for this one render call only. */
+export function cacheDevicePaint(
+  paint: EffectPaint,
+  liveTransform: EffectTransform,
+  bbox: { x: number; y: number; w: number; h: number },
+  viewport?: { w: number; h: number },
+): EffectPaint {
+  const x = Math.floor(bbox.x) - 1;
+  const y = Math.floor(bbox.y) - 1;
+  const w = Math.max(1, Math.ceil(bbox.x + bbox.w) - x + 1);
+  const h = Math.max(1, Math.ceil(bbox.y + bbox.h) - y + 1);
+  // This cache is an optimization, not a rendering dependency. Do not allocate
+  // a fully viewport-external or oversized projected surface: replaying the source
+  // projection is slower but preserves both effect reach and the shared canvas
+  // safety limits without risking an OOM/DOMException.
+  if (viewport && (x + w <= 0 || y + h <= 0 || x >= viewport.w || y >= viewport.h)) return paint;
+  if (clampCanvasSize(w, h).clamped) return paint;
+  let canvas: ReturnType<typeof createAuxCanvas> = null;
+  try {
+    canvas = createAuxCanvas(w, h);
+  } catch {
+    return paint;
+  }
+  const cache = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!canvas || !cache) return paint;
+  cache.setTransform(
+    liveTransform.a,
+    liveTransform.b,
+    liveTransform.c,
+    liveTransform.d,
+    liveTransform.e - x,
+    liveTransform.f - y,
+  );
+  paint(cache);
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } as DOMMatrix;
+  return (target) => {
+    target.save();
+    target.setTransform(identity);
+    target.drawImage(canvas as CanvasImageSource, x, y);
+    target.restore();
+  };
+}
+
+function paintWithRasterEffects(
+  ctx: CanvasRenderingContext2D,
+  effects: RasterEffects,
+  paintBody: EffectPaint,
+  paintMask: EffectPaint,
+  bbox: { x: number; y: number; w: number; h: number },
+  alignmentAnchor: readonly [number, number],
+  scale: number,
+  effectScale: number,
+  liveTransform: EffectTransform,
+  hasInterior = true,
+  paintInnerMask: EffectPaint = paintMask,
+): void {
+  const deviceW = (ctx.canvas as { width: number }).width || 0;
+  const deviceH = (ctx.canvas as { height: number }).height || 0;
+  const haveAux = deviceW > 0 && deviceH > 0;
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } as DOMMatrix;
+  const applyLiveTransform = (target: CanvasRenderingContext2D) => target.setTransform(liveTransform);
+  const body = (target: CanvasRenderingContext2D) => {
+    applyLiveTransform(target);
+    paintBody(target);
+  };
+  const mask = (target: CanvasRenderingContext2D) => {
+    applyLiveTransform(target);
+    paintMask(target);
+  };
+  const innerMask = (target: CanvasRenderingContext2D) => {
+    applyLiveTransform(target);
+    paintInnerMask(target);
+  };
+  let nativeShadowFallback = false;
+  if (effects.shadow && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    nativeShadowFallback = !applyOuterShadow(
+      ctx,
+      body as never,
+      bbox,
+      effects.shadow,
+      effectScale,
+      deviceW,
+      deviceH,
+      Math.atan2(liveTransform.b, liveTransform.a) * 180 / Math.PI,
+      alignmentAnchor,
+    );
+    ctx.restore();
+  } else if (effects.shadow) {
+    nativeShadowFallback = true;
+  }
+  if (effects.reflection && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    applyReflection(ctx, body as never, bbox, effects.reflection, effectScale, deviceW, deviceH);
+    ctx.restore();
+  }
+  if (nativeShadowFallback) applyShadow(ctx, effects.shadow ?? null, scale);
+  else if (effects.glow) applyGlow(ctx, effects.glow, scale);
+
+  if (effects.softEdge && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    applySoftEdge(
+      ctx,
+      body as never,
+      bbox,
+      effects.softEdge,
+      effectScale,
+      deviceW,
+      deviceH,
+      mask as never,
+    );
+    ctx.restore();
+  } else {
+    paintBody(ctx);
+  }
+  if (nativeShadowFallback || effects.glow) clearShadow(ctx);
+
+  if (effects.innerShadow && hasInterior && haveAux) {
+    ctx.save();
+    ctx.setTransform(identity);
+    applyInnerShadow(
+      ctx,
+      innerMask as never,
+      bbox,
+      effects.innerShadow,
+      effectScale,
+      deviceW,
+      deviceH,
+    );
+    ctx.restore();
+  }
+}
+
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
@@ -2340,7 +2755,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (h === 0 && el.textBody?.verticalAnchor === 'b') {
     if (el.stroke) {
       ctx.save();
-      applyStroke(ctx, el.stroke, scale);
+      applyStroke(ctx, el.stroke, scale, { x, y, w, h: 1 }, el.rotation);
       ctx.beginPath();
       ctx.moveTo(x, y);
       ctx.lineTo(x + w, y);
@@ -2407,34 +2822,107 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       flipH: sceneTransform.localFlipH,
       flipV: sceneTransform.localFlipV,
       scene3d: undefined,
+      // The outer projection owns bevel and extrusion. Retaining sp3d here
+      // would shade the recursive flat body and then shade it again outside.
+      sp3d: undefined,
+      // Raster effects apply to the projected silhouette, not to the flat
+      // source face. Keeping them here clips their reach at the source
+      // offscreen and then warps the already-clipped result.
+      shadow: null,
+      innerShadow: undefined,
+      glow: undefined,
+      softEdge: undefined,
+      reflection: undefined,
     };
-    const ok = projectScene3dPaint(
-      ctx,
-      spScene3d.camera,
-      x,
-      y,
-      w,
-      h,
-      (octx) => {
+    const localBodyEl: ShapeElement = { ...localEl, textBody: null };
+    const localTextEl: ShapeElement = {
+      ...localEl,
+      fill: null,
+      stroke: null,
+    };
+    const edgePadCss =
+      (el.stroke ? (el.stroke.width * scale) / 2 : 0) +
+      (el.sp3d?.contourW ? el.sp3d.contourW * scale : 0) +
+      (extrusion ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale : 0) +
+      2;
+    const paintProjectedElement = (
+      target: CanvasRenderingContext2D,
+      projectedElement: ShapeElement,
+      padded: boolean,
+    ): boolean =>
+      projectScene3dPaint(
+        target,
+        spScene3d.camera,
+        x,
+        y,
+        w,
+        h,
+        (octx) => {
         // localEl is at the origin (x=y=0) with the element's own EMU size, so
         // the recursive render fills the (0,0,w,h) offscreen at the same scale.
         // No onTextRun → the projected text is not selectable (see the note).
-        renderShape(octx, localEl, scale, themeDefaultColor, slideNumber, rc, undefined);
-      },
-      {
-        bevels,
-        extrusion: extrusion ?? undefined,
-        // Edge margin so the centre-aligned stroke's outer half and the
-        // extrusion sweep aren't clipped by the box-sized offscreen (see
-        // Project3dOpts.edgePadCss).
-        edgePadCss:
-          (el.stroke ? (el.stroke.width * scale) / 2 : 0) +
-          (el.sp3d?.contourW ? el.sp3d.contourW * scale : 0) +
-          (extrusion ? Math.hypot(extrusion.offsetX, extrusion.offsetY) / ctxDevScale : 0) +
-          2,
-      },
+          renderShape(octx, projectedElement, scale, themeDefaultColor, slideNumber, rc, undefined);
+        },
+        padded
+          ? { bevels, extrusion: extrusion ?? undefined, edgePadCss }
+          : {},
+      );
+    const paintProjectedBody = (target: CanvasRenderingContext2D): boolean =>
+      paintProjectedElement(target, localBodyEl, true);
+    const paintProjectedText = (target: CanvasRenderingContext2D): boolean =>
+      !el.textBody || paintProjectedElement(target, localTextEl, false);
+    const hasRasterEffects = Boolean(
+      el.shadow || el.innerShadow || el.glow || el.softEdge || el.reflection,
     );
-    if (ok) {
+    if (hasRasterEffects) {
+      const liveTransform = ctx.getTransform();
+      const det = Math.abs(liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c);
+      const devScale = det > 0 ? Math.sqrt(det) : 1;
+      const projectedGeometry = projectedEffectGeometry(
+        spScene3d.camera,
+        liveTransform,
+        x,
+        y,
+        w,
+        h,
+        edgePadCss,
+        el.shadow?.algn,
+      );
+      let projectionSucceeded = false;
+      const rawPaint: EffectPaint = (target) => {
+        projectionSucceeded = paintProjectedBody(target) || projectionSucceeded;
+      };
+      const cachedPaint = cacheDevicePaint(
+        rawPaint,
+        liveTransform,
+        projectedGeometry.bbox,
+        {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        },
+      );
+      // A declined cache is still a valid projection path: the compositor will
+      // replay rawPaint. Check success only AFTER that first paint so an
+      // off-viewport or oversized cache request cannot demote a 3-D shape to
+      // the flat fallback merely because the optimization was skipped.
+      paintWithRasterEffects(
+        ctx,
+        el,
+        cachedPaint,
+        cachedPaint,
+        projectedGeometry.bbox,
+        projectedGeometry.anchor,
+        scale,
+        scale * devScale,
+        liveTransform,
+        Boolean(el.fill),
+      );
+      if (projectionSucceeded) {
+        paintProjectedText(ctx);
+        ctx.restore();
+        return;
+      }
+    } else if (paintProjectedElement(ctx, localEl, true)) {
       ctx.restore();
       return;
     }
@@ -2453,14 +2941,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   }
 
   const geom = el.geometry.toLowerCase();
-  const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h);
+  const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h, el.rotation);
 
-  // Apply shadow before fill/stroke drawing; ctx.restore() will clear it.
   // The Canvas API exposes a single shadow slot, so when both an outer shadow
   // and a glow are configured we let the outer shadow win (visually dominant)
-  // and fall back to the glow only when no outer shadow is present. This is
-  // a common — and conservative — interpretation of layered effectLst.
-  applyShadow(ctx, el.shadow ?? null, scale);
+  // and fall back to the glow only when no outer shadow is present. The outer
+  // shadow itself is composited from the complete fill+stroke silhouette below;
+  // applying native shadow state here makes each path cast a separate shadow.
   if (!el.shadow) applyGlow(ctx, el.glow ?? null, scale);
 
   const CONNECTOR_GEOMS = new Set([
@@ -2515,13 +3002,18 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const paintShapeBody = (
     target: CanvasRenderingContext2D,
     silhouette?: string,
+    bounds: { x: number; y: number; w: number; h: number } = { x, y, w, h },
   ): void => {
-    const tFill = silhouette ?? fillStyle;
+    const { x: bx, y: by, w: bw, h: bh } = bounds;
+    const tFill = silhouette ??
+      (target === ctx && bx === x && by === y && bw === w && bh === h
+        ? fillStyle
+        : resolveShapeFill(el.fill, target, bx, by, bw, bh, el.rotation));
     const tStroke = silhouette
       ? null
       : el.stroke
         ? () => {
-            applyStroke(target, el.stroke!, scale);
+            applyStroke(target, el.stroke!, scale, { x: bx, y: by, w: bw, h: bh }, el.rotation);
             target.stroke();
           }
         : null;
@@ -2529,7 +3021,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
     if (usePresetEngine && !silhouette) {
       renderPresetShape(
-        target, geom, x, y, w, h,
+        target, geom, bx, by, bw, bh,
         [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
         tFill, tStroke, tClearShadow,
         // A retractable leader (callout / straight / bent connector) is
@@ -2543,14 +3035,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
     target.beginPath();
     if (el.custGeom && el.custGeom.length > 0) {
-      buildCustomPath(target, el.custGeom, x, y, w, h);
+      buildCustomPath(target, el.custGeom, bx, by, bw, bh);
     } else if (usePresetEngine) {
       // Silhouette of a preset shape: build a single filled outline. Preset
       // path 0 is the body outline (secondary paths are highlights), so the
       // legacy buildShapePath gives a faithful silhouette of the body.
-      buildShapePath(target, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
+      buildShapePath(target, geom, bx, by, bw, bh, el.adj, el.adj2, el.adj3, el.adj4);
     } else {
-      buildShapePath(target, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
+      buildShapePath(target, geom, bx, by, bw, bh, el.adj, el.adj2, el.adj3, el.adj4);
     }
     // Normal arc bodies render through the preset engine above; this legacy
     // path is only reached for an arc as a custGeom/effect silhouette built by
@@ -2572,9 +3064,6 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   };
 
   // ── effectLst edge/blur effects (independent siblings, ECMA-376 §20.1.8.25)
-  // Device-pixel canvas extent for the auxiliary effect canvases.
-  const deviceW = (ctx.canvas as { width: number }).width || 0;
-  const deviceH = (ctx.canvas as { height: number }).height || 0;
   // The effect helpers operate in DEVICE pixels: the aux silhouette is painted
   // through the live transform (which already folds in devicePixelRatio +
   // rotation + flip), and the blit happens at identity. So bbox / radii passed
@@ -2584,136 +3073,220 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const liveTransform = ctx.getTransform();
   const det = Math.abs(liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c);
   const devScale = det > 0 ? Math.sqrt(det) : 1;
-  const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
+  // Preset adjustments may place painted vertices outside the nominal xfrm
+  // rectangle (for example, a wedge callout's tail). Crop effects to the
+  // geometry bounds so those protrusions participate in the shadow/reflection
+  // instead of being clipped before compositing.
+  const needsRasterEffectBounds = Boolean(
+    el.shadow || el.reflection || el.softEdge || el.innerShadow,
+  );
+  const adjustedGeometryBounds = needsRasterEffectBounds
+    ? usePresetEngine
+      ? getPresetGeometryBounds(
+          geom,
+          x,
+          y,
+          w,
+          h,
+          [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+        )
+      : el.custGeom && el.custGeom.length > 0
+        ? getCustomGeometryBounds(el.custGeom, x, y, w, h)
+        : null
+    : null;
+  const geometryBounds = adjustedGeometryBounds ?? { x, y, w, h };
+  const strokeHalf = el.stroke ? el.stroke.width * scale / 2 : 0;
+  const lineEndExtent = el.stroke
+    ? Math.max(
+        el.stroke.headEnd ? lineEndPaintExtent(el.stroke.headEnd, el.stroke, scale) : 0,
+        el.stroke.tailEnd ? lineEndPaintExtent(el.stroke.tailEnd, el.stroke, scale) : 0,
+      )
+    : 0;
+  const contourExtent = el.sp3d?.contourW ? el.sp3d.contourW * scale : 0;
+  const paintedPad = Math.max(strokeHalf, lineEndExtent, contourExtent);
+  const effectBounds = paintedPad > 0
+    ? {
+        x: geometryBounds.x - paintedPad,
+        y: geometryBounds.y - paintedPad,
+        w: geometryBounds.w + paintedPad * 2,
+        h: geometryBounds.h + paintedPad * 2,
+      }
+    : geometryBounds;
+  const effBBox = transformedEffectBounds(
+    liveTransform,
+    effectBounds.x,
+    effectBounds.y,
+    effectBounds.w,
+    effectBounds.h,
+  );
   const effScale = scale * devScale; // EMU → device px
-  const applyLiveTransform = (c: CanvasRenderingContext2D) => {
-    c.setTransform(liveTransform);
-  };
-
-  // Reflection sits BEHIND/below the shape — draw it first so the body paints
-  // on top. §20.1.8.50. The aux silhouette bakes in the live rotation/flip via
-  // setTransform, and the helper's mirror transform operates in device space,
-  // so the live ctx must blit at identity.
-  if (el.reflection && deviceW > 0 && deviceH > 0) {
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    applyReflection(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
-      effBBox, el.reflection, effScale, deviceW, deviceH,
-    );
-    ctx.restore();
-  }
-
-  // softEdge feathers the whole body, so it REPLACES the direct body paint.
-  // §20.1.8.53. When absent, paint the body normally.
-  if (el.softEdge && deviceW > 0 && deviceH > 0) {
-    // The feathered body is composited in untransformed device space, so reset
-    // the live transform around the blit and re-apply the same transform when
-    // painting the body into the aux canvas.
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    applySoftEdge(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D); },
-      effBBox, el.softEdge, effScale, deviceW, deviceH,
-      // Mask is the flat filled silhouette (no stroke) — see applySoftEdge.
-      (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
-    );
-    ctx.restore();
-  } else {
-    paintShapeBody(ctx);
-  }
-
-  // innerShdw casts inward, ON TOP of the fill. §20.1.8.40. Composite after the
-  // body. The silhouette callback paints a flat opaque mask.
-  if (el.innerShadow && deviceW > 0 && deviceH > 0) {
-    ctx.save();
-    ctx.setTransform(new DOMMatrix());
-    applyInnerShadow(
-      ctx, (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintShapeBody(c as CanvasRenderingContext2D, '#000'); },
-      effBBox, el.innerShadow, effScale, deviceW, deviceH,
-    );
-    ctx.restore();
-  }
-
-  if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
-    // Connectors and callouts both decorate a *leader line* whose two ends +
-    // outward tangents are resolved by getConnectorAnchors from the geometry's
-    // last `<path>` (presets.json). For a connector that is the line itself;
-    // for a callout it is the attach→tip leader (callout1 straight, callout2/3
-    // polyline). headEnd sits on the attach end, tailEnd on the tip — exactly
-    // as the `m … l …` order of the preset's leader path dictates.
-    const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8]);
-    if (anchors) {
-      // ECMA-376 §20.1.8.42 — compound line styles. For straight lines /
-      // connectors we re-stroke the segment with multiple parallel lines
-      // along the perpendicular of the line direction. Curved connectors and
-      // callout leaders fall through to the single-stroke fast path (parallel
-      // curves / polylines are a non-trivial geometric operation).
+  // A face-on camera does not need a homography, but sp3d bevels still alter
+  // the front surface. Pictures already take this flat offscreen path; shapes
+  // must do the same instead of treating an identity camera as "no 3-D".
+  const flatBevels = !spScene3d
+    ? buildBevelInputs(
+        el.sp3d as Sp3dLike | undefined,
+        el.scene3d?.lightRig as LightRigLike | undefined,
+        el.sp3d?.prstMaterial,
+        scale,
+        devScale,
+      )
+    : [];
+  const flatBevelEdgePadCss = (el.stroke ? (el.stroke.width * scale) / 2 : 0) + 2;
+  const paintLineDecorations = (target: CanvasRenderingContext2D): void => {
+    const effectivePaint = el.stroke?.fill
+      ? resolveShapeFill(el.stroke.fill, target, x, y, w, h, el.rotation) ?? undefined
+      : undefined;
+    if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
+      // The preset body deliberately suppresses retractable leader strokes. Paint
+      // the shortened leader and its line ends into the same target as the body
+      // so outer shadows, reflections and soft edges see one composed object.
+      const anchors = getConnectorAnchors(
+        geom,
+        x,
+        y,
+        w,
+        h,
+        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+      );
+      if (!anchors) return;
       const cmpd = el.stroke.cmpd;
       const isStraight = geom === 'line' || geom === 'straightconnector1';
-      // Retractable leaders (callout / straight / bent connector): paintShapeBody
-      // suppressed the preset leader stroke, so re-stroke the polyline here with
-      // each decorated end pulled back by the decoration's length, so the line
-      // stops at the arrow base instead of poking through its tip (PowerPoint
-      // behaviour). Filled ends (triangle/stealth/diamond/oval) retract; open
-      // `arrow` / `none` do not (lineEndRetract → 0). A compound straight segment
-      // is drawn by drawCompoundLine below instead, so skip the retract there.
       if (isRetractableLeader(geom) && anchors.vertices.length >= 2 && !(cmpd && isStraight)) {
         const pts = anchors.vertices.map((v) => ({ x: v.x, y: v.y }));
         if (el.stroke.tailEnd) {
-          const r = lineEndRetract(el.stroke.tailEnd, el.stroke, scale);
-          pts[pts.length - 1] = retractLineEndpoint(pts[pts.length - 1], pts[pts.length - 2], r);
+          const retract = lineEndRetract(el.stroke.tailEnd, el.stroke, scale);
+          pts[pts.length - 1] = retractLineEndpoint(
+            pts[pts.length - 1],
+            pts[pts.length - 2],
+            retract,
+          );
         }
         if (el.stroke.headEnd) {
-          const r = lineEndRetract(el.stroke.headEnd, el.stroke, scale);
-          pts[0] = retractLineEndpoint(pts[0], pts[1], r);
+          const retract = lineEndRetract(el.stroke.headEnd, el.stroke, scale);
+          pts[0] = retractLineEndpoint(pts[0], pts[1], retract);
         }
-        applyStroke(ctx, el.stroke, scale);
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.stroke();
+        applyStroke(target, el.stroke, scale, { x, y, w, h }, el.rotation);
+        target.beginPath();
+        target.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) target.lineTo(pts[i].x, pts[i].y);
+        target.stroke();
       }
       if (cmpd && isStraight) {
-        drawCompoundLine(ctx, anchors.start, anchors.end, el.stroke, cmpd, scale);
+        drawCompoundLine(
+          target,
+          anchors.start,
+          anchors.end,
+          el.stroke,
+          cmpd,
+          scale,
+          el.rotation,
+        );
       }
       if (el.stroke.tailEnd) {
-        drawArrowHead(ctx, anchors.end.x, anchors.end.y, anchors.end.angle, el.stroke.tailEnd, el.stroke, scale);
+        drawArrowHead(
+          target,
+          anchors.end.x,
+          anchors.end.y,
+          anchors.end.angle,
+          el.stroke.tailEnd,
+          el.stroke,
+          scale,
+          effectivePaint,
+        );
       }
       if (el.stroke.headEnd) {
-        drawArrowHead(ctx, anchors.start.x, anchors.start.y, anchors.start.angle, el.stroke.headEnd, el.stroke, scale);
+        drawArrowHead(
+          target,
+          anchors.start.x,
+          anchors.start.y,
+          anchors.start.angle,
+          el.stroke.headEnd,
+          el.stroke,
+          scale,
+          effectivePaint,
+        );
       }
+      return;
     }
-  } else if (
-    el.stroke &&
-    el.custGeom &&
-    el.custGeom.length > 0 &&
-    ((el.stroke.headEnd && el.stroke.headEnd.type !== 'none') ||
-      (el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none'))
-  ) {
-    // Freeform / curve (custGeom) lines also carry `<a:ln><a:headEnd|tailEnd>`.
-    // The connector/callout branches above only cover preset geometries, so a
-    // custGeom path's arrow heads were dropped. Extract the open path's two
-    // terminal points + outward tangents and decorate them like a connector.
-    // Endpoints on a *closed* sub-path are returned as null (PowerPoint draws no
-    // line-end decoration on a closed contour).
+
+    if (
+      !el.stroke ||
+      !el.custGeom ||
+      el.custGeom.length === 0 ||
+      ((!el.stroke.headEnd || el.stroke.headEnd.type === 'none') &&
+        (!el.stroke.tailEnd || el.stroke.tailEnd.type === 'none'))
+    ) return;
+
     const { start, end } = getCustGeomEndpoints(el.custGeom);
-    // The endpoint tangent is expressed in normalised (0..1) space; convert to
-    // device space accounting for anisotropic scaling (w ≠ h) before atan2 so
-    // the arrow head orientation is correct on non-square boxes.
     if (start && el.stroke.headEnd && el.stroke.headEnd.type !== 'none') {
-      const sx = x + start.x * w;
-      const sy = y + start.y * h;
-      const sAngle = Math.atan2(start.dy * h, start.dx * w);
-      drawArrowHead(ctx, sx, sy, sAngle, el.stroke.headEnd, el.stroke, scale);
+      drawArrowHead(
+        target,
+        x + start.x * w,
+        y + start.y * h,
+        Math.atan2(start.dy * h, start.dx * w),
+        el.stroke.headEnd,
+        el.stroke,
+        scale,
+        effectivePaint,
+      );
     }
     if (end && el.stroke.tailEnd && el.stroke.tailEnd.type !== 'none') {
-      const ex = x + end.x * w;
-      const ey = y + end.y * h;
-      const eAngle = Math.atan2(end.dy * h, end.dx * w);
-      drawArrowHead(ctx, ex, ey, eAngle, el.stroke.tailEnd, el.stroke, scale);
+      drawArrowHead(
+        target,
+        x + end.x * w,
+        y + end.y * h,
+        Math.atan2(end.dy * h, end.dx * w),
+        el.stroke.tailEnd,
+        el.stroke,
+        scale,
+        effectivePaint,
+      );
     }
-  }
+  };
+  const paintVisibleShapeBody = (target: CanvasRenderingContext2D): void => {
+    if (flatBevels.length > 0) {
+      const ok = paintBeveledFlat(
+        target,
+        x,
+        y,
+        w,
+        h,
+        flatBevels,
+        (octx, ox, oy, ow, oh) =>
+          paintShapeBody(octx, undefined, { x: ox, y: oy, w: ow, h: oh }),
+        undefined,
+        flatBevelEdgePadCss,
+      );
+      if (ok) {
+        paintLineDecorations(target);
+        clearShadow(target);
+        return;
+      }
+    }
+    paintShapeBody(target);
+    paintLineDecorations(target);
+  };
+  paintWithRasterEffects(
+    ctx,
+    el,
+    paintVisibleShapeBody,
+    paintVisibleShapeBody,
+    effBBox,
+    authoredAlignmentAnchor(
+      liveTransform,
+      x,
+      y,
+      w,
+      h,
+      el.shadow?.algn,
+    ),
+    scale,
+    effScale,
+    liveTransform,
+    Boolean(fillStyle),
+    (target) => paintShapeBody(target, '#000'),
+  );
 
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
@@ -3121,6 +3694,12 @@ export function renderTextBody(
     const bulletInheritedColor = firstRunColorHex
       ? hexToRgba(firstRunColorHex)
       : paraDefaultColor;
+    const firstRunFontFamily = (() => {
+      for (const r of para.runs) {
+        if (r.type === 'text' && r.fontFamily) return r.fontFamily;
+      }
+      return para.defFontFamily ?? null;
+    })();
 
     let bulletLabel  = '';
     let bulletFont   = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
@@ -3156,7 +3735,19 @@ export function renderTextBody(
       bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
       bulletColor = b.color ? hexToRgba(b.color) : bulletInheritedColor;
     } else if (bullet.type === 'autoNum') {
-      bulletFont  = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
+      const b = bullet;
+      const bSizePx = b.sizePts != null
+        ? b.sizePts * PT_TO_EMU * scale * fontScale
+        : b.sizePct != null
+          ? bulletBaseSizePx * (b.sizePct / 100)
+          : bulletBaseSizePx;
+      bulletFont = buildFont(
+        false,
+        false,
+        bSizePx,
+        normalizeFontFamily(b.fontFamily ?? firstRunFontFamily, rc),
+        rc,
+      );
       // ECMA-376 §21.1.2.4.4 (buClr): an explicit `<a:buClr>` colours the
       // auto-number marker, mirroring the char-bullet branch above. Only when it
       // is absent does the marker fall back to the buClrTx default
@@ -3721,27 +4312,18 @@ export function renderTextBody(
         paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
       }
 
-      // Run-level text shadow (rPr > effectLst > outerShdw). Set on the
-      // context so the fillText below picks it up, then cleared after so
-      // the outline / underline / strikethrough don't get shadowed too.
-      // ECMA-376 §20.1.8.45 dir is degrees clockwise from east; the same
-      // formula used by the shape-level shadow renderer above.
       const segShadow = seg.shadow;
-      if (segShadow) {
-        const dirRad = (segShadow.dir * Math.PI) / 180;
-        const dist = emuToPx(segShadow.dist, scale);
-        ctx.save();
-        ctx.shadowColor = hexToRgba(segShadow.color, segShadow.alpha);
-        ctx.shadowBlur = emuToPx(segShadow.blur, scale);
-        ctx.shadowOffsetX = Math.cos(dirRad) * dist;
-        ctx.shadowOffsetY = Math.sin(dirRad) * dist;
-      }
 
       // Draw `text` at `atX` honouring this segment's letter-spacing / RTL
       // semantics. Lifted into a closure so the fill and stroke (outline) paths
       // share it, and so the split-CJK branch below can call it per piece.
-      const drawWithFont = (text: string, atX: number, op: 'fill' | 'stroke'): void => {
-        const paint = op === 'fill' ? ctx.fillText.bind(ctx) : ctx.strokeText.bind(ctx);
+      const drawWithFont = (
+        target: CanvasRenderingContext2D,
+        text: string,
+        atX: number,
+        op: 'fill' | 'stroke',
+      ): void => {
+        const paint = op === 'fill' ? target.fillText.bind(target) : target.strokeText.bind(target);
         if (ls > 0 && text.length > 1) {
           // rPr @spc (§21.1.2.3.x): distribute the per-glyph advance via canvas
           // letterSpacing and draw the whole CONTEXTUALLY-shaped string in ONE
@@ -3754,7 +4336,7 @@ export function renderTextBody(
           // punctuation.) Chromium's measureText adds letterSpacing after every
           // glyph incl. the trailing one (= natural + n·ls), matching
           // codePointCount(seg.text)·ls used by the layout's segW.
-          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
           const prev = lctx.letterSpacing;
           try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
           paint(text, atX, segBaseline);
@@ -3794,7 +4376,7 @@ export function renderTextBody(
       const cps = [...seg.text];
       const fullyDistributed =
         !!splitBefore && splitBefore.length === cps.length - 1 && cps.length > 1;
-      const drawRun = (op: 'fill' | 'stroke'): void => {
+      const drawRun = (target: CanvasRenderingContext2D, op: 'fill' | 'stroke'): void => {
         if (eaVertUpright) {
           // ECMA-376 §20.1.10.83 eaVert: paint each glyph with its UAX#50 vertical
           // orientation (CJK/kana upright, Latin sideways, brackets/comma
@@ -3808,27 +4390,100 @@ export function renderTextBody(
           // Partial `just` distribution (mixed Latin/CJK pieces) is a rare eaVert
           // edge and is not redistributed here.
           const eaPitch = fullyDistributed ? ls + segPerGap : ls;
-          drawEaVertRun(ctx, seg.text, penX, segBaseline, seg.sizePx, eaPitch, op);
+          drawEaVertRun(target, seg.text, penX, segBaseline, seg.sizePx, eaPitch, op);
           return;
         }
         if (fullyDistributed) {
-          const lctx = ctx as CanvasRenderingContext2D & { letterSpacing: string };
+          const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
           const prev = lctx.letterSpacing;
           try { lctx.letterSpacing = `${ls + segPerGap}px`; } catch { /* older engines */ }
-          (op === 'fill' ? ctx.fillText.bind(ctx) : ctx.strokeText.bind(ctx))(
+          (op === 'fill' ? target.fillText.bind(target) : target.strokeText.bind(target))(
             seg.text,
             penX,
             segBaseline,
           );
           try { lctx.letterSpacing = prev; } catch { /* ignore */ }
         } else if (pieces) {
-          for (const { text: pieceText, dx } of pieces) drawWithFont(pieceText, penX + dx, op);
+          for (const { text: pieceText, dx } of pieces) {
+            drawWithFont(target, pieceText, penX + dx, op);
+          }
         } else {
-          drawWithFont(seg.text, penX, op);
+          drawWithFont(target, seg.text, penX, op);
         }
       };
 
-      drawRun('fill');
+      // A run-level reflection is painted before the glyphs themselves, using
+      // the same device-space effect pipeline as shape reflections. Keeping the
+      // draw closure target-agnostic preserves letter spacing, justification,
+      // vertical glyph orientation, and outlines without rasterizing the whole
+      // text body as one effect image.
+      const segReflection = seg.reflection;
+      if (segReflection && seg.text) {
+        const deviceW = (ctx.canvas as { width: number }).width || 0;
+        const deviceH = (ctx.canvas as { height: number }).height || 0;
+        if (deviceW > 0 && deviceH > 0) {
+          ctx.font = seg.font;
+          const metrics = ctx.measureText(seg.text);
+          const ascent = Number.isFinite(metrics.actualBoundingBoxAscent)
+            ? metrics.actualBoundingBoxAscent
+            : seg.sizePx * 0.8;
+          // Zero is a valid descent for all-uppercase runs. Treating it as
+          // "missing" inserts a synthetic 0.2em blank band below the glyph;
+          // the reflection's strongest stA region then lands on transparency
+          // and the visible strokes are almost fully faded.
+          const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
+            ? metrics.actualBoundingBoxDescent
+            : seg.sizePx * 0.2;
+          const left = Number.isFinite(metrics.actualBoundingBoxLeft)
+            ? metrics.actualBoundingBoxLeft
+            : 0;
+          const right = Number.isFinite(metrics.actualBoundingBoxRight)
+            ? metrics.actualBoundingBoxRight
+            : metrics.width;
+          const liveTransform = ctx.getTransform();
+          const det = Math.abs(
+            liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c,
+          );
+          const devScale = det > 0 ? Math.sqrt(det) : 1;
+          const bbox = {
+            x: (penX - left) * devScale,
+            y: (segBaseline - ascent) * devScale,
+            w: Math.max(1, left + right) * devScale,
+            h: Math.max(1, ascent + descent) * devScale,
+          };
+          applyTextRunReflection(
+            ctx,
+            (target) => {
+              target.font = seg.font;
+              target.fillStyle = seg.color;
+              drawRun(target, 'fill');
+            },
+            bbox,
+            segReflection,
+            scale * devScale,
+            liveTransform,
+            deviceW,
+            deviceH,
+          );
+          ctx.font = seg.font;
+          ctx.fillStyle = seg.color;
+        }
+      }
+
+      // Run-level text shadow (rPr > effectLst > outerShdw). Apply it only to
+      // the primary glyph paint; the reflection above must not cast a second
+      // shadow of its already-mirrored pixels.
+      if (segShadow) {
+        const dirRad = (segShadow.dir * Math.PI) / 180;
+        const dist = emuToPx(segShadow.dist, scale);
+        ctx.save();
+        ctx.shadowColor = hexToRgba(segShadow.color, segShadow.alpha);
+        ctx.shadowBlur = emuToPx(segShadow.blur, scale);
+        ctx.shadowOffsetX = Math.cos(dirRad) * dist;
+        ctx.shadowOffsetY = Math.sin(dirRad) * dist;
+      }
+
+      drawRun(ctx, 'fill');
 
       if (segShadow) ctx.restore();
 
@@ -3844,7 +4499,7 @@ export function renderTextBody(
         ctx.lineWidth = Math.max(0.5, emuToPx(segOutline.width, scale));
         ctx.strokeStyle = segOutline.color ? `#${segOutline.color}` : seg.color;
         ctx.lineJoin = 'round';
-        drawRun('stroke');
+        drawRun(ctx, 'stroke');
         ctx.restore();
       }
 
@@ -4503,7 +5158,7 @@ async function renderPicture(
       // the silhouette edge.
       if (el.stroke) {
         target.save();
-        applyStroke(target, el.stroke, scale);
+        applyStroke(target, el.stroke, scale, { x: ox, y: oy, w: ow, h: oh }, el.rotation);
         tracePictureSilhouette(target, ox, oy, ow, oh);
         target.stroke();
         target.restore();
@@ -4706,66 +5361,81 @@ async function renderPicture(
 
     // ── effectLst (§19.3.1.37 routes p:pic's spPr through CT_ShapeProperties,
     // so §20.1.8.16 effects apply to images). Same sequence as the p:sp path.
-    const deviceW = (ctx.canvas as { width: number }).width || 0;
-    const deviceH = (ctx.canvas as { height: number }).height || 0;
     const liveTransform = ctx.getTransform();
     const det = Math.abs(
       liveTransform.a * liveTransform.d - liveTransform.b * liveTransform.c,
     );
     const devScale = det > 0 ? Math.sqrt(det) : 1;
-    const effBBox = { x: x * devScale, y: y * devScale, w: w * devScale, h: h * devScale };
+    const paintedPad = strokeHalfCss + contourCss;
+    const clipGeometryBounds = el.custGeom && el.custGeom.length > 0
+      ? getCustomGeometryBounds(el.custGeom, x, y, w, h)
+      : el.prstGeom && hasPreset(el.prstGeom.toLowerCase())
+        ? getPresetGeometryBounds(
+            el.prstGeom.toLowerCase(),
+            x,
+            y,
+            w,
+            h,
+            el.prstAdjust ?? [],
+          )
+        : null;
+    const flatGeometryBounds = clipGeometryBounds ?? { x, y, w, h };
+    const projectedGeometry = scene3d
+      ? projectedEffectGeometry(
+          scene3d.camera,
+          liveTransform,
+          x,
+          y,
+          w,
+          h,
+          edgePadCss,
+          el.shadow?.algn,
+        )
+      : {
+          bbox: transformedEffectBounds(
+            liveTransform,
+            flatGeometryBounds.x - paintedPad,
+            flatGeometryBounds.y - paintedPad,
+            flatGeometryBounds.w + paintedPad * 2,
+            flatGeometryBounds.h + paintedPad * 2,
+          ),
+          anchor: authoredAlignmentAnchor(
+            liveTransform,
+            x,
+            y,
+            w,
+            h,
+            el.shadow?.algn,
+          ),
+        };
     const effScale = scale * devScale; // EMU → device px
-    const applyLiveTransform = (c: CanvasRenderingContext2D) => c.setTransform(liveTransform);
-    const haveAux = deviceW > 0 && deviceH > 0;
-
-    // Reflection sits below the picture — paint it first. §20.1.8.50. The aux
-    // paint bakes in the live rotation/flip via setTransform, so the blit runs
-    // at identity.
-    if (el.reflection && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      applyReflection(
-        ctx,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintImage(c as CanvasRenderingContext2D); },
-        effBBox, el.reflection, effScale, deviceW, deviceH,
-      );
-      ctx.restore();
-    }
-
-    // outerShdw / glow use the single Canvas shadow slot, cast by the image's
-    // own opaque pixels. Outer shadow wins when both are present (as in p:sp).
-    if (el.shadow) applyShadow(ctx, el.shadow, scale);
-    else if (el.glow) applyGlow(ctx, el.glow, scale);
-
-    // softEdge feathers the whole picture, REPLACING the direct body paint
-    // (§20.1.8.53). The shadow/glow set above is carried into the aux paint via
-    // setTransform of the same live context, so it still casts.
-    if (el.softEdge && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      applySoftEdge(
-        ctx,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintImage(c as CanvasRenderingContext2D); },
-        effBBox, el.softEdge, effScale, deviceW, deviceH,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintMask(c as CanvasRenderingContext2D, '#000'); },
-      );
-      ctx.restore();
-    } else {
-      paintImage(ctx);
-    }
-    if (el.shadow || el.glow) clearShadow(ctx);
-
-    // innerShdw casts inward, on top of the picture (§20.1.8.40).
-    if (el.innerShadow && haveAux) {
-      ctx.save();
-      ctx.setTransform(new DOMMatrix());
-      applyInnerShadow(
-        ctx,
-        (c) => { applyLiveTransform(c as CanvasRenderingContext2D); paintMask(c as CanvasRenderingContext2D, '#000'); },
-        effBBox, el.innerShadow, effScale, deviceW, deviceH,
-      );
-      ctx.restore();
-    }
+    const hasRasterEffects = Boolean(
+      el.shadow || el.innerShadow || el.glow || el.softEdge || el.reflection,
+    );
+    const rawMask: EffectPaint = (target) => paintMask(target, '#000');
+    const effectBody = scene3d && hasRasterEffects
+      ? cacheDevicePaint(paintImage, liveTransform, projectedGeometry.bbox, {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        })
+      : paintImage;
+    const effectMask = scene3d && hasRasterEffects
+      ? cacheDevicePaint(rawMask, liveTransform, projectedGeometry.bbox, {
+          w: (ctx.canvas as { width: number }).width || 0,
+          h: (ctx.canvas as { height: number }).height || 0,
+        })
+      : rawMask;
+    paintWithRasterEffects(
+      ctx,
+      el,
+      effectBody,
+      effectMask,
+      projectedGeometry.bbox,
+      projectedGeometry.anchor,
+      scale,
+      effScale,
+      liveTransform,
+    );
 
     ctx.restore();
     // bitmap is owned by getCachedBitmapByPath's cache — do not close it here.
@@ -4843,6 +5513,7 @@ function drawCompoundLine(
   stroke: Stroke,
   cmpd: string,
   scale: number,
+  shapeRotationDeg: number,
 ): void {
   const totalW = Math.max(0.5, emuToPx(stroke.width, scale));
   const dx = end.x - start.x;
@@ -4898,7 +5569,18 @@ function drawCompoundLine(
 
   // 2. Paint each sub-line.
   ctx.globalCompositeOperation = 'source-over';
-  ctx.strokeStyle = hexToRgba(stroke.color);
+  const strokePaint = stroke.fill
+    ? resolveShapeFill(
+        stroke.fill,
+        ctx,
+        Math.min(start.x, end.x),
+        Math.min(start.y, end.y),
+        Math.max(1, Math.abs(end.x - start.x)),
+        Math.max(1, Math.abs(end.y - start.y)),
+        shapeRotationDeg,
+      )
+    : null;
+  ctx.strokeStyle = strokePaint ?? hexToRgba(stroke.color);
   for (const sub of subs) {
     const ox = px * (totalW * sub.offset);
     const oy = py * (totalW * sub.offset);
@@ -4911,9 +5593,27 @@ function drawCompoundLine(
   ctx.restore();
 }
 
-function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale: number) {
+export function applyStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: Stroke | null,
+  scale: number,
+  bounds?: { x: number; y: number; w: number; h: number },
+  shapeRotationDeg = 0,
+) {
   // `scale` is EMU → px factor (canvasWidthPx / slideWidthEMU).
   applyStrokeCore(ctx, stroke, scale);
+  if (stroke?.fill && bounds) {
+    const paint = resolveShapeFill(
+      stroke.fill,
+      ctx,
+      bounds.x,
+      bounds.y,
+      bounds.w,
+      bounds.h,
+      shapeRotationDeg,
+    );
+    if (paint) ctx.strokeStyle = paint;
+  }
 }
 
 // ─── Chart rendering ────────────────────────────────────────────────────────
@@ -5088,9 +5788,17 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
 
   // Pass 1: fills + text bodies.
   for (const { cell, colX, rowY, cellW, cellH } of jobs) {
-    const fillColor = resolveFill(cell.fill);
-    if (fillColor) {
-      ctx.fillStyle = fillColor;
+    const fillPaint = resolveShapeFill(
+      cell.fill,
+      ctx,
+      colX,
+      rowY,
+      cellW,
+      cellH,
+      el.rotation,
+    );
+    if (fillPaint) {
+      ctx.fillStyle = fillPaint;
       ctx.fillRect(colX, rowY, cellW, cellH);
     }
     // Text body — default run colour comes from the table style's tcTxStyle
@@ -5143,7 +5851,12 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
     stroke: Stroke,
     x1: number, y1: number, x2: number, y2: number,
   ) => {
-    applyStroke(ctx, stroke, scale);
+    applyStroke(ctx, stroke, scale, {
+      x: Math.min(x1, x2),
+      y: Math.min(y1, y2),
+      w: Math.max(1, Math.abs(x2 - x1)),
+      h: Math.max(1, Math.abs(y2 - y1)),
+    }, el.rotation);
     // Vertical edge (x1===x2) nudges X; horizontal edge (y1===y2) nudges Y.
     const dx = x1 === x2 ? crispOffset(x1, ctx.lineWidth, dpr) : 0;
     const dy = y1 === y2 ? crispOffset(y1, ctx.lineWidth, dpr) : 0;
@@ -5246,14 +5959,18 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
     // are never shared between cells, so they are always drawn per-cell (and are
     // not pixel-aligned).
     if (cell.diagonalTL) {
-      applyStroke(ctx, cell.diagonalTL, scale);
+      applyStroke(ctx, cell.diagonalTL, scale, {
+        x: colX, y: rowY, w: cellW, h: cellH,
+      }, el.rotation);
       ctx.beginPath();
       ctx.moveTo(colX, rowY);
       ctx.lineTo(colX + cellW, rowY + cellH);
       ctx.stroke();
     }
     if (cell.diagonalTR) {
-      applyStroke(ctx, cell.diagonalTR, scale);
+      applyStroke(ctx, cell.diagonalTR, scale, {
+        x: colX, y: rowY, w: cellW, h: cellH,
+      }, el.rotation);
       ctx.beginPath();
       ctx.moveTo(colX + cellW, rowY);
       ctx.lineTo(colX, rowY + cellH);

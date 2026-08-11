@@ -5,6 +5,33 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.77.1 — 2026-08-11
+
+Patch. Improves shared DrawingML fidelity and PowerPoint rendering without
+changing the 0.77 public API.
+
+- **shared DrawingML geometry and styles:** evaluate custom-geometry guides and
+  quadratic Bézier paths consistently in DOCX, XLSX, and PPTX; preserve theme
+  fill and line recipes, chart color-map overrides, and complete linear/path
+  gradient geometry instead of flattening them during parsing. Theme fragment,
+  relationship, raster-tile, and projected-effect work remains bounded for
+  untrusted documents. (#1209, #1210, #1212, #1213)
+- **PowerPoint themes, charts, and tables:** resolve theme backgrounds, image
+  fills, tint/shade transforms, hidden layout graphics, chart series and axis
+  defaults, table banding, text roles, bullets, borders, gradients, and vertical
+  cell content more like PowerPoint. (#1188–#1202, #1204, #1206, #1212, #1213)
+- **PowerPoint effects and 3-D:** compose shadows, reflections, soft edges,
+  callout leaders, arrowheads, picture effects, bevels, extrusion colors, and
+  projected 3-D silhouettes from the complete painted object. Effect surfaces
+  use conservative bounds and allocation limits, and floor reflections keep a
+  sharp contact edge while blur increases with distance. (#1203, #1205,
+  #1207–#1211, #1214–#1217)
+- **layout correctness and verification:** ignore terminal paragraph whitespace
+  that would create a spurious continuation line, preserve inherited bullet and
+  auto-number formatting, and verify the cross-format renderer changes against
+  the complete private regression corpus using v0.77.0 as the baseline.
+  (#1193, #1198, #1204, #1213)
+
 ## 0.77.0 — 2026-08-10
 
 Breaking minor release. Unifies read-only selection and integration context

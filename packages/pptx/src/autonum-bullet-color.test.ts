@@ -16,7 +16,7 @@ import type { TextRunData } from '@silurus/ooxml-core';
 const FONT_PX = 20;
 const SCALE = 1 / 12700; // emuToPx(emu) = emu·SCALE; 12700 EMU = 1 pt → 1 px
 
-interface Fill { text: string; fillStyle: string }
+interface Fill { text: string; fillStyle: string; font: string }
 
 function mockCtx(): { ctx: CanvasRenderingContext2D; fills: Fill[] } {
   let font = `${FONT_PX}px serif`;
@@ -38,7 +38,7 @@ function mockCtx(): { ctx: CanvasRenderingContext2D; fills: Fill[] } {
         fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
       } as TextMetrics;
     },
-    fillText: (t: string) => fills.push({ text: t, fillStyle }),
+    fillText: (t: string) => fills.push({ text: t, fillStyle, font }),
     strokeText: () => {}, fillRect: () => {}, drawImage: () => {}, save: () => {}, restore: () => {},
     translate: () => {}, rotate: () => {}, scale: () => {}, beginPath: () => {},
     moveTo: () => {}, lineTo: () => {}, stroke: () => {}, clip: () => {}, rect: () => {},
@@ -92,8 +92,13 @@ function markerFill(fills: Fill[]): Fill | undefined {
   return fills.find((f) => /\d/.test(f.text));
 }
 
-const autoNum = (color: string | null): Bullet =>
-  ({ type: 'autoNum', numType: 'arabicPeriod', startAt: null, color } as unknown as Bullet);
+type AutoNumBullet = Extract<Bullet, { type: 'autoNum' }>;
+
+const autoNum = (color: string | null): AutoNumBullet =>
+  ({
+    type: 'autoNum', numType: 'arabicPeriod', startAt: null, color,
+    sizePct: null, fontFamily: null,
+  });
 
 describe('§21.1.2.4.4 auto-number marker honours an explicit buClr', () => {
   it('uses the explicit buClr colour, not the inherited first-run colour', () => {
@@ -108,5 +113,17 @@ describe('§21.1.2.4.4 auto-number marker honours an explicit buClr', () => {
     const marker = markerFill(render(body(autoNum(null), '0000FF')));
     expect(marker, 'auto-number marker drawn').toBeTruthy();
     expect(marker!.fillStyle).toBe('rgba(0,0,255,1)');
+  });
+
+  it('uses the authored bullet typeface and percentage size', () => {
+    const marker = markerFill(render(body({
+      ...autoNum(null),
+      sizePct: 50,
+      fontFamily: 'Calibri',
+    }, '0000FF')));
+
+    expect(marker, 'auto-number marker drawn').toBeTruthy();
+    expect(marker!.font).toContain('10px');
+    expect(marker!.font).toContain('Calibri');
   });
 });

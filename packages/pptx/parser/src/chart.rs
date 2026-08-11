@@ -8,7 +8,9 @@
 
 use crate::parse_color_node;
 use crate::parse_preflighted_pptx_xml;
+use crate::theme::PptxRawSchemeResolver;
 use crate::types::*;
+use ooxml_common::color::ThemeResolver;
 use std::collections::HashMap;
 
 /// `ooxml_common::chart::ColorResolver` implementation backed by pptx's
@@ -24,6 +26,10 @@ impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
         parse_color_node(node, self.theme)
     }
 
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        PptxRawSchemeResolver { theme: self.theme }.resolve_scheme_color(name)
+    }
+
     fn theme_major_font_latin(&self) -> Option<String> {
         // pptx stores the theme major/minor Latin faces under the `+mj-lt` /
         // `+mn-lt` keys of its color+font map (see lib.rs parse_theme_colors).
@@ -32,6 +38,10 @@ impl ooxml_common::chart::ColorResolver for PptxColorResolver<'_> {
 
     fn theme_minor_font_latin(&self) -> Option<String> {
         self.theme.get("+mn-lt").cloned()
+    }
+
+    fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+        self.theme.get(&format!("accent{}", idx % 6 + 1)).cloned()
     }
 }
 
@@ -96,4 +106,89 @@ pub(crate) fn parse_chartex(
         flip_v: false,
         chart,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    #[test]
+    fn legacy_chart_uses_theme_accents_and_chart_wide_text_defaults() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                <c:plotArea>
+                  <c:barChart>
+                    <c:barDir val="col"/>
+                    <c:grouping val="clustered"/>
+                    <c:ser>
+                      <c:idx val="0"/><c:order val="0"/>
+                      <c:tx><c:v>2025</c:v></c:tx>
+                      <c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>T1</c:v></c:pt></c:strLit></c:cat>
+                      <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>12.5</c:v></c:pt></c:numLit></c:val>
+                    </c:ser>
+                    <c:ser>
+                      <c:idx val="1"/><c:order val="1"/>
+                      <c:tx><c:v>2026</c:v></c:tx>
+                      <c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>T1</c:v></c:pt></c:strLit></c:cat>
+                      <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>15</c:v></c:pt></c:numLit></c:val>
+                    </c:ser>
+                    <c:axId val="1"/><c:axId val="2"/>
+                  </c:barChart>
+                  <c:catAx>
+                    <c:axId val="1"/><c:axPos val="b"/><c:crossAx val="2"/>
+                    <c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr sz="900"/></a:pPr></a:p></c:txPr>
+                  </c:catAx>
+                  <c:valAx><c:axId val="2"/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx>
+                </c:plotArea>
+              </c:chart>
+              <c:txPr>
+                <a:bodyPr/><a:lstStyle/>
+                <a:p><a:pPr><a:defRPr sz="1800"/></a:pPr></a:p>
+              </c:txPr>
+            </c:chartSpace>"#
+        );
+        let theme = HashMap::from([
+            ("accent1".to_string(), "4F81BD".to_string()),
+            ("accent2".to_string(), "C0504D".to_string()),
+        ]);
+
+        let element = parse_legacy_chart(&xml, &theme).expect("chart should parse");
+
+        assert_eq!(element.chart.series[0].color.as_deref(), Some("4F81BD"));
+        assert_eq!(element.chart.series[1].color.as_deref(), Some("C0504D"));
+        assert_eq!(element.chart.cat_axis_font_size_hpt, Some(900));
+        assert_eq!(element.chart.val_axis_font_size_hpt, Some(1800));
+    }
+
+    #[test]
+    fn legacy_chart_honors_chart_local_color_map_override() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:clrMapOvr bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"
+                accent1="accent2" accent2="accent2" accent3="accent3"
+                accent4="accent4" accent5="accent5" accent6="accent6"
+                hlink="hlink" folHlink="folHlink"/>
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:barChart></c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let theme = HashMap::from([
+            ("accent1".to_string(), "4472C4".to_string()),
+            ("accent2".to_string(), "ED7D31".to_string()),
+        ]);
+
+        let element = parse_legacy_chart(&xml, &theme).expect("chart should parse");
+
+        assert_eq!(element.chart.series[0].color.as_deref(), Some("ED7D31"));
+    }
 }

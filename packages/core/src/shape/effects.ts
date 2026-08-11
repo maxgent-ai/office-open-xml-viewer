@@ -8,9 +8,10 @@ import { createAuxCanvas, type AuxCanvas, type AuxContext } from '../canvas/aux-
 export { createAuxCanvas };
 
 /**
- * Canvas 2D rendering of the three DrawingML edge/blur effects that the
+ * Canvas 2D rendering of the four DrawingML edge/blur effects that the
  * Canvas shadow primitive (a single offset+blur slot) cannot express:
  *
+ *   - outerShdw — ECMA-376 §20.1.8.45 (CT_OuterShadowEffect)
  *   - innerShdw  — ECMA-376 §20.1.8.40 (CT_InnerShadowEffect)
  *   - softEdge   — ECMA-376 §20.1.8.53 (CT_SoftEdgesEffect)
  *   - reflection — ECMA-376 §20.1.8.50 (CT_ReflectionEffect)
@@ -34,6 +35,20 @@ export interface EffectBBox {
   y: number;
   w: number;
   h: number;
+}
+
+function shadowAlignmentPoint(bbox: EffectBBox, algn: Shadow['algn']): [number, number] {
+  const x = algn === 'tl' || algn === 'l' || algn === 'bl'
+    ? bbox.x
+    : algn === 'tr' || algn === 'r' || algn === 'br'
+      ? bbox.x + bbox.w
+      : bbox.x + bbox.w / 2;
+  const y = algn === 'tl' || algn === 't' || algn === 'tr'
+    ? bbox.y
+    : algn === 'l' || algn === 'ctr' || algn === 'r'
+      ? bbox.y + bbox.h / 2
+      : bbox.y + bbox.h;
+  return [x, y];
 }
 
 /**
@@ -153,6 +168,88 @@ function offsetPaintCtx(real: AuxContext, crop: EffectCrop): AuxContext {
       return true;
     },
   }) as unknown as AuxContext;
+}
+
+/**
+ * outerShdw — ECMA-376 §20.1.8.45. Build the shadow from the alpha of the
+ * COMPOSED shape (fill + stroke) rather than putting Canvas's shadow state on
+ * each individual fill/stroke call. The latter is observably wrong for a
+ * stroked shape: clearing after the fill lets the outline cover the shadow's
+ * dense edge, while leaving it enabled makes every path cast another shadow.
+ *
+ * The cropped aux keeps the cost proportional to the affected shape. Its
+ * pixels are recoloured through `source-in`, then the one resulting silhouette
+ * is blurred and offset as a single draw operation behind the live shape.
+ * Returns false when the host cannot allocate an auxiliary surface so callers
+ * may retain a native Canvas-shadow fallback.
+ */
+export function applyOuterShadow(
+  liveCtx: AuxContext,
+  paintShape: PaintShape,
+  bbox: EffectBBox,
+  shadow: Shadow,
+  scale: number,
+  deviceW: number,
+  deviceH: number,
+  shapeRotationDegrees = 0,
+  alignmentAnchor?: readonly [number, number],
+): boolean {
+  const blur = Math.max(0, emuToPx(shadow.blur, scale));
+  const dist = emuToPx(shadow.dist, scale);
+  // rotWithShape defaults true (§20.1.8.45). A false value keeps the effect in
+  // page space while the source silhouette itself remains the rotated object.
+  const followRotation = shadow.rotWithShape !== false;
+  const effectRotation = followRotation ? shapeRotationDegrees : 0;
+  const dirRad = ((shadow.dir + effectRotation) * Math.PI) / 180;
+  const dx = Math.cos(dirRad) * dist;
+  const dy = Math.sin(dirRad) * dist;
+  // CSS blur has an unbounded Gaussian tail. Three radii cover the visible
+  // contribution while the extra offset/safety band prevents crop-edge cuts.
+  const margin = Math.ceil(blur * 3 + Math.max(Math.abs(dx), Math.abs(dy))) + 2;
+  const crop = computeCrop(bbox, margin, deviceW, deviceH);
+  const aux = createAuxCanvas(crop.w, crop.h);
+  if (!aux) return false;
+  const c = get2d(aux);
+  if (!c) return false;
+
+  paintShape(offsetPaintCtx(c, crop));
+  c.save();
+  // The paint callback installs the live absolute-device transform (shifted by
+  // the crop origin). Recolouring is a crop-local full-surface operation, so it
+  // must not inherit that transform. Otherwise the source-in rectangle moves
+  // away from silhouettes positioned farther across/down the slide, producing
+  // position-dependent partial or entirely missing shadows.
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.globalCompositeOperation = 'source-in';
+  c.fillStyle = hexToRgba(shadow.color, shadow.alpha);
+  c.fillRect(0, 0, crop.w, crop.h);
+  c.restore();
+
+  liveCtx.save();
+  if (blur > 0) liveCtx.filter = `blur(${blur}px)`;
+  // ECMA-376 defines the order as alignment origin, scale/skew, then offset.
+  // The source aux is already in absolute device coordinates; compose the
+  // page-space offset separately so it is not itself scaled or skewed.
+  // Placement owns the authored shape frame.  In particular, the corner of a
+  // rotated or perspective-projected shape is not the corresponding corner of
+  // its post-transform AABB.  Callers that know that frame pass the exact
+  // device-space anchor; bbox-based placement remains the compatibility
+  // fallback for headless/custom callers that only have a silhouette box.
+  const [anchorX, anchorY] = alignmentAnchor ??
+    shadowAlignmentPoint(bbox, shadow.algn ?? 'b');
+  const sx = shadow.sx ?? 1;
+  const sy = shadow.sy ?? 1;
+  const kx = Math.tan(((shadow.kx ?? 0) * Math.PI) / 180);
+  const ky = Math.tan(((shadow.ky ?? 0) * Math.PI) / 180);
+  liveCtx.translate(dx, dy);
+  liveCtx.translate(anchorX, anchorY);
+  if (effectRotation !== 0) liveCtx.rotate((effectRotation * Math.PI) / 180);
+  liveCtx.transform(sx, ky, kx, sy, 0, 0);
+  if (effectRotation !== 0) liveCtx.rotate((-effectRotation * Math.PI) / 180);
+  liveCtx.translate(-anchorX, -anchorY);
+  liveCtx.drawImage(aux as CanvasImageSource, crop.x, crop.y);
+  liveCtx.restore();
+  return true;
 }
 
 /**

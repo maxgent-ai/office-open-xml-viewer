@@ -105,19 +105,26 @@ describe('DOCX_GOOGLE_FONTS — shared registry consolidation (oracle)', () => {
     }
   });
 
-  it('adds only the safe, documented Office-face keys (Calibri Light, Cambria Math)', () => {
+  it('adds only the safe, documented Office-face keys', () => {
     // Consolidating everything into the shared GOOGLE_FONT_SUBSTITUTES pulls the
-    // two pptx-origin Office face names into docx too. Both are real Office
-    // faces (Calibri Light = theme heading default; Cambria Math = OMML font)
-    // that reduce to the SAME metric substitute as their base family already in
-    // the map — so a docx that happens to request either now resolves to
-    // Carlito/Caladea instead of a wider system fallback. Purely additive.
+    // Office face names into docx too. Calibri Light and Cambria Math reduce to
+    // the same metric substitute as their base family; the two Franklin Gothic
+    // faces share Libre Franklin. A docx that happens to request any of them
+    // now avoids a wider system fallback.
     const oldScriptKeys = new Set(Object.keys(DOCX_GOOGLE_FONTS_OLD));
     const added = Object.keys(DOCX_GOOGLE_FONTS).filter(
       (k) => !oldScriptKeys.has(k) && !k.startsWith('noto '),
     );
-    expect(new Set(added)).toEqual(new Set(['calibri light', 'cambria math']));
+    expect(new Set(added)).toEqual(new Set([
+      'calibri light',
+      'cambria math',
+      'franklin gothic book',
+      'franklin gothic medium',
+    ]));
     expect(DOCX_GOOGLE_FONTS['calibri light']).toEqual(DOCX_GOOGLE_FONTS['calibri']);
     expect(DOCX_GOOGLE_FONTS['cambria math']).toEqual(DOCX_GOOGLE_FONTS['cambria']);
+    expect(DOCX_GOOGLE_FONTS['franklin gothic medium']).toMatchObject({
+      loadFamily: 'Libre Franklin',
+    });
   });
 });

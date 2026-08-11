@@ -14,10 +14,10 @@
 //! Scope is deliberately narrow: only the *parse* moves here. The consuming
 //! parser keeps its own `Fill` model (its serde tags, its `Image` / blipFill /
 //! grpFill variants, its solidFill handling) and assembles these owned
-//! descriptors into it. Currently only the pptx parser implements gradFill /
-//! pattFill *rendering*; docx / xlsx have no consumer yet, so they do not call
-//! these — a future expansion point when their renderers gain gradient /
-//! pattern support.
+//! descriptors into it. Keeping the complete gradient geometry here is
+//! important: `scaled`, path shading, focus/tile rectangles and rotation are
+//! DrawingML concepts shared by DOCX, XLSX drawings and PPTX, not host-specific
+//! rendering hints.
 
 use crate::color::{parse_color_node, ThemeResolver, TintMode};
 use roxmltree::Node;
@@ -83,6 +83,21 @@ pub struct GradientFill {
     /// `"linear"` (a `<a:lin>` child or neither child) or `"radial"`
     /// (a `<a:path>` child).
     pub grad_type: String,
+    /// `<a:lin scaled>`; absent is preserved because the schema does not
+    /// declare a default.
+    pub scaled: Option<bool>,
+    /// `<a:path path>` (`shape`, `circle`, or `rect`). Absent for linear or
+    /// directionless gradients.
+    pub path: Option<String>,
+    /// `<a:path><a:fillToRect>` focus rectangle, relative to the tile.
+    pub fill_to_rect: Option<FillRect>,
+    /// `<a:tileRect>` gradient tile, relative to the shape bounds.
+    pub tile_rect: Option<FillRect>,
+    /// `<a:gradFill flip>` (`none`, `x`, `y`, or `xy`).
+    pub flip: Option<String>,
+    /// `<a:gradFill rotWithShape>`; absent is preserved because the schema
+    /// does not declare a default.
+    pub rot_with_shape: Option<bool>,
 }
 
 /// A parsed `<a:pattFill>`: its preset pattern name and fg/bg colors.
@@ -111,6 +126,33 @@ fn attr(node: Node<'_, '_>, local: &str) -> Option<String> {
 fn child<'a, 'i>(node: Node<'a, 'i>, local: &str) -> Option<Node<'a, 'i>> {
     node.children()
         .find(|n| n.is_element() && n.tag_name().name() == local)
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse a DrawingML `CT_RelativeRect` node without collapsing an explicitly
+/// authored all-zero rectangle into absence. That distinction matters for
+/// gradient focus/tile rectangles even though it is redundant for stretched
+/// image fills.
+pub fn parse_relative_rect(node: Node<'_, '_>) -> FillRect {
+    let read = |name: &str| {
+        attr(node, name)
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    FillRect {
+        l: read("l"),
+        t: read("t"),
+        r: read("r"),
+        b: read("b"),
+    }
 }
 
 /// Parse `<a:stretch><a:fillRect>` into signed fractional destination insets.
@@ -197,14 +239,16 @@ pub fn parse_grad_fill<R: ThemeResolver + ?Sized>(
             .partial_cmp(&b.position)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let (grad_type, angle) = if let Some(lin) = child(grad_fill, "lin") {
+    let linear = child(grad_fill, "lin");
+    let path_node = child(grad_fill, "path");
+    let (grad_type, angle) = if let Some(lin) = linear {
         // OOXML ang: 60000ths of degree, 0 = left→right, 5400000 = top→bottom
         let ang = attr(lin, "ang")
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.0)
             / 60_000.0;
         ("linear".to_owned(), ang)
-    } else if child(grad_fill, "path").is_some() {
+    } else if path_node.is_some() {
         ("radial".to_owned(), 0.0)
     } else {
         ("linear".to_owned(), 0.0)
@@ -213,6 +257,19 @@ pub fn parse_grad_fill<R: ThemeResolver + ?Sized>(
         stops,
         angle,
         grad_type,
+        scaled: linear
+            .and_then(|node| attr(node, "scaled"))
+            .as_deref()
+            .and_then(parse_bool),
+        path: path_node.and_then(|node| attr(node, "path")),
+        fill_to_rect: path_node
+            .and_then(|node| child(node, "fillToRect"))
+            .map(parse_relative_rect),
+        tile_rect: child(grad_fill, "tileRect").map(parse_relative_rect),
+        flip: attr(grad_fill, "flip"),
+        rot_with_shape: attr(grad_fill, "rotWithShape")
+            .as_deref()
+            .and_then(parse_bool),
     })
 }
 
@@ -298,7 +355,7 @@ mod tests {
                    <a:gs pos="100000"><a:srgbClr val="ffffff"/></a:gs>
                    <a:gs pos="0"><a:schemeClr val="accent1"/></a:gs>
                  </a:gsLst>
-                 <a:lin ang="5400000"/>
+                 <a:lin ang="5400000" scaled="1"/>
                </a:gradFill>"#
         );
         let d = doc(&xml);
@@ -306,7 +363,9 @@ mod tests {
             parse_grad_fill(d.root_element(), &MapResolver, TintMode::PowerPointLinear).unwrap();
         assert_eq!(g.grad_type, "linear");
         assert_eq!(g.angle, 90.0); // 5400000 / 60000
-                                   // Sorted ascending by position; colors uppercase, no '#'.
+        assert_eq!(g.scaled, Some(true));
+        assert_eq!(g.path, None);
+        // Sorted ascending by position; colors uppercase, no '#'.
         assert_eq!(g.stops[0].position, 0.0);
         assert_eq!(g.stops[0].color, "4472C4");
         assert_eq!(g.stops[1].position, 1.0);
@@ -317,9 +376,12 @@ mod tests {
     #[test]
     fn grad_fill_path_is_radial() {
         let xml = format!(
-            r#"<a:gradFill xmlns:a="{NS}">
+            r#"<a:gradFill xmlns:a="{NS}" flip="xy" rotWithShape="0">
                  <a:gsLst><a:gs pos="0"><a:srgbClr val="000000"/></a:gs></a:gsLst>
-                 <a:path path="circle"/>
+                 <a:path path="rect">
+                   <a:fillToRect l="25000" t="10000" r="-5000" b="0"/>
+                 </a:path>
+                 <a:tileRect l="50000"/>
                </a:gradFill>"#
         );
         let d = doc(&xml);
@@ -327,6 +389,13 @@ mod tests {
             parse_grad_fill(d.root_element(), &MapResolver, TintMode::PowerPointLinear).unwrap();
         assert_eq!(g.grad_type, "radial");
         assert_eq!(g.angle, 0.0);
+        assert_eq!(g.path.as_deref(), Some("rect"));
+        assert_eq!(g.fill_to_rect.as_ref().map(|rect| rect.l), Some(0.25));
+        assert_eq!(g.fill_to_rect.as_ref().map(|rect| rect.t), Some(0.1));
+        assert_eq!(g.fill_to_rect.as_ref().map(|rect| rect.r), Some(-0.05));
+        assert_eq!(g.tile_rect.as_ref().map(|rect| rect.l), Some(0.5));
+        assert_eq!(g.flip.as_deref(), Some("xy"));
+        assert_eq!(g.rot_with_shape, Some(false));
     }
 
     /// gradFill with no resolvable stops → None (caller keeps scanning).

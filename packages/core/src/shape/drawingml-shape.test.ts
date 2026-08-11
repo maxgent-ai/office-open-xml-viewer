@@ -9,11 +9,22 @@ function recordingContext() {
   const operations: Array<{ name: string; args: unknown[] }> = [];
   let lineWidth = 1;
   let lineCap: CanvasLineCap = 'butt';
+  let fillStyle: string | CanvasGradient | CanvasPattern = '';
+  let strokeStyle: string | CanvasGradient | CanvasPattern = '';
   const gradient = {
     addColorStop(...args: unknown[]) { operations.push({ name: 'addColorStop', args }); },
   } as unknown as CanvasGradient;
   const ctx = {
-    fillStyle: '', strokeStyle: '',
+    get fillStyle() { return fillStyle; },
+    set fillStyle(value: string | CanvasGradient | CanvasPattern) {
+      fillStyle = value;
+      operations.push({ name: 'fillStyle', args: [value] });
+    },
+    get strokeStyle() { return strokeStyle; },
+    set strokeStyle(value: string | CanvasGradient | CanvasPattern) {
+      strokeStyle = value;
+      operations.push({ name: 'strokeStyle', args: [value] });
+    },
     get lineWidth() { return lineWidth; },
     set lineWidth(value: number) { lineWidth = value; operations.push({ name: 'lineWidth', args: [value] }); },
     get lineCap() { return lineCap; },
@@ -41,7 +52,7 @@ function recordingContext() {
       operations.push({ name: 'createRadialGradient', args }); return gradient;
     },
   } as unknown as CanvasRenderingContext2D;
-  return { ctx, operations };
+  return { ctx, operations, gradient };
 }
 
 describe('shared DrawingML shape painter', () => {
@@ -138,6 +149,35 @@ describe('shared DrawingML shape painter', () => {
       { name: 'lineCap', args: ['round'] },
       { name: 'stroke', args: [] },
     ]));
+  });
+
+  it('uses the same resolved gradient for a connector shaft and arrow head', () => {
+    const plan: DrawingMLShapePaintPlan = {
+      rect: { x: 10, y: 20, w: 100, h: 50 },
+      geometry: { kind: 'preset', name: 'line', adjustments: [] },
+      fill: null,
+      stroke: {
+        color: 'AABBCC',
+        width: 2,
+        tailEnd: { type: 'triangle', w: 'med', len: 'med' },
+        fill: {
+          fillType: 'gradient',
+          angle: 0,
+          gradType: 'linear',
+          stops: [
+            { position: 0, color: '112233' },
+            { position: 1, color: 'AABBCC' },
+          ],
+        },
+      },
+      transform: { rotationDeg: 0, flipH: false, flipV: false },
+    };
+    const { ctx, operations, gradient } = recordingContext();
+
+    paintDrawingMLShape(ctx, plan, 1);
+
+    expect(operations).toContainEqual({ name: 'strokeStyle', args: [gradient] });
+    expect(operations).toContainEqual({ name: 'fillStyle', args: [gradient] });
   });
 
   it('preserves arbitrary adjustment counts for preset geometry', () => {

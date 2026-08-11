@@ -427,6 +427,23 @@ export function expandProjectedQuad(
   return out as [Vec2, Vec2, Vec2, Vec2];
 }
 
+/**
+ * Map an authored point in the unit shape frame through the same homography as
+ * the projected face.  Effect placement uses this for DrawingML alignment
+ * anchors: deriving a corner or edge midpoint from the projected AABB is wrong
+ * for rotated and perspective-projected faces.
+ */
+export function projectQuadPoint(
+  corners: [Vec2, Vec2, Vec2, Vec2],
+  u: number,
+  v: number,
+): Vec2 | null {
+  const h = unitSquareToQuad(corners[0], corners[1], corners[2], corners[3]);
+  if (!h) return null;
+  const denominator = h[6] * u + h[7] * v + h[8];
+  return denominator > 1e-9 ? applyH(h, u, v) : null;
+}
+
 let fallbackWarned = false;
 /**
  * Warn (once per process) that scene3d warp fell back to the non-supersampled

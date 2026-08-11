@@ -83,18 +83,18 @@ jobs:
             exit 1
           fi
 
-          if [[ "$package_name" != "@maxgent/ooxml" ]]; then
-            echo "Unexpected package name: $package_name" >&2
+          if [[ "$package_name" != "@silurus/ooxml" ]]; then
+            echo "Unexpected source package name: $package_name" >&2
             exit 1
           fi
 
           echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
           echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
 
-      - name: Inject package version
+      - name: Inject Maxgent package metadata
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+        run: npm pkg set "name=@maxgent/ooxml" "version=$RELEASE_VERSION"
 
       - name: Build WASM
         run: pnpm build:wasm

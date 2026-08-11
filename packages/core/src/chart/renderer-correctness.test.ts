@@ -462,6 +462,25 @@ describe('CH7 â€” percentStacked normalizes signed values against per-category Î
     }
   });
 
+  it('column category-axis labels honor the font size inherited from chartSpace txPr', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['T1', 'T2'],
+      series: [series({ name: 'S1', values: [10, 20] })],
+      // The shared parser resolves chartSpace/txPr onto both axis fields when
+      // the individual axes have no txPr. 1800 = 18 pt.
+      catAxisFontSizeHpt: 1800,
+    }), RECT, 4 / 3);
+
+    const categoryLabels = rec.texts.filter(t => /^T[12]$/.test(t.text));
+    expect(categoryLabels).toHaveLength(2);
+    for (const label of categoryLabels) {
+      const fontPx = Number(/^(?:bold )?([\d.]+)px/.exec(label.font ?? '')?.[1]);
+      expect(fontPx).toBeCloseTo(18 * 4 / 3, 5);
+    }
+  });
+
   it('keeps explicit-size value-axis labels inside a correctly authored inner manual-layout frame', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({

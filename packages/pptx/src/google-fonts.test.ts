@@ -41,7 +41,7 @@ describe('PPTX_GOOGLE_FONTS — shared registry consolidation (oracle)', () => {
     }
   });
 
-  it('adds only the safe, documented key Ubuntu', () => {
+  it('adds the safe, documented Ubuntu and Franklin-family substitutes', () => {
     // pptx already carried the full web-font + Office-substitute set. The shared
     // registry additionally contributes "ubuntu" (a generic Google web font, no
     // format affinity): a slide that requests Ubuntu now measures glyphs with
@@ -50,9 +50,48 @@ describe('PPTX_GOOGLE_FONTS — shared registry consolidation (oracle)', () => {
     const added = Object.keys(PPTX_GOOGLE_FONTS).filter(
       (k) => !oldKeys.has(k) && !k.startsWith('noto '),
     );
-    expect(new Set(added)).toEqual(new Set(['ubuntu']));
+    expect(new Set(added)).toEqual(new Set([
+      'ubuntu',
+      'franklin gothic book',
+      'franklin gothic medium',
+    ]));
     expect(PPTX_GOOGLE_FONTS['ubuntu'].url).toMatch(/family=Ubuntu(?:[:&]|$)/);
     expect(PPTX_GOOGLE_FONTS['ubuntu'].loadFamily).toBeUndefined();
+    expect(PPTX_GOOGLE_FONTS['franklin gothic medium']).toMatchObject({
+      loadFamily: 'Libre Franklin',
+    });
+  });
+
+  it('includes slide-local paragraph and run families, not only the first theme fonts', () => {
+    const slide = {
+      index: 0,
+      slideNumber: 1,
+      background: null,
+      elements: [{
+        type: 'shape',
+        textBody: {
+          paragraphs: [{
+            defFontFamily: 'Franklin Gothic Medium',
+            runs: [{
+              type: 'text',
+              text: 'Title',
+              fontFamily: null,
+              fontFamilyEa: 'Yu Gothic',
+              fontFamilySym: null,
+            }],
+          }],
+        },
+      }],
+    } as unknown as Slide;
+    const accumulator = new PptxFontPreloadAccumulator('Aptos Display', 'Aptos');
+    accumulator.addSlide(slide);
+
+    expect(accumulator.names()).toEqual(expect.arrayContaining([
+      'Aptos Display',
+      'Aptos',
+      'Franklin Gothic Medium',
+      'Yu Gothic',
+    ]));
   });
 });
 

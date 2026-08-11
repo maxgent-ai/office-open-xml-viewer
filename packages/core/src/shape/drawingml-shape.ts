@@ -117,10 +117,19 @@ function applyDrawingMLStroke(
   stroke: Stroke,
   unitToDevice: number,
   rect: DrawingMLShapePaintPlan['rect'],
+  rotationDeg: number,
 ): void {
   applyStroke(ctx, stroke, unitToDevice);
   if (stroke.fill) {
-    const paint = resolveFill(stroke.fill as Fill, ctx, rect.x, rect.y, rect.w, rect.h);
+    const paint = resolveFill(
+      stroke.fill as Fill,
+      ctx,
+      rect.x,
+      rect.y,
+      rect.w,
+      rect.h,
+      rotationDeg,
+    );
     if (paint) ctx.strokeStyle = paint;
   }
 }
@@ -136,6 +145,17 @@ function paintConnectorEnds(
     return;
   }
   const { x, y, w, h } = plan.rect;
+  const effectivePaint = stroke.fill
+    ? resolveFill(
+        stroke.fill as Fill,
+        ctx,
+        x,
+        y,
+        w,
+        h,
+        plan.transform.rotationDeg,
+      ) ?? undefined
+    : undefined;
   const adjustments = plan.geometry.kind === 'preset' ? plan.geometry.adjustments : [];
   const anchors = getConnectorAnchors(geometry, x, y, w, h, [...adjustments]);
   if (!anchors) return;
@@ -157,7 +177,7 @@ function paintConnectorEnds(
         lineEndRetract(stroke.headEnd, stroke, unitToDevice),
       );
     }
-    applyDrawingMLStroke(ctx, stroke, unitToDevice, plan.rect);
+    applyDrawingMLStroke(ctx, stroke, unitToDevice, plan.rect, plan.transform.rotationDeg);
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     for (let index = 1; index < points.length; index++) {
@@ -169,12 +189,14 @@ function paintConnectorEnds(
     drawArrowHead(
       ctx, anchors.end.x, anchors.end.y, anchors.end.angle,
       stroke.tailEnd, stroke, unitToDevice,
+      effectivePaint,
     );
   }
   if (stroke.headEnd) {
     drawArrowHead(
       ctx, anchors.start.x, anchors.start.y, anchors.start.angle,
       stroke.headEnd, stroke, unitToDevice,
+      effectivePaint,
     );
   }
 }
@@ -189,6 +211,17 @@ function paintCustomEnds(
   if (!stroke || (!stroke.headEnd && !stroke.tailEnd)) return;
   const endpoints = getCustGeomEndpoints(plan.geometry.subpaths as PathCmd[][]);
   const { x, y, w, h } = plan.rect;
+  const effectivePaint = stroke.fill
+    ? resolveFill(
+        stroke.fill as Fill,
+        ctx,
+        x,
+        y,
+        w,
+        h,
+        plan.transform.rotationDeg,
+      ) ?? undefined
+    : undefined;
   if (endpoints.start && stroke.headEnd) {
     drawArrowHead(
       ctx,
@@ -198,6 +231,7 @@ function paintCustomEnds(
       stroke.headEnd,
       stroke,
       unitToDevice,
+      effectivePaint,
     );
   }
   if (endpoints.end && stroke.tailEnd) {
@@ -209,6 +243,7 @@ function paintCustomEnds(
       stroke.tailEnd,
       stroke,
       unitToDevice,
+      effectivePaint,
     );
   }
 }
@@ -222,11 +257,25 @@ export function paintDrawingMLShape(
   withDrawingMLShapeTransform(ctx, plan, () => {
     // Shared fill resolution is observational; retained plans keep gradient
     // stops readonly so layout snapshots cannot be mutated by a painter.
-    const fillStyle = resolveFill(plan.fill as Fill | null, ctx, x, y, w, h);
+    const fillStyle = resolveFill(
+      plan.fill as Fill | null,
+      ctx,
+      x,
+      y,
+      w,
+      h,
+      plan.transform.rotationDeg,
+    );
     const stroke = plan.stroke as Stroke | null;
     const applyAndStroke = stroke
       ? () => {
-          applyDrawingMLStroke(ctx, stroke, unitToDevice, plan.rect);
+          applyDrawingMLStroke(
+            ctx,
+            stroke,
+            unitToDevice,
+            plan.rect,
+            plan.transform.rotationDeg,
+          );
           ctx.stroke();
         }
       : null;

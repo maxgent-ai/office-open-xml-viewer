@@ -425,6 +425,8 @@ export interface Sp3d {
    *  approximation of the 3D contour edge (uniform-width outline, no bevel
    *  shading) when both `contourW` and `contourClr` are present. */
   contourClr?: string;
+  /** Extrusion side-wall colour (`<a:extrusionClr>`) as a resolved hex string. */
+  extrusionClr?: string;
   /** Preset surface material (`ST_PresetMaterialType`), default "warmMatte". */
   prstMaterial: string;
   /** Top bevel. */

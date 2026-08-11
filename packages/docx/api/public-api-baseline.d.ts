@@ -1139,6 +1139,12 @@ export type PathCmd = {
     x: number;
     y: number;
 } | {
+    cmd: 'quadBezTo';
+    x1: number;
+    y1: number;
+    x: number;
+    y: number;
+} | {
     cmd: 'arcTo';
     wr: number;
     hr: number;
@@ -1223,7 +1229,7 @@ export interface SectionProps {
     lineNumbering?: LineNumbering | null;
     vAlign?: string | null;
 }
-type ShapeFill = {
+export type ShapeFill = {
     fillType: 'solid';
     color: string;
 } | {
@@ -1231,6 +1237,17 @@ type ShapeFill = {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+    scaled?: boolean;
+    path?: string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: string;
+    rotWithShape?: boolean;
+} | {
+    fillType: 'pattern';
+    fg: string;
+    bg: string;
+    preset: string;
 } | {
     fillType: 'image';
     imagePath: string;
@@ -1275,8 +1292,17 @@ export interface ShapeRun {
     fill: ShapeFill | null;
     stroke: string | null;
     strokeWidth?: number;
+    strokeFill?: ShapeStrokeFill | null;
     strokeDash?: string | null;
+    strokeCustomDash?: Array<{
+        dash: number;
+        space: number;
+    }>;
     strokeCap?: 'butt' | 'round' | 'square' | null;
+    strokeJoin?: 'round' | 'bevel' | 'miter' | null;
+    strokeMiterLimit?: number | null;
+    strokeAlignment?: 'ctr' | 'in' | null;
+    strokeCompound?: string | null;
     headEnd?: LineEnd | null;
     tailEnd?: LineEnd | null;
     rotation?: number;
@@ -1300,6 +1326,23 @@ export interface ShapeRun {
     textPath?: TextPath | null;
     fillOpacity?: number | null;
 }
+export type ShapeStrokeFill = {
+    fillType: 'gradient';
+    stops: GradientStop[];
+    angle: number;
+    gradType: string;
+    scaled?: boolean;
+    path?: string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: string;
+    rotWithShape?: boolean;
+} | {
+    fillType: 'pattern';
+    fg: string;
+    bg: string;
+    preset: string;
+};
 export interface ShapeText {
     text: string;
     fontSizePt: number;

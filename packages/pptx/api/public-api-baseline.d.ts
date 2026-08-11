@@ -43,6 +43,9 @@ type Bullet__emitterCollision1 = {
     numType: string;
     startAt: number | null;
     color: string | null;
+    sizePct?: number | null;
+    sizePts?: number;
+    fontFamily?: string | null;
 };
 export interface Camera3d {
     prst: string;
@@ -337,6 +340,12 @@ export interface GradientFill {
     stops: GradientStop[];
     angle: number;
     gradType: string;
+    scaled?: boolean;
+    path?: 'shape' | 'circle' | 'rect' | string;
+    fillToRect?: FillRect;
+    tileRect?: FillRect;
+    flip?: 'none' | 'x' | 'y' | 'xy' | string;
+    rotWithShape?: boolean;
 }
 export interface GradientStop {
     position: number;
@@ -645,6 +654,12 @@ export type PathCmd = {
     y1: number;
     x2: number;
     y2: number;
+    x: number;
+    y: number;
+} | {
+    cmd: 'quadBezTo';
+    x1: number;
+    y1: number;
     x: number;
     y: number;
 } | {
@@ -999,6 +1014,12 @@ export interface Shadow {
     blur: number;
     dist: number;
     dir: number;
+    sx?: number;
+    sy?: number;
+    kx?: number;
+    ky?: number;
+    algn?: 'tl' | 't' | 'tr' | 'l' | 'ctr' | 'r' | 'bl' | 'b' | 'br';
+    rotWithShape?: boolean;
 }
 export interface ShapeElement {
     type: 'shape';
@@ -1069,6 +1090,7 @@ export interface Sp3d {
     extrusionH?: number;
     contourW?: number;
     contourClr?: string;
+    extrusionClr?: string;
     prstMaterial: string;
     bevelT?: Bevel3d;
     bevelB?: Bevel3d;
@@ -1089,7 +1111,14 @@ export interface Stroke {
         fillType: 'none';
     }>;
     dashStyle?: string;
+    customDash?: ReadonlyArray<{
+        dash: number;
+        space: number;
+    }>;
     lineCap?: 'butt' | 'round' | 'square';
+    lineJoin?: 'round' | 'bevel' | 'miter';
+    miterLimit?: number;
+    alignment?: 'ctr' | 'in';
     headEnd?: ArrowEnd;
     tailEnd?: ArrowEnd;
     cmpd?: string;
@@ -1190,6 +1219,7 @@ export interface TextRunData {
     hyperlink?: string;
     hyperlinkAction?: string;
     shadow?: Shadow;
+    reflection?: Reflection;
     outline?: TextOutline;
     highlight?: string;
 }

@@ -49,6 +49,8 @@ const NOTO_NASKH_ARABIC_URL =
   'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
 const NOTO_SANS_ARABIC_URL =
   'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
+const LIBRE_FRANKLIN_URL =
+  'https://fonts.googleapis.com/css2?family=Libre+Franklin:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&display=swap';
 
 export const GOOGLE_FONT_SUBSTITUTES: Record<string, FontPreloadEntry> = {
   // Metric-compatible Office substitutes (same advance widths / vertical
@@ -58,6 +60,12 @@ export const GOOGLE_FONT_SUBSTITUTES: Record<string, FontPreloadEntry> = {
   'calibri light':     { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
   'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
   'cambria math':      { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
+  // Libre Franklin is the open Franklin-family substitute. Office templates
+  // distinguish Book (regular) and Medium in the family name rather than with
+  // rPr@b; exposing both keys preserves that authored face choice on hosts that
+  // do not ship Franklin Gothic (notably macOS/Linux/browser workers).
+  'franklin gothic book':   { url: LIBRE_FRANKLIN_URL, loadFamily: 'Libre Franklin' },
+  'franklin gothic medium': { url: LIBRE_FRANKLIN_URL, loadFamily: 'Libre Franklin' },
   // Popular free Google web fonts frequently used as Office template body /
   // heading faces. Google serves each under the requested family name, so no
   // `loadFamily` redirect is needed.

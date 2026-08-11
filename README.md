@@ -79,7 +79,7 @@ pnpm add @silurus/ooxml
 > **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
 > Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
 > asset, so the reported figure is much larger than any single app build. For
-> v0.77.0, the complete npm package is approximately 11.3 MB unpacked (3.8 MB
+> v0.77.1, the complete npm package is approximately 11.3 MB unpacked (3.8 MB
 > as the downloaded tarball), while a format-specific application graph is
 > approximately:
 >

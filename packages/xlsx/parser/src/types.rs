@@ -670,9 +670,31 @@ pub struct ShapeInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ShapeFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_color: Option<String>,
     /// Stroke width in EMU (914400 = 1 inch). 0 = no stroke.
     pub stroke_width: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_fill: Option<ShapeStrokeFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_dash_style: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stroke_custom_dash: Vec<ShapeLineDashSegment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_line_cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_line_join: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_miter_limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_alignment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_cmpd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_head_end: Option<ShapeLineEnd>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_tail_end: Option<ShapeLineEnd>,
     pub geom: ShapeGeom,
     /// Text content from `<xdr:txBody>` (ECMA-376 §20.5.2.34). Present on
     /// shapes that carry visible text — typically text boxes (`txBox="1"`)
@@ -680,6 +702,78 @@ pub struct ShapeInfo {
     /// when the shape has no text body or only contains an empty paragraph.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<ShapeText>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ShapeStrokeFill {
+    Gradient {
+        stops: Vec<ooxml_common::fill::GradStop>,
+        angle: f64,
+        grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
+    },
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ShapeFill {
+    Solid {
+        color: String,
+    },
+    Gradient {
+        stops: Vec<ooxml_common::fill::GradStop>,
+        angle: f64,
+        grad_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fill_to_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<ooxml_common::fill::FillRect>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
+    },
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeLineDashSegment {
+    pub dash: f64,
+    pub space: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeLineEnd {
+    pub r#type: String,
+    pub w: String,
+    pub len: String,
 }
 
 /// Paragraph line spacing (`<a:pPr>/<a:lnSpc>`, ECMA-376 §21.1.2.2.5). Shared

@@ -172,6 +172,8 @@ export type {
   BorderSpec,
   // Shape geometry / fill sub-types.
   PathCmd,
+  ShapeFill,
+  ShapeStrokeFill,
   GradientStop,
   LineEnd,
 } from './types';

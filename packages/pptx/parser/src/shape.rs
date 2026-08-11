@@ -6,22 +6,27 @@
 
 use crate::chart::{parse_chartex, parse_legacy_chart};
 use crate::fill::{
-    parse_arrow_end, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_effect_lst,
-    parse_fill, parse_scene3d, parse_shadow, parse_sp3d, parse_stroke, parse_table_style_fill,
+    line_properties_to_stroke, parse_blip_alpha, parse_color_node, parse_cust_geom,
+    parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
+    parse_style_matrix_effects, parse_style_matrix_fill_from_source, parse_table_style_fill,
     parse_xfrm, EffectLst,
 };
 use crate::master::{InheritedShapeGeometry, LayoutPlaceholders};
 use crate::text::{
     empty_level_bullets, parse_text_body, LevelBullets, LevelFontSizes, LevelIndents, ShapeKind,
 };
-use crate::theme::PptxSchemeResolver;
+use crate::theme::{PptxRawSchemeResolver, PptxSchemeResolver, PptxThemeSource};
 use crate::types::*;
 use crate::{
     attr, attr_f64, attr_i64, attr_r, child, find_rel_target_by_type, read_zip_head, read_zip_str,
-    resolve_path, table_style_presets, PptxZip, TableStyleDef,
+    resolve_path, table_style_presets, PptxZip, ResolvedTableCellStyle, TableCellBorderStyle,
+    TableLineStyle, TablePartStyle, TableStyleDef, TableStyleFlags, TableTextStyle,
 };
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, svg_blip_rid};
 use ooxml_common::depth::DepthGuard;
+use ooxml_common::line::{
+    parse_line_properties, LineDash, LineEnd, LineJoin, LinePaint, LineProperties,
+};
 use ooxml_common::ns::{is_diagram_uri, is_pml_ole_uri};
 use ooxml_common::rels::relationship_part_path;
 use ooxml_common::units::EMU_PER_PX_96DPI;
@@ -198,15 +203,431 @@ pub(crate) fn node_is_hidden(node: roxmltree::Node<'_, '_>) -> bool {
         .unwrap_or(false)
 }
 
+/// Merge an optional local `<a:ln>` over the inherited line style.
+///
+/// CT_LineProperties is field-wise: PowerPoint commonly writes a local line
+/// containing only head/tail-end defaults while the paint and width remain in
+/// `p:style/a:lnRef`. Treating the mere presence of that partial node as a
+/// replacement drops the visible theme outline.
+fn merge_local_stroke(
+    ln_node: Option<roxmltree::Node<'_, '_>>,
+    inherited: Option<Stroke>,
+    theme: &HashMap<String, String>,
+) -> Option<Stroke> {
+    let Some(ln) = ln_node else {
+        return inherited;
+    };
+    let properties = parse_line_properties(
+        ln,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    if matches!(properties.paint, Some(LinePaint::NoFill)) {
+        return None;
+    }
+
+    let parsed = line_properties_to_stroke(&properties, None);
+    let ln_width = properties.width;
+    let has_dash = properties.dash.is_some();
+    let ln_dash = preset_dash(&properties);
+    let ln_custom_dash = custom_dash(&properties);
+    let has_cap = properties.cap.is_some();
+    let ln_cap = properties.cap.as_deref().and_then(canvas_line_cap);
+    let has_head = properties.head_end.is_some();
+    let ln_head = properties.head_end.as_ref().and_then(to_arrow_end);
+    let has_tail = properties.tail_end.is_some();
+    let ln_tail = properties.tail_end.as_ref().and_then(to_arrow_end);
+    let has_cmpd = properties.compound.is_some();
+    let ln_cmpd = properties.compound.clone().filter(|value| value != "sng");
+    let has_join = properties.join.is_some();
+    let (ln_join, ln_miter_limit) = line_join(&properties);
+    let has_alignment = properties.alignment.is_some();
+    let ln_alignment = properties
+        .alignment
+        .clone()
+        .filter(|value| matches!(value.as_str(), "ctr" | "in"));
+
+    match (parsed, inherited) {
+        (Some(authored), base) => Some(Stroke {
+            color: authored.color,
+            width: ln_width.unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
+            fill: authored.fill,
+            dash_style: if has_dash {
+                ln_dash
+            } else {
+                authored
+                    .dash_style
+                    .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone()))
+            },
+            custom_dash: if has_dash {
+                ln_custom_dash
+            } else {
+                base.as_ref()
+                    .map(|stroke| stroke.custom_dash.clone())
+                    .unwrap_or_default()
+            },
+            line_cap: if has_cap {
+                ln_cap
+            } else {
+                authored
+                    .line_cap
+                    .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone()))
+            },
+            line_join: if has_join {
+                ln_join
+            } else {
+                base.as_ref().and_then(|stroke| stroke.line_join.clone())
+            },
+            miter_limit: if has_join {
+                ln_miter_limit
+            } else {
+                base.as_ref().and_then(|stroke| stroke.miter_limit)
+            },
+            alignment: if has_alignment {
+                ln_alignment
+            } else {
+                base.as_ref().and_then(|stroke| stroke.alignment.clone())
+            },
+            head_end: if has_head {
+                ln_head
+            } else {
+                authored
+                    .head_end
+                    .or_else(|| base.as_ref().and_then(|s| s.head_end.clone()))
+            },
+            tail_end: if has_tail {
+                ln_tail
+            } else {
+                authored
+                    .tail_end
+                    .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone()))
+            },
+            cmpd: if has_cmpd {
+                ln_cmpd
+            } else {
+                authored
+                    .cmpd
+                    .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone()))
+            },
+        }),
+        (None, Some(base)) => Some(Stroke {
+            color: base.color,
+            width: ln_width.unwrap_or(base.width),
+            fill: base.fill,
+            dash_style: if has_dash { ln_dash } else { base.dash_style },
+            custom_dash: if has_dash {
+                ln_custom_dash
+            } else {
+                base.custom_dash
+            },
+            line_cap: if has_cap { ln_cap } else { base.line_cap },
+            line_join: if has_join { ln_join } else { base.line_join },
+            miter_limit: if has_join {
+                ln_miter_limit
+            } else {
+                base.miter_limit
+            },
+            alignment: if has_alignment {
+                ln_alignment
+            } else {
+                base.alignment
+            },
+            head_end: if has_head { ln_head } else { base.head_end },
+            tail_end: if has_tail { ln_tail } else { base.tail_end },
+            cmpd: if has_cmpd { ln_cmpd } else { base.cmpd },
+        }),
+        (None, None) => None,
+    }
+}
+
+/// Resolve `p:style/a:lnRef` into the inherited line component. The complete
+/// theme line recipe will move to the shared format-scheme model; until then,
+/// keeping this fallback in one place prevents shapes, connectors and pictures
+/// from disagreeing about the same CT_ShapeStyle component.
+fn parse_style_stroke(
+    style_node: Option<roxmltree::Node<'_, '_>>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> Option<Stroke> {
+    let line_ref = style_node.and_then(|style| child(style, "lnRef"))?;
+    resolve_style_line_ref(line_ref, theme_source)
+}
+
+fn resolve_style_line_ref(
+    line_ref: roxmltree::Node<'_, '_>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> Option<Stroke> {
+    let theme = theme_source.colors();
+    let index = attr(&line_ref, "idx")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    let reference_color = parse_color_node(line_ref, theme);
+    let reference_stroke = |color: String| Stroke {
+        color,
+        width: 9525,
+        fill: None,
+        dash_style: None,
+        custom_dash: Vec::new(),
+        line_cap: None,
+        line_join: None,
+        miter_limit: None,
+        alignment: None,
+        head_end: None,
+        tail_end: None,
+        cmpd: None,
+    };
+    let Some(format_scheme) = theme_source.format_scheme() else {
+        return reference_color.map(reference_stroke);
+    };
+    let entry = match format_scheme.lookup_line_ref(index) {
+        ooxml_common::theme::StyleMatrixLookup::NoStyle => return None,
+        ooxml_common::theme::StyleMatrixLookup::Missing => {
+            return reference_color.map(reference_stroke);
+        }
+        ooxml_common::theme::StyleMatrixLookup::Entry(entry) => entry,
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let line = document.root_element().children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "ln"
+            && ooxml_common::ns::is_a_ns(node.tag_name().namespace())
+    })?;
+    let base_resolver = PptxRawSchemeResolver { theme };
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &base_resolver,
+        reference_color.as_deref(),
+    );
+    let mut properties = parse_line_properties(
+        line,
+        &resolver,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    if properties.paint.is_none() {
+        properties.paint = reference_color.map(|color| LinePaint::Solid { color: Some(color) });
+    }
+    line_properties_to_stroke(&properties, None)
+}
+
+fn style_line_ref_is_explicit_no_line(
+    line_ref: roxmltree::Node<'_, '_>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> bool {
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let index = attr(&line_ref, "idx")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if index == 0 {
+        return true;
+    }
+    let Some(format_scheme) = theme_source.format_scheme() else {
+        return false;
+    };
+    let StyleMatrixLookup::Entry(entry) = format_scheme.lookup_line_ref(index) else {
+        return false;
+    };
+    let entry_xml = entry.to_xml();
+    let Ok(document) = roxmltree::Document::parse(&entry_xml) else {
+        return false;
+    };
+    let Some(line) = document.root_element().children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "ln"
+            && ooxml_common::ns::is_a_ns(node.tag_name().namespace())
+    }) else {
+        return false;
+    };
+    let reference_color = parse_color_node(line_ref, theme_source.colors());
+    let raw_resolver = PptxRawSchemeResolver {
+        theme: theme_source.colors(),
+    };
+    let resolver = ooxml_common::color::StyleMatrixColorResolver::new(
+        &raw_resolver,
+        reference_color.as_deref(),
+    );
+    matches!(
+        parse_line_properties(
+            line,
+            &resolver,
+            ooxml_common::color::TintMode::PowerPointLinear,
+        )
+        .paint,
+        Some(LinePaint::NoFill)
+    )
+}
+
+fn canvas_line_cap(cap: &str) -> Option<String> {
+    match cap {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    }
+}
+
+fn preset_dash(line: &LineProperties) -> Option<String> {
+    match line.dash.as_ref() {
+        Some(LineDash::Preset(Some(value))) if value != "solid" => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn custom_dash(line: &LineProperties) -> Vec<StrokeDashSegment> {
+    match line.dash.as_ref() {
+        Some(LineDash::Custom(stops)) => stops
+            .iter()
+            .map(|stop| StrokeDashSegment {
+                dash: stop.dash as f64 / 100_000.0,
+                space: stop.space as f64 / 100_000.0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn line_join(line: &LineProperties) -> (Option<String>, Option<f64>) {
+    match line.join.as_ref() {
+        Some(LineJoin::Round) => (Some("round".to_owned()), None),
+        Some(LineJoin::Bevel) => (Some("bevel".to_owned()), None),
+        Some(LineJoin::Miter { limit }) => (
+            Some("miter".to_owned()),
+            limit.map(|value| value as f64 / 100_000.0),
+        ),
+        None => (None, None),
+    }
+}
+
+fn to_arrow_end(end: &LineEnd) -> Option<ArrowEnd> {
+    let kind = end.kind.clone().unwrap_or_else(|| "none".to_owned());
+    (kind != "none").then(|| ArrowEnd {
+        kind,
+        w: end.width.clone().unwrap_or_else(|| "med".to_owned()),
+        len: end.length.clone().unwrap_or_else(|| "med".to_owned()),
+    })
+}
+
+/// The DrawingML shape-property components that affect a picture's composed
+/// bitmap/border silhouette. `p:pic` and a `p:sp` painted by `a:blipFill` both
+/// use `CT_ShapeProperties`; keeping their component cascade in one resolver
+/// prevents the alternate picture construction paths from silently dropping
+/// style-matrix or placeholder-inherited effects.
+#[derive(Default, Clone, serde::Serialize)]
+pub(crate) struct PictureShapeProperties {
+    pub(crate) stroke: Option<Stroke>,
+    pub(crate) shadow: Option<Shadow>,
+    pub(crate) inner_shadow: Option<Shadow>,
+    pub(crate) glow: Option<Glow>,
+    pub(crate) soft_edge: Option<SoftEdge>,
+    pub(crate) reflection: Option<Reflection>,
+    pub(crate) scene3d: Option<Scene3d>,
+    pub(crate) sp3d: Option<Sp3d>,
+}
+
+impl PictureShapeProperties {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.stroke.is_none()
+            && self.shadow.is_none()
+            && self.inner_shadow.is_none()
+            && self.glow.is_none()
+            && self.soft_edge.is_none()
+            && self.reflection.is_none()
+            && self.scene3d.is_none()
+            && self.sp3d.is_none()
+    }
+}
+
+/// Resolve the component cascade for a picture-like shape.
+///
+/// ECMA-376 Part 1, Annex L.3.2.3 defines the slide/layout placeholder
+/// inheritance tier. CT_ShapeStyle's `lnRef`/`effectRef` supplies the next
+/// tier, and local CT_ShapeProperties components override it. In particular,
+/// MS-OI29500 §20.1.2.2.37(b) specifies that an authored local effect component
+/// replaces the referenced style component rather than merging its children.
+pub(crate) fn resolve_picture_shape_properties(
+    sp_pr: Option<roxmltree::Node<'_, '_>>,
+    style_node: Option<roxmltree::Node<'_, '_>>,
+    inherited: Option<PictureShapeProperties>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> PictureShapeProperties {
+    let theme = theme_source.colors();
+    let inherited = inherited.unwrap_or_default();
+
+    // An explicit lnRef (including idx=0) replaces the placeholder tier.
+    // Without an lnRef, the layout placeholder remains the inherited base.
+    let style_stroke = if style_node.and_then(|style| child(style, "lnRef")).is_some() {
+        parse_style_stroke(style_node, theme_source)
+    } else {
+        inherited.stroke
+    };
+    let stroke = merge_local_stroke(
+        sp_pr.and_then(|node| child(node, "ln")),
+        style_stroke,
+        theme,
+    );
+
+    let effect_ref = style_node.and_then(|style| child(style, "effectRef"));
+    let style_effects = effect_ref
+        .map(|node| parse_style_matrix_effects(node, theme))
+        .unwrap_or_default();
+    let local_effect_node =
+        sp_pr.and_then(|node| child(node, "effectLst").or_else(|| child(node, "effectDag")));
+    let effects = if local_effect_node.is_some() {
+        parse_effect_lst(local_effect_node, theme)
+    } else if effect_ref.is_some() {
+        style_effects.effects
+    } else {
+        EffectLst {
+            shadow: inherited.shadow,
+            inner_shadow: inherited.inner_shadow,
+            glow: inherited.glow,
+            soft_edge: inherited.soft_edge,
+            reflection: inherited.reflection,
+        }
+    };
+
+    // An explicit effectRef replaces the inherited CT_EffectStyleItem as a
+    // whole.  Its absence may inherit layout 3-D; its presence with idx=0 or
+    // an item without scene3d/sp3d must clear the older layout components just
+    // as it clears/replaces the raster effects above.
+    let inherited_scene3d = if effect_ref.is_some() {
+        None
+    } else {
+        inherited.scene3d
+    };
+    let inherited_sp3d = if effect_ref.is_some() {
+        None
+    } else {
+        inherited.sp3d
+    };
+
+    PictureShapeProperties {
+        stroke,
+        shadow: effects.shadow,
+        inner_shadow: effects.inner_shadow,
+        glow: effects.glow,
+        soft_edge: effects.soft_edge,
+        reflection: effects.reflection,
+        scene3d: sp_pr
+            .and_then(parse_scene3d)
+            .or(style_effects.scene3d)
+            .or(inherited_scene3d),
+        sp3d: sp_pr
+            .and_then(|node| parse_sp3d(node, theme))
+            .or(style_effects.sp3d)
+            .or(inherited_sp3d),
+    }
+}
+
 pub(crate) fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
     source_dir: &str,
     group_fill: Option<&Fill>,
     zip: &mut PptxZip,
 ) -> Option<ShapeElement> {
+    let theme = theme_source.colors();
     // --- Placeholder info (for layout fallback) ---
     let ph_node = sp_node
         .descendants()
@@ -218,7 +639,11 @@ pub(crate) fn parse_shape(
     let ph_idx: Option<u32> = ph_node
         .as_ref()
         .and_then(|n| attr(n, "idx"))
-        .and_then(|v| v.parse().ok());
+        .and_then(|v| v.parse().ok())
+        // PowerPoint uses the unsigned maximum as an unbound-placeholder
+        // sentinel. It is not a real layout slot; treating it as an authored
+        // idx suppresses the normal type/bodyStyle fallback.
+        .filter(|idx| *idx != u32::MAX);
     // Surface the explicit ph @type / @idx (when present) on the ShapeElement
     // JSON. We keep `ph_type` defaulted to "body" for the internal lookup
     // path, but only emit the `placeholder_type` field when a real `<p:ph>`
@@ -266,7 +691,9 @@ pub(crate) fn parse_shape(
     // shape properties: a placeholder with only a local xfrm can still inherit
     // an ellipse/custom geometry from the matching layout placeholder.
     let shape_geometry = sp_pr
-        .and_then(InheritedShapeGeometry::from_sp_pr)
+        .and_then(|properties| {
+            InheritedShapeGeometry::from_sp_pr(properties, t.cx as f64, t.cy as f64)
+        })
         .or_else(|| {
             if ph_node.is_some() {
                 lph.lookup_geometry(&ph_type, ph_idx)
@@ -311,43 +738,22 @@ pub(crate) fn parse_shape(
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
 
-    // fillRef idx=0 → explicit no-fill; idx>0 → use referenced color as solid fill
+    // fillRef idx=0 → explicit no-fill; idx>0 → resolve the referenced
+    // theme fill style, substituting this ref's colour for phClr. Retain the
+    // former solid-colour fallback for incomplete/malformed themes.
     let style_fill: Option<Fill> = style_node.and_then(|s| child(s, "fillRef")).and_then(|fr| {
         let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
         if idx == 0 {
             Some(Fill::None)
         } else {
-            parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
+            parse_style_matrix_fill_from_source(fr, theme_source)
+                .or_else(|| parse_color_node(fr, theme).map(|c| Fill::Solid { color: c }))
         }
     });
 
-    // lnRef idx=0 → no line; idx>0 → resolve width from theme's fmtScheme >
-    // lnStyleLst (stored as "+lnRef-N") and color from the ref's own solidFill.
-    // Falling back to 9525 under-weights idx>=2 strokes (Office default theme
-    // idx=2 is 19050 EMU = 1.5pt, idx=3 is 25400 EMU = 2pt).
-    let style_stroke: Option<Stroke> = style_node.and_then(|s| child(s, "lnRef")).and_then(|lr| {
-        let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-        if idx == 0 {
-            None
-        } else {
-            parse_color_node(lr, theme).map(|c| {
-                let width = theme
-                    .get(&format!("+lnRef-{}", idx))
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(9525);
-                Stroke {
-                    color: c,
-                    width,
-                    fill: None,
-                    dash_style: None,
-                    line_cap: None,
-                    head_end: None,
-                    tail_end: None,
-                    cmpd: None,
-                }
-            })
-        }
-    });
+    // lnRef idx=0 → no line; idx>0 → resolve the complete theme fmtScheme >
+    // lnStyleLst recipe, substituting the ref color only for `phClr`.
+    let style_stroke = parse_style_stroke(style_node, theme_source);
 
     // fontRef → default text color for this shape.
     // Fall back to layout/master placeholder inherited color (lstStyle > lvl1pPr > defRPr
@@ -366,9 +772,9 @@ pub(crate) fn parse_shape(
     // spPr fill resolution order (ECMA-376 §19.3.1.36 / §20.1.4.2):
     //   1. spPr `<a:grpFill>` → inherit from parent group
     //   2. spPr explicit fill (`<a:solidFill>`, `<a:noFill>`, gradient, pattern, blip)
-    //   3. layout placeholder fill (only when the slide-level shape has no fill
-    //      element of its own and is bound to a placeholder)
-    //   4. `<p:style><a:fillRef>` falls through last
+    //   3. the slide shape's `<p:style><a:fillRef>`
+    //   4. layout/master placeholder fill only when this shape did not author
+    //      a style component
     // Some(Fill::None) (noFill in spPr) is treated as an explicit choice and
     // must NOT be overridden by step 3 or 4.
     let sp_pr_has_grp_fill = sp_pr.and_then(|p| child(p, "grpFill")).is_some();
@@ -376,32 +782,36 @@ pub(crate) fn parse_shape(
         group_fill.cloned()
     } else {
         let own = sp_pr.and_then(|p| parse_fill(p, theme));
-        let inherited = if own.is_none() && ph_node.is_some() {
+        let inherited = if own.is_none() && style_fill.is_none() && ph_node.is_some() {
             lph.lookup_fill(&ph_type, ph_idx)
         } else {
             None
         };
-        own.or(inherited).or(style_fill)
+        own.or(style_fill).or(inherited)
     };
 
-    // spPr stroke: if ln element is present, respect it (even if noFill → None);
-    // otherwise fall back to layout placeholder stroke, then style stroke.
-    let stroke = if sp_pr.and_then(|p| child(p, "ln")).is_some() {
-        sp_pr
-            .and_then(|p| child(p, "ln"))
-            .and_then(|n| parse_stroke(n, theme))
-    } else if ph_node.is_some() {
-        lph.lookup_stroke(&ph_type, ph_idx).or(style_stroke)
-    } else {
+    // A local line is a field-wise override over layout/style inheritance;
+    // explicit noFill still suppresses the inherited line entirely.
+    let has_style_line_ref = style_node.and_then(|style| child(style, "lnRef")).is_some();
+    let inherited_stroke = if has_style_line_ref {
+        // Presence is authoritative even when idx=0 or the selected theme
+        // recipe is noFill. Do not resurrect a layout/master outline.
         style_stroke
+    } else if ph_node.is_some() {
+        lph.lookup_stroke(&ph_type, ph_idx)
+    } else {
+        None
     };
+    let stroke = merge_local_stroke(sp_pr.and_then(|p| child(p, "ln")), inherited_stroke, theme);
 
     // Inherited defaults from layout/master for this placeholder type/idx
     let (
         inherited_font_size,
+        inherited_font_family,
         inherited_bold,
         inherited_italic,
         inherited_caps,
+        inherited_reflection,
         inherited_anchor,
         inherited_text_insets,
         inherited_alignment,
@@ -412,9 +822,11 @@ pub(crate) fn parse_shape(
     ) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
+            lph.lookup_font_family(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
             lph.lookup_italic(&ph_type),
             lph.lookup_caps(&ph_type),
+            lph.lookup_reflection(&ph_type),
             lph.lookup_anchor(&ph_type),
             lph.lookup_text_insets(&ph_type, ph_idx),
             lph.lookup_alignment(&ph_type, ph_idx),
@@ -425,7 +837,7 @@ pub(crate) fn parse_shape(
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
     let inherited_level_font_sizes: LevelFontSizes = if ph_node.is_some() {
@@ -468,12 +880,14 @@ pub(crate) fn parse_shape(
             rels,
             source_dir,
             inherited_font_size,
+            inherited_font_family,
             inherited_level_font_sizes,
             inherited_level_indents,
             &inherited_level_bullets,
             inherited_bold,
             inherited_italic,
             inherited_caps.clone(),
+            inherited_reflection.clone(),
             inherited_anchor,
             inherited_text_insets,
             inherited_alignment,
@@ -488,13 +902,27 @@ pub(crate) fn parse_shape(
 
     // Effects from spPr > effectLst (outerShdw / innerShdw / glow / softEdge /
     // reflection are independent siblings — ECMA-376 §20.1.8.16). Pull each.
+    let style_effects = style_node
+        .and_then(|style| child(style, "effectRef"))
+        .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
+        .unwrap_or_default();
+    let style_scene3d = style_effects.scene3d;
+    let style_sp3d = style_effects.sp3d;
+    let local_effect_node =
+        sp_pr.and_then(|p| child(p, "effectLst").or_else(|| child(p, "effectDag")));
     let EffectLst {
         shadow,
         inner_shadow,
         glow,
         soft_edge,
         reflection,
-    } = parse_effect_lst(sp_pr.and_then(|p| child(p, "effectLst")), theme);
+    } = if local_effect_node.is_some() {
+        // MS-OI29500 §20.1.2.2.37(b): a local effect component replaces the
+        // style component rather than merging missing fields from effectRef.
+        parse_effect_lst(local_effect_node, theme)
+    } else {
+        style_effects.effects
+    };
 
     Some(ShapeElement {
         x: t.x,
@@ -530,8 +958,10 @@ pub(crate) fn parse_shape(
         placeholder_type: placeholder_type_out,
         placeholder_idx: ph_idx,
         text_rect: None,
-        scene3d: sp_pr.and_then(parse_scene3d),
-        sp3d: sp_pr.and_then(parse_sp3d),
+        scene3d: sp_pr.and_then(parse_scene3d).or(style_scene3d),
+        sp3d: sp_pr
+            .and_then(|node| parse_sp3d(node, theme))
+            .or(style_sp3d),
     })
 }
 
@@ -686,9 +1116,10 @@ pub(crate) fn parse_picture(
     pic_node: roxmltree::Node<'_, '_>,
     slide_dir: &str,
     rels: &HashMap<String, String>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     zip: &mut PptxZip,
 ) -> Option<PictureElement> {
+    let theme = theme_source.colors();
     let sp_pr = child(pic_node, "spPr")?;
     let xfrm_node = child(sp_pr, "xfrm")?;
     let t = parse_xfrm(xfrm_node);
@@ -711,22 +1142,20 @@ pub(crate) fn parse_picture(
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
     // silhouette). Re-use the same parser as for shapes so the renderer can
     // build a Path2D and `ctx.clip()` before drawing the image.
-    let cust_geom = child(sp_pr, "custGeom").map(parse_cust_geom);
+    let cust_geom = child(sp_pr, "custGeom")
+        .map(|geometry| parse_cust_geom(geometry, t.cx as f64, t.cy as f64));
 
-    // §19.3.1.37: p:pic's spPr is CT_ShapeProperties, so effectLst (§20.1.8.16)
-    // applies to images exactly as it does to shapes.
-    let EffectLst {
+    let style_node = child(pic_node, "style");
+    let PictureShapeProperties {
+        stroke,
         shadow,
         inner_shadow,
         glow,
         soft_edge,
         reflection,
-    } = parse_effect_lst(child(sp_pr, "effectLst"), theme);
-
-    // §20.1.2.2.24 — a `p:pic`'s spPr may carry an `<a:ln>` border (e.g. the
-    // white frame of PowerPoint's picture styles). `parse_stroke` returns None
-    // for `<a:noFill/>`, so an explicitly border-less picture stays None.
-    let stroke = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
+        scene3d,
+        sp3d,
+    } = resolve_picture_shape_properties(Some(sp_pr), style_node, None, theme_source);
 
     let (prst_geom, prst_adjust) = parse_pic_prst_geom(sp_pr);
     Some(PictureElement {
@@ -760,8 +1189,8 @@ pub(crate) fn parse_picture(
         glow,
         soft_edge,
         reflection,
-        scene3d: parse_scene3d(sp_pr),
-        sp3d: parse_sp3d(sp_pr),
+        scene3d,
+        sp3d,
     })
 }
 
@@ -957,8 +1386,9 @@ pub(crate) fn parse_media(
 /// Parse ppt/tableStyles.xml into a map of styleId → TableStyleDef.
 pub(crate) fn parse_table_styles_xml(
     xml: &str,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
 ) -> HashMap<String, TableStyleDef> {
+    let theme = theme_source.colors();
     let mut map = HashMap::new();
     let Ok(doc) = crate::parse_preflighted_pptx_xml(xml) else {
         return map;
@@ -974,147 +1404,353 @@ pub(crate) fn parse_table_styles_xml(
         let style_id = style_id.to_string();
         let mut def = TableStyleDef::default();
 
-        // (fill, inside-horizontal, inside-vertical, diagonal/unused, outer-horizontal,
-        // outer-vertical) borders for one table-style role (ECMA-376 §20.1.4.2.27).
-        type TcStyle = (
-            Option<Fill>,
-            Option<Stroke>,
-            Option<Stroke>,
-            Option<Stroke>,
-            Option<Stroke>,
-            Option<Stroke>,
-        );
-        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> TcStyle {
-            let tc_style = match child(role, "tcStyle") {
-                Some(n) => n,
-                None => return (None, None, None, None, None, None),
+        let parse_on_off_default = |value: Option<String>| -> Option<bool> {
+            match value.as_deref() {
+                Some("on" | "1" | "true") => Some(true),
+                Some("off" | "0" | "false") => Some(false),
+                // ST_OnOffStyleType `def` inherits; it is not explicit off.
+                Some("def") | None => None,
+                _ => None,
+            }
+        };
+        let parse_tc_text = |role: roxmltree::Node<'_, '_>| -> TableTextStyle {
+            let Some(text) = child(role, "tcTxStyle") else {
+                return TableTextStyle::default();
             };
-            // ECMA-376 §20.1.4.2.27 — the cell fill is wrapped in `<a:fill>`
-            // (CT_FillProperties), so descend into it before reading the actual
-            // solidFill/gradFill. Fall back to `<a:fillRef>` (theme style reference).
+            TableTextStyle {
+                color: parse_color_node(text, theme),
+                bold: parse_on_off_default(attr(&text, "b")),
+                italic: parse_on_off_default(attr(&text, "i")),
+            }
+        };
+
+        // ECMA-376 §20.1.4.2.4 `CT_TableCellBorderStyle` declares left,
+        // right, top, bottom, insideH, and insideV independently. A role's
+        // explicit no-fill line is retained as `NoLine`; absence inherits.
+        let parse_part = |role: roxmltree::Node<'_, '_>| -> TablePartStyle {
+            let Some(tc_style) = child(role, "tcStyle") else {
+                return TablePartStyle {
+                    text: parse_tc_text(role),
+                    ..Default::default()
+                };
+            };
+            // §20.1.4.2.27: the role fill is `fill` or `fillRef`, never a fill
+            // child directly on `tcStyle`.
             let fill = child(tc_style, "fill")
-                .and_then(|f| parse_table_style_fill(f, theme))
+                .and_then(|fill| parse_table_style_fill(fill, theme))
                 .or_else(|| {
-                    child(tc_style, "fillRef").and_then(|fr| {
-                        let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
-                        if idx == 0 {
+                    child(tc_style, "fillRef").and_then(|fill_ref| {
+                        let index = attr(&fill_ref, "idx")
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        if index == 0 {
                             Some(Fill::None)
                         } else {
-                            parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
+                            parse_style_matrix_fill_from_source(fill_ref, theme_source).or_else(
+                                || {
+                                    parse_color_node(fill_ref, theme)
+                                        .map(|color| Fill::Solid { color })
+                                },
+                            )
                         }
                     })
                 });
             let tc_bdr = child(tc_style, "tcBdr");
-            let parse_side = |side: &str| -> Option<Stroke> {
-                let side_node = tc_bdr.and_then(|b| child(b, side))?;
-                // Explicit <a:ln>
-                if let Some(ln) = child(side_node, "ln") {
-                    return parse_stroke(ln, theme);
-                }
-                // <a:lnRef idx="N">: use standard themed width + provided color
-                if let Some(ln_ref) = child(side_node, "lnRef") {
-                    let idx: u32 = attr(&ln_ref, "idx")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    if idx == 0 {
-                        return None;
+            let parse_side = |side: &str| -> TableLineStyle {
+                let Some(side_node) = tc_bdr.and_then(|borders| child(borders, side)) else {
+                    return TableLineStyle::Unspecified;
+                };
+                if let Some(line) = child(side_node, "ln") {
+                    if child(line, "noFill").is_some() {
+                        return TableLineStyle::NoLine;
                     }
-                    let color = parse_color_node(ln_ref, theme)?;
-                    let width: i64 = match idx {
-                        1 => 6350,
-                        2 => 12700,
-                        _ => 19050,
-                    };
-                    return Some(Stroke {
-                        color,
-                        width,
-                        fill: None,
-                        dash_style: None,
-                        line_cap: None,
-                        head_end: None,
-                        tail_end: None,
-                        cmpd: None,
-                    });
+                    return TableLineStyle::from_stroke(parse_stroke(line, theme));
                 }
-                None
+                if let Some(line_ref) = child(side_node, "lnRef") {
+                    let index = attr(&line_ref, "idx")
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    if index == 0 {
+                        return TableLineStyle::NoLine;
+                    }
+                    if style_line_ref_is_explicit_no_line(line_ref, theme_source) {
+                        return TableLineStyle::NoLine;
+                    }
+                    return TableLineStyle::from_stroke(resolve_style_line_ref(
+                        line_ref,
+                        theme_source,
+                    ));
+                }
+                TableLineStyle::Unspecified
             };
-            let inside_h = parse_side("insideH");
-            let inside_v = parse_side("insideV");
-            let border_b = parse_side("bottom");
-            let outer_h = parse_side("top");
-            let outer_v = parse_side("left");
-            (fill, inside_h, inside_v, border_b, outer_h, outer_v)
+            TablePartStyle {
+                fill,
+                text: parse_tc_text(role),
+                borders: TableCellBorderStyle {
+                    left: parse_side("left"),
+                    right: parse_side("right"),
+                    top: parse_side("top"),
+                    bottom: parse_side("bottom"),
+                    inside_h: parse_side("insideH"),
+                    inside_v: parse_side("insideV"),
+                    diagonal_tl: parse_side("tl2br"),
+                    diagonal_tr: parse_side("tr2bl"),
+                },
+            }
         };
 
-        // Default text colour for a role: `<a:tcTxStyle>` holds a `<a:fontRef>`
-        // followed by a colour child (schemeClr/srgbClr). parse_color_node scans
-        // direct children and skips fontRef, picking up the colour.
-        let parse_tc_tx_color = |role: roxmltree::Node<'_, '_>| -> Option<String> {
-            child(role, "tcTxStyle").and_then(|t| parse_color_node(t, theme))
-        };
-        // `<a:tcTxStyle b="on">` → bold for this role (e.g. a bold header row).
-        let parse_tc_tx_bold = |role: roxmltree::Node<'_, '_>| -> Option<bool> {
-            child(role, "tcTxStyle")
-                .and_then(|t| attr(&t, "b"))
-                .map(|v| v == "on" || v == "1" || v == "true")
-        };
-
-        if let Some(whole) = child(style_node, "wholeTbl") {
-            let (fill, ih, iv, _, oh, ov) = parse_tc_style(whole);
-            def.whole_fill = fill;
-            def.whole_inside_h = ih;
-            def.whole_inside_v = iv;
-            def.whole_outer_h = oh;
-            def.whole_outer_v = ov;
-            def.whole_text_color = parse_tc_tx_color(whole);
+        macro_rules! parse_role {
+            ($xml_name:literal, $field:ident) => {
+                if let Some(role) = child(style_node, $xml_name) {
+                    def.$field = parse_part(role);
+                }
+            };
         }
-        if let Some(band) = child(style_node, "band1H") {
-            let (fill, _, _, _, _, _) = parse_tc_style(band);
-            def.band1h_fill = fill;
-        }
-        if let Some(band) = child(style_node, "band2H") {
-            let (fill, _, _, _, _, _) = parse_tc_style(band);
-            def.band2h_fill = fill;
-        }
-        if let Some(first) = child(style_node, "firstRow") {
-            let (fill, _, _, border_b, _, _) = parse_tc_style(first);
-            def.first_row_fill = fill;
-            def.first_row_border_b = border_b;
-            def.first_row_text_color = parse_tc_tx_color(first);
-            def.first_row_bold = parse_tc_tx_bold(first);
-        }
-        if let Some(last) = child(style_node, "lastRow") {
-            let (fill, _, _, _, _, _) = parse_tc_style(last);
-            def.last_row_fill = fill;
-            def.last_row_text_color = parse_tc_tx_color(last);
-            def.last_row_bold = parse_tc_tx_bold(last);
-        }
-        if let Some(first) = child(style_node, "firstCol") {
-            let (fill, _, _, _, _, _) = parse_tc_style(first);
-            def.first_col_fill = fill;
-            def.first_col_text_color = parse_tc_tx_color(first);
-            def.first_col_bold = parse_tc_tx_bold(first);
-        }
-        if let Some(last) = child(style_node, "lastCol") {
-            let (fill, _, _, _, _, _) = parse_tc_style(last);
-            def.last_col_fill = fill;
-            def.last_col_text_color = parse_tc_tx_color(last);
-            def.last_col_bold = parse_tc_tx_bold(last);
-        }
+        parse_role!("wholeTbl", whole_tbl);
+        parse_role!("band1H", band1_h);
+        parse_role!("band2H", band2_h);
+        parse_role!("band1V", band1_v);
+        parse_role!("band2V", band2_v);
+        parse_role!("firstRow", first_row);
+        parse_role!("lastRow", last_row);
+        parse_role!("firstCol", first_col);
+        parse_role!("lastCol", last_col);
+        parse_role!("nwCell", nw_cell);
+        parse_role!("neCell", ne_cell);
+        parse_role!("swCell", sw_cell);
+        parse_role!("seCell", se_cell);
 
         map.insert(style_id, def);
     }
     map
 }
 
+#[derive(Clone, Copy)]
+enum TablePartRegion {
+    Whole,
+    Row,
+    Column,
+    Cell,
+}
+
+/// Resolve the table-style cascade for one physical cell. ECMA-376 §21.1.3.11
+/// defines thirteen `CT_TablePartStyle` components. PowerPoint applies the
+/// general table role first, then banding, edge roles, and finally the corner
+/// intersection. A role only replaces fields it actually declares.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_table_cell_style(
+    style: &TableStyleDef,
+    flags: TableStyleFlags,
+    row: usize,
+    col: usize,
+    row_count: usize,
+    col_count: usize,
+) -> ResolvedTableCellStyle {
+    let last_row = row_count.saturating_sub(1);
+    let last_col = col_count.saturating_sub(1);
+    let mut resolved = ResolvedTableCellStyle::default();
+
+    let overlay =
+        |resolved: &mut ResolvedTableCellStyle, role: &TablePartStyle, region: TablePartRegion| {
+            if role.fill.is_some() {
+                resolved.fill = role.fill.clone();
+            }
+            resolved.text.overlay(&role.text);
+
+            resolved.diagonal_tl.overlay(&role.borders.diagonal_tl);
+            resolved.diagonal_tr.overlay(&role.borders.diagonal_tr);
+
+            let overlay_line = |target: &mut TableLineStyle, source: &TableLineStyle| {
+                target.overlay(source);
+            };
+            match region {
+                TablePartRegion::Whole => {
+                    overlay_line(
+                        &mut resolved.border_l,
+                        if col == 0 {
+                            &role.borders.left
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_r,
+                        if col == last_col {
+                            &role.borders.right
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_t,
+                        if row == 0 {
+                            &role.borders.top
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_b,
+                        if row == last_row {
+                            &role.borders.bottom
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                }
+                TablePartRegion::Row => {
+                    overlay_line(
+                        &mut resolved.border_l,
+                        if col == 0 {
+                            &role.borders.left
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_r,
+                        if col == last_col {
+                            &role.borders.right
+                        } else {
+                            &role.borders.inside_v
+                        },
+                    );
+                    overlay_line(&mut resolved.border_t, &role.borders.top);
+                    overlay_line(&mut resolved.border_b, &role.borders.bottom);
+                }
+                TablePartRegion::Column => {
+                    overlay_line(&mut resolved.border_l, &role.borders.left);
+                    overlay_line(&mut resolved.border_r, &role.borders.right);
+                    overlay_line(
+                        &mut resolved.border_t,
+                        if row == 0 {
+                            &role.borders.top
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                    overlay_line(
+                        &mut resolved.border_b,
+                        if row == last_row {
+                            &role.borders.bottom
+                        } else {
+                            &role.borders.inside_h
+                        },
+                    );
+                }
+                TablePartRegion::Cell => {
+                    overlay_line(&mut resolved.border_l, &role.borders.left);
+                    overlay_line(&mut resolved.border_r, &role.borders.right);
+                    overlay_line(&mut resolved.border_t, &role.borders.top);
+                    overlay_line(&mut resolved.border_b, &role.borders.bottom);
+                }
+            }
+        };
+
+    overlay(&mut resolved, &style.whole_tbl, TablePartRegion::Whole);
+    if flags.band_row {
+        let band_row = row.saturating_sub(usize::from(flags.first_row));
+        overlay(
+            &mut resolved,
+            if band_row % 2 == 0 {
+                &style.band1_h
+            } else {
+                &style.band2_h
+            },
+            TablePartRegion::Row,
+        );
+    }
+    if flags.band_col {
+        let band_col = col.saturating_sub(usize::from(flags.first_col));
+        overlay(
+            &mut resolved,
+            if band_col % 2 == 0 {
+                &style.band1_v
+            } else {
+                &style.band2_v
+            },
+            TablePartRegion::Column,
+        );
+    }
+    if flags.first_row && row == 0 {
+        overlay(&mut resolved, &style.first_row, TablePartRegion::Row);
+    }
+    if flags.last_row && row == last_row {
+        overlay(&mut resolved, &style.last_row, TablePartRegion::Row);
+    }
+    if flags.first_col && col == 0 {
+        overlay(&mut resolved, &style.first_col, TablePartRegion::Column);
+    }
+    if flags.last_col && col == last_col {
+        overlay(&mut resolved, &style.last_col, TablePartRegion::Column);
+    }
+    if flags.first_row && row == 0 && flags.first_col && col == 0 {
+        overlay(&mut resolved, &style.nw_cell, TablePartRegion::Cell);
+    }
+    if flags.first_row && row == 0 && flags.last_col && col == last_col {
+        overlay(&mut resolved, &style.ne_cell, TablePartRegion::Cell);
+    }
+    if flags.last_row && row == last_row && flags.first_col && col == 0 {
+        overlay(&mut resolved, &style.sw_cell, TablePartRegion::Cell);
+    }
+    if flags.last_row && row == last_row && flags.last_col && col == last_col {
+        overlay(&mut resolved, &style.se_cell, TablePartRegion::Cell);
+    }
+
+    resolved
+}
+
+/// Apply the resolved style below direct `tcPr` formatting. This separate step
+/// makes the precedence rule testable without constructing a complete package.
+pub(crate) fn apply_resolved_table_cell_style(
+    cell: &mut TableCell,
+    effective: ResolvedTableCellStyle,
+) {
+    if !cell.has_direct_fill {
+        cell.fill = effective.fill;
+    }
+    if cell.text_color.is_none() {
+        cell.text_color = effective.text.color;
+    }
+    if let (Some(b), Some(tb)) = (effective.text.bold, cell.text_body.as_mut()) {
+        if tb.default_bold.is_none() {
+            tb.default_bold = Some(b);
+        }
+    }
+    if let (Some(i), Some(tb)) = (effective.text.italic, cell.text_body.as_mut()) {
+        if tb.default_italic.is_none() {
+            tb.default_italic = Some(i);
+        }
+    }
+    if !cell.has_direct_border_l {
+        effective.border_l.apply_to(&mut cell.border_l);
+    }
+    if !cell.has_direct_border_r {
+        effective.border_r.apply_to(&mut cell.border_r);
+    }
+    if !cell.has_direct_border_t {
+        effective.border_t.apply_to(&mut cell.border_t);
+    }
+    if !cell.has_direct_border_b {
+        effective.border_b.apply_to(&mut cell.border_b);
+    }
+    if !cell.has_direct_diagonal_tl {
+        effective.diagonal_tl.apply_to(&mut cell.diagonal_tl);
+    }
+    if !cell.has_direct_diagonal_tr {
+        effective.diagonal_tr.apply_to(&mut cell.diagonal_tr);
+    }
+}
+
 pub(crate) fn parse_table(
     tbl: roxmltree::Node<'_, '_>,
     t: &Transform,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
     source_dir: &str,
     zip: &mut PptxZip,
 ) -> Option<TableElement> {
+    let theme = theme_source.colors();
     // Parse tblPr attributes and look up table style
     let tbl_pr = child(tbl, "tblPr");
     let style_id = tbl_pr
@@ -1132,6 +1768,7 @@ pub(crate) fn parse_table(
     // ECMA-376 §21.1.3.13 (a:tblPr@rtl): right-to-left table layout.
     let rtl = flag("rtl");
     let band_row = flag("bandRow");
+    let band_col = flag("bandCol");
     let first_col = flag("firstCol");
     let last_col = flag("lastCol");
 
@@ -1139,7 +1776,7 @@ pub(crate) fn parse_table(
     let table_styles_xml = read_zip_str(zip, "ppt/tableStyles.xml").ok();
     let table_styles = table_styles_xml
         .as_deref()
-        .map(|xml| parse_table_styles_xml(xml, theme))
+        .map(|xml| parse_table_styles_xml(xml, theme_source))
         .unwrap_or_default();
     let style_owned: Option<TableStyleDef> = style_id.as_deref().and_then(|id| {
         table_styles
@@ -1175,142 +1812,26 @@ pub(crate) fn parse_table(
 
     let row_count = rows.len();
     let last_row_idx = row_count.saturating_sub(1);
+    let style_flags = TableStyleFlags {
+        first_row,
+        last_row,
+        first_col,
+        last_col,
+        band_row,
+        band_col,
+    };
 
     // Apply table style fills and borders to each cell
     for (ri, row) in rows.iter_mut().enumerate() {
         for (ci, cell) in row.cells.iter_mut().enumerate() {
             if let Some(s) = style {
-                // ── Fill cascade ────────────────────────────────────────────
-                let mut effective_fill = s.whole_fill.clone();
+                let effective =
+                    resolve_table_cell_style(s, style_flags, ri, ci, row_count, col_count);
 
-                if band_row {
-                    // Determine band index excluding firstRow header if present
-                    let band_ri = ri.saturating_sub(if first_row { 1 } else { 0 });
-                    if !(first_row && ri == 0) {
-                        if band_ri % 2 == 0 {
-                            if let Some(f) = s.band1h_fill.clone() {
-                                effective_fill = Some(f);
-                            }
-                        } else if let Some(f) = s.band2h_fill.clone() {
-                            effective_fill = Some(f);
-                        }
-                    }
-                }
-                if first_row && ri == 0 {
-                    if let Some(f) = s.first_row_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                if last_row && ri == last_row_idx {
-                    if let Some(f) = s.last_row_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                if first_col && ci == 0 {
-                    if let Some(f) = s.first_col_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                if last_col && ci == last_col_idx {
-                    if let Some(f) = s.last_col_fill.clone() {
-                        effective_fill = Some(f);
-                    }
-                }
-                // Cell's own tcPr fill wins
-                if cell.fill.is_none() {
-                    cell.fill = effective_fill;
-                }
-
-                // ── Text-colour cascade (style `<a:tcTxStyle>`, role-keyed) ──
-                // Mirrors the fill cascade ordering. The header (firstRow) typically
-                // overrides wholeTbl (e.g. white-on-accent header). A run's own
-                // explicit colour still wins later, at render time.
-                let mut effective_text = s.whole_text_color.clone();
-                if first_row && ri == 0 {
-                    if let Some(c) = s.first_row_text_color.clone() {
-                        effective_text = Some(c);
-                    }
-                }
-                if last_row && ri == last_row_idx {
-                    if let Some(c) = s.last_row_text_color.clone() {
-                        effective_text = Some(c);
-                    }
-                }
-                if first_col && ci == 0 {
-                    if let Some(c) = s.first_col_text_color.clone() {
-                        effective_text = Some(c);
-                    }
-                }
-                if last_col && ci == last_col_idx {
-                    if let Some(c) = s.last_col_text_color.clone() {
-                        effective_text = Some(c);
-                    }
-                }
-                if cell.text_color.is_none() {
-                    cell.text_color = effective_text;
-                }
-
-                // ── Bold cascade (style `<a:tcTxStyle b="on">`, role-keyed) ──
-                // Applied as the cell text body's default bold; a run's own @b wins.
-                let mut effective_bold: Option<bool> = None;
-                if first_row && ri == 0 {
-                    effective_bold = effective_bold.or(s.first_row_bold);
-                }
-                if last_row && ri == last_row_idx {
-                    effective_bold = effective_bold.or(s.last_row_bold);
-                }
-                if first_col && ci == 0 {
-                    effective_bold = effective_bold.or(s.first_col_bold);
-                }
-                if last_col && ci == last_col_idx {
-                    effective_bold = effective_bold.or(s.last_col_bold);
-                }
-                if let (Some(b), Some(tb)) = (effective_bold, cell.text_body.as_mut()) {
-                    if tb.default_bold.is_none() {
-                        tb.default_bold = Some(b);
-                    }
-                }
-
-                // ── Border cascade (style provides inside and outer borders) ──
-                // Outer top edge
-                if cell.border_t.is_none() && ri == 0 {
-                    cell.border_t = s.whole_outer_h.clone();
-                }
-                // Inner horizontal separator between rows
-                if cell.border_t.is_none() && ri > 0 {
-                    cell.border_t = s.whole_inside_h.clone();
-                }
-                // Outer bottom edge
-                if cell.border_b.is_none() && ri == last_row_idx {
-                    cell.border_b = s.whole_outer_h.clone();
-                }
-                // Inner bottom separator; firstRow gets its own bottom definition
-                if cell.border_b.is_none() {
-                    if first_row && ri == 0 {
-                        cell.border_b = s
-                            .first_row_border_b
-                            .clone()
-                            .or_else(|| s.whole_inside_h.clone());
-                    } else if ri < last_row_idx {
-                        cell.border_b = s.whole_inside_h.clone();
-                    }
-                }
-                // Outer left edge
-                if cell.border_l.is_none() && ci == 0 {
-                    cell.border_l = s.whole_outer_v.clone();
-                }
-                // Inner vertical separator between cols
-                if cell.border_l.is_none() && ci > 0 {
-                    cell.border_l = s.whole_inside_v.clone();
-                }
-                // Outer right edge
-                if cell.border_r.is_none() && ci == last_col_idx {
-                    cell.border_r = s.whole_outer_v.clone();
-                }
-                // Inner right separator
-                if cell.border_r.is_none() && ci < last_col_idx {
-                    cell.border_r = s.whole_inside_v.clone();
-                }
+                // Direct `tcPr` formatting is the final tier. The presence flags
+                // preserve an authored noFill/no-line, which is not equivalent to
+                // an omitted property inheriting the table style.
+                apply_resolved_table_cell_style(cell, effective);
             } else {
                 // ── Fallback for built-in styles not defined in tableStyles.xml ──
                 // Approximate "Medium Style 2": accent1 header fill + thin outer box + row separators.
@@ -1319,12 +1840,16 @@ pub(crate) fn parse_table(
                     width: 9525,
                     fill: None,
                     dash_style: None,
+                    custom_dash: Vec::new(),
                     line_cap: None,
+                    line_join: None,
+                    miter_limit: None,
+                    alignment: None,
                     head_end: None,
                     tail_end: None,
                     cmpd: None,
                 };
-                if cell.fill.is_none() && first_row && ri == 0 {
+                if !cell.has_direct_fill && cell.fill.is_none() && first_row && ri == 0 {
                     if let Some(color) = theme.get("accent1") {
                         cell.fill = Some(Fill::Solid {
                             color: color.clone(),
@@ -1332,23 +1857,23 @@ pub(crate) fn parse_table(
                     }
                 }
                 // Outer top
-                if cell.border_t.is_none() && ri == 0 {
+                if !cell.has_direct_border_t && cell.border_t.is_none() && ri == 0 {
                     cell.border_t = Some(thin.clone());
                 }
                 // Inner horizontal separators
-                if cell.border_t.is_none() && ri > 0 {
+                if !cell.has_direct_border_t && cell.border_t.is_none() && ri > 0 {
                     cell.border_t = Some(thin.clone());
                 }
                 // Outer bottom
-                if cell.border_b.is_none() && ri == last_row_idx {
+                if !cell.has_direct_border_b && cell.border_b.is_none() && ri == last_row_idx {
                     cell.border_b = Some(thin.clone());
                 }
                 // Outer left edge
-                if cell.border_l.is_none() && ci == 0 {
+                if !cell.has_direct_border_l && cell.border_l.is_none() && ci == 0 {
                     cell.border_l = Some(thin.clone());
                 }
                 // Outer right edge
-                if cell.border_r.is_none() && ci == last_col_idx {
+                if !cell.has_direct_border_r && cell.border_r.is_none() && ci == last_col_idx {
                     cell.border_r = Some(thin.clone());
                 }
             }
@@ -1397,12 +1922,22 @@ pub(crate) fn parse_table_cell(
     let anchor = tc_pr
         .and_then(|n| attr(&n, "anchor"))
         .map(|a| a.to_string());
+    let text_direction = tc_pr.and_then(|n| attr(&n, "vert"));
+    let text_insets = tc_pr.map(|n| {
+        [
+            attr_i64(&n, "marL"),
+            attr_i64(&n, "marT"),
+            attr_i64(&n, "marR"),
+            attr_i64(&n, "marB"),
+        ]
+    });
     let text_body = child(tc, "txBody").map(|n| {
-        parse_text_body(
+        let mut body = parse_text_body(
             n,
             theme,
             rels,
             source_dir,
+            None,
             None,
             [None; 9],
             Default::default(), // inherited_level_indents
@@ -1410,8 +1945,9 @@ pub(crate) fn parse_table_cell(
             None,
             None,
             None,
+            None, // inherited_reflection
             anchor,
-            None, // inherited_text_insets
+            text_insets,
             None, // inherited_alignment
             None, // inherited_ea_ln_brk
             None, // inherited_space_before
@@ -1419,10 +1955,38 @@ pub(crate) fn parse_table_cell(
             None, // inherited_line_spacing
             ShapeKind::Sp,
             zip,
-        )
+        );
+        // Table-cell text direction is authored on tcPr rather than txBody's
+        // bodyPr (ECMA-376 §21.1.3.17 CT_TableCellProperties@vert).
+        if let Some(direction) = text_direction.as_deref() {
+            body.vert = direction.to_owned();
+        }
+        body
     });
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
+
+    // ECMA-376 §21.1.3.17 (`CT_TableCellProperties`) makes direct formatting
+    // the final cascade tier. Presence must be tracked separately because
+    // direct `noFill`/no-line legitimately parse to no painted stroke.
+    let has_direct_fill = tc_pr.is_some_and(|n| {
+        [
+            "noFill",
+            "solidFill",
+            "gradFill",
+            "blipFill",
+            "pattFill",
+            "grpFill",
+        ]
+        .iter()
+        .any(|name| child(n, name).is_some())
+    });
+    let has_direct_border_l = tc_pr.is_some_and(|n| child(n, "lnL").is_some());
+    let has_direct_border_r = tc_pr.is_some_and(|n| child(n, "lnR").is_some());
+    let has_direct_border_t = tc_pr.is_some_and(|n| child(n, "lnT").is_some());
+    let has_direct_border_b = tc_pr.is_some_and(|n| child(n, "lnB").is_some());
+    let has_direct_diagonal_tl = tc_pr.is_some_and(|n| child(n, "lnTlToBr").is_some());
+    let has_direct_diagonal_tr = tc_pr.is_some_and(|n| child(n, "lnBlToTr").is_some());
 
     let border_l = tc_pr
         .and_then(|n| child(n, "lnL"))
@@ -1461,11 +2025,18 @@ pub(crate) fn parse_table_cell(
     TableCell {
         text_body,
         fill,
+        has_direct_fill,
         text_color: None,
         border_l,
         border_r,
         border_t,
         border_b,
+        has_direct_border_l,
+        has_direct_border_r,
+        has_direct_border_t,
+        has_direct_border_b,
+        has_direct_diagonal_tl,
+        has_direct_diagonal_tr,
         diagonal_tl,
         diagonal_tr,
         grid_span,
@@ -1487,7 +2058,7 @@ pub(crate) fn extract_decorative_shapes(
     part_dir: &str,
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
-    theme: &HashMap<String, String>,
+    theme: &(impl PptxThemeSource + ?Sized),
     zip: &mut PptxZip,
     out: &mut Vec<SlideElement>,
 ) {
@@ -1526,12 +2097,13 @@ pub(crate) fn parse_sp_tree_node(
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
     zip: &mut PptxZip,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     out: &mut Vec<SlideElement>,
     skip_placeholders: bool,
     group_fill: Option<&Fill>,
     depth: DepthGuard,
 ) {
+    let theme = theme_source.colors();
     // §20.1.2.2.8 — a shape/pic/graphicFrame/cxnSp/grpSp whose own
     // `<p:cNvPr hidden="1">` marks it hidden is not rendered. Skip at parse
     // time (no viewer-side "show hidden" mode is meaningful for a shape, unlike
@@ -1574,26 +2146,27 @@ pub(crate) fn parse_sp_tree_node(
                                 // just roundRect) is the picture's clip silhouette.
                                 let (prst_geom, prst_adjust) =
                                     sp_pr_node.map(parse_pic_prst_geom).unwrap_or((None, None));
-                                let cust_geom = sp_pr_node
-                                    .and_then(|p| child(p, "custGeom"))
-                                    .map(parse_cust_geom);
-                                // §20.1.8.16 effectLst applies to a sp painted as
-                                // a picture (blipFill) just like a regular p:pic.
-                                let EffectLst {
+                                let cust_geom =
+                                    sp_pr_node
+                                        .and_then(|p| child(p, "custGeom"))
+                                        .map(|geometry| {
+                                            parse_cust_geom(geometry, t.cx as f64, t.cy as f64)
+                                        });
+                                let PictureShapeProperties {
+                                    stroke,
                                     shadow,
                                     inner_shadow,
                                     glow,
                                     soft_edge,
                                     reflection,
-                                } = parse_effect_lst(
-                                    sp_pr_node.and_then(|p| child(p, "effectLst")),
-                                    theme,
+                                    scene3d,
+                                    sp3d,
+                                } = resolve_picture_shape_properties(
+                                    sp_pr_node,
+                                    child(node, "style"),
+                                    None,
+                                    theme_source,
                                 );
-                                // §20.1.2.2.24 — a blipFill-painted sp can carry
-                                // an `<a:ln>` border just like a real p:pic.
-                                let stroke = sp_pr_node
-                                    .and_then(|p| child(p, "ln"))
-                                    .and_then(|n| parse_stroke(n, theme));
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -1625,8 +2198,8 @@ pub(crate) fn parse_sp_tree_node(
                                     glow,
                                     soft_edge,
                                     reflection,
-                                    scene3d: sp_pr_node.and_then(parse_scene3d),
-                                    sp3d: sp_pr_node.and_then(parse_sp3d),
+                                    scene3d,
+                                    sp3d,
                                 }));
                                 return;
                             }
@@ -1643,19 +2216,29 @@ pub(crate) fn parse_sp_tree_node(
                     .find(|n| n.is_element() && n.tag_name().name() == "ph")
                 {
                     let ph_type = attr(&ph, "type").unwrap_or_else(|| "body".into());
-                    let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
+                    let ph_idx: Option<u32> = attr(&ph, "idx")
+                        .and_then(|v| v.parse().ok())
+                        .filter(|idx| *idx != u32::MAX);
                     if let Some(bf) = lph.lookup_blip_fill(&ph_type, ph_idx) {
                         let slide_xfrm = sp_pr_node.and_then(|p| child(p, "xfrm")).map(parse_xfrm);
                         let t = slide_xfrm.or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
                         if let Some(t) = t {
                             if t.cx > 0 && t.cy > 0 {
-                                // §20.1.2.2.24 — honour the slide sp's own `<a:ln>`
-                                // border, falling back to the inherited layout
-                                // placeholder stroke when the slide omits one.
-                                let stroke = match sp_pr_node.and_then(|p| child(p, "ln")) {
-                                    Some(ln) => parse_stroke(ln, theme),
-                                    None => lph.lookup_stroke(&ph_type, ph_idx),
-                                };
+                                let PictureShapeProperties {
+                                    stroke,
+                                    shadow,
+                                    inner_shadow,
+                                    glow,
+                                    soft_edge,
+                                    reflection,
+                                    scene3d,
+                                    sp3d,
+                                } = resolve_picture_shape_properties(
+                                    sp_pr_node,
+                                    child(node, "style"),
+                                    lph.lookup_picture_properties(&ph_type, ph_idx),
+                                    theme_source,
+                                );
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x,
                                     y: t.y,
@@ -1689,13 +2272,13 @@ pub(crate) fn parse_sp_tree_node(
                                     // render applies it via the shared core cache.
                                     duotone: bf.duotone,
                                     cust_geom: None,
-                                    shadow: None,
-                                    inner_shadow: None,
-                                    glow: None,
-                                    soft_edge: None,
-                                    reflection: None,
-                                    scene3d: None,
-                                    sp3d: None,
+                                    shadow,
+                                    inner_shadow,
+                                    glow,
+                                    soft_edge,
+                                    reflection,
+                                    scene3d,
+                                    sp3d,
                                 }));
                                 return;
                             }
@@ -1703,22 +2286,29 @@ pub(crate) fn parse_sp_tree_node(
                     }
                 }
             }
-            if let Some(shape) = parse_shape(node, lph, theme, rels, slide_dir, group_fill, zip) {
+            if let Some(shape) =
+                parse_shape(node, lph, theme_source, rels, slide_dir, group_fill, zip)
+            {
                 out.push(SlideElement::Shape(shape));
             }
         }
         "pic" => {
             if let Some(media) = parse_media(node, slide_dir, rels) {
                 out.push(SlideElement::Media(media));
-            } else if let Some(pic) = parse_picture(node, slide_dir, rels, theme, zip) {
+            } else if let Some(pic) = parse_picture(node, slide_dir, rels, theme_source, zip) {
                 out.push(SlideElement::Picture(pic));
             } else {
                 // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
-                let ph_idx = node
+                let ph_node = node
                     .descendants()
-                    .find(|n| n.is_element() && n.tag_name().name() == "ph")
+                    .find(|n| n.is_element() && n.tag_name().name() == "ph");
+                let ph_type = ph_node
+                    .and_then(|ph| attr(&ph, "type"))
+                    .unwrap_or_else(|| "body".to_owned());
+                let ph_idx = ph_node
                     .and_then(|ph| attr(&ph, "idx"))
-                    .and_then(|s| s.parse::<u32>().ok());
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|idx| *idx != u32::MAX);
                 if let Some(idx) = ph_idx {
                     if let Some(t) = lph.by_idx.get(&idx) {
                         let blip_fill = child(node, "blipFill");
@@ -1738,14 +2328,21 @@ pub(crate) fn parse_sp_tree_node(
                                     // p:pic's blip — prefer the vector original.
                                     let svg_image_path =
                                         blip.and_then(|b| svg_blip_path(b, slide_dir, rels, zip));
-                                    // §20.1.2.2.24 — placeholder pic border: the
-                                    // p:pic's own `<a:ln>`, else the inherited
-                                    // layout placeholder stroke.
-                                    let stroke =
-                                        match child(node, "spPr").and_then(|p| child(p, "ln")) {
-                                            Some(ln) => parse_stroke(ln, theme),
-                                            None => lph.by_idx_stroke.get(&idx).cloned(),
-                                        };
+                                    let PictureShapeProperties {
+                                        stroke,
+                                        shadow,
+                                        inner_shadow,
+                                        glow,
+                                        soft_edge,
+                                        reflection,
+                                        scene3d,
+                                        sp3d,
+                                    } = resolve_picture_shape_properties(
+                                        child(node, "spPr"),
+                                        child(node, "style"),
+                                        lph.lookup_picture_properties(&ph_type, Some(idx)),
+                                        theme_source,
+                                    );
                                     out.push(SlideElement::Picture(PictureElement {
                                         x: t.x,
                                         y: t.y,
@@ -1772,13 +2369,13 @@ pub(crate) fn parse_sp_tree_node(
                                             )
                                         }),
                                         cust_geom: None,
-                                        shadow: None,
-                                        inner_shadow: None,
-                                        glow: None,
-                                        soft_edge: None,
-                                        reflection: None,
-                                        scene3d: None,
-                                        sp3d: None,
+                                        shadow,
+                                        inner_shadow,
+                                        glow,
+                                        soft_edge,
+                                        reflection,
+                                        scene3d,
+                                        sp3d,
                                     }));
                                 }
                             }
@@ -1816,7 +2413,7 @@ pub(crate) fn parse_sp_tree_node(
                         rels,
                         smartart_drawings,
                         zip,
-                        theme,
+                        theme_source,
                         out,
                         skip_placeholders,
                         group_fill,
@@ -1857,7 +2454,7 @@ pub(crate) fn parse_sp_tree_node(
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl");
             if let Some(tbl_node) = tbl_node {
-                if let Some(table) = parse_table(tbl_node, &t, theme, rels, slide_dir, zip) {
+                if let Some(table) = parse_table(tbl_node, &t, theme_source, rels, slide_dir, zip) {
                     out.push(SlideElement::Table(table));
                 }
                 return;
@@ -1970,7 +2567,8 @@ pub(crate) fn parse_sp_tree_node(
                         // The preview pic's own `<a:xfrm>` is 0,0-relative (or
                         // absent), so the graphicFrame's `<p:xfrm>` is authoritative
                         // for placement. Parse the blip, then stamp gf geometry.
-                        if let Some(mut pic) = parse_picture(pic_node, slide_dir, rels, theme, zip)
+                        if let Some(mut pic) =
+                            parse_picture(pic_node, slide_dir, rels, theme_source, zip)
                         {
                             pic.x = t.x;
                             pic.y = t.y;
@@ -2043,7 +2641,7 @@ pub(crate) fn parse_sp_tree_node(
                         rels,
                         smartart_drawings,
                         zip,
-                        theme,
+                        theme_source,
                         out,
                         skip_placeholders,
                         child_group_fill.as_ref(),
@@ -2062,7 +2660,7 @@ pub(crate) fn parse_sp_tree_node(
             if skip_placeholders && is_placeholder(node) {
                 return;
             }
-            if let Some(shape) = parse_connector(node, theme, rels) {
+            if let Some(shape) = parse_connector(node, theme_source, rels) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -2251,9 +2849,10 @@ fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
 /// Parse a connector shape (p:cxnSp) as a ShapeElement with line geometry.
 fn parse_connector(
     node: roxmltree::Node<'_, '_>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     rels: &HashMap<String, String>,
 ) -> Option<ShapeElement> {
+    let theme = theme_source.colors();
     let sp_pr = child(node, "spPr")?;
     let xfrm = child(sp_pr, "xfrm")?;
     let t = parse_xfrm(xfrm);
@@ -2263,99 +2862,30 @@ fn parse_connector(
     let cnv = read_cnv_pr(node, rels);
 
     // Style-based stroke fallback. `p:style > a:lnRef idx="N"` references the
-    // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
-    // width from the theme map ("+lnRef-N") rather than hardcoding 9525.
+    // complete theme fmtScheme lnStyleLst entry N (1-based).
     let style_node = child(node, "style");
-    let style_stroke: Option<Stroke> = style_node.and_then(|s| child(s, "lnRef")).and_then(|lr| {
-        let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
-        if idx == 0 {
-            None
-        } else {
-            parse_color_node(lr, theme).map(|c| {
-                let width = theme
-                    .get(&format!("+lnRef-{}", idx))
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(9525);
-                Stroke {
-                    color: c,
-                    width,
-                    fill: None,
-                    dash_style: None,
-                    line_cap: None,
-                    head_end: None,
-                    tail_end: None,
-                    cmpd: None,
-                }
-            })
-        }
-    });
+    let style_stroke = parse_style_stroke(style_node, theme_source);
 
-    // Merge <a:ln> attributes onto style_stroke: <a:ln> commonly contains only
-    // arrow ends (headEnd/tailEnd) while the paint/width come from lnRef.
-    let ln_node = child(sp_pr, "ln");
-    let stroke: Option<Stroke> = match ln_node {
-        None => style_stroke,
-        Some(ln) => {
-            if child(ln, "noFill").is_some() {
-                None
-            } else {
-                let ln_width = attr_i64(&ln, "w");
-                let parsed = parse_stroke(ln, theme);
-                let ln_dash = child(ln, "prstDash")
-                    .and_then(|n| attr(&n, "val"))
-                    .filter(|v| v != "solid");
-                let ln_cap = attr(&ln, "cap").and_then(|cap| match cap.as_str() {
-                    "rnd" => Some("round".to_owned()),
-                    "sq" => Some("square".to_owned()),
-                    "flat" => Some("butt".to_owned()),
-                    _ => None,
-                });
-                let ln_head = child(ln, "headEnd")
-                    .map(parse_arrow_end)
-                    .filter(|a| a.kind != "none");
-                let ln_tail = child(ln, "tailEnd")
-                    .map(parse_arrow_end)
-                    .filter(|a| a.kind != "none");
-                let ln_cmpd = attr(&ln, "cmpd").filter(|v| v != "sng");
-                match (parsed, style_stroke) {
-                    (Some(authored), base) => Some(Stroke {
-                        color: authored.color,
-                        width: ln_width
-                            .unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
-                        fill: authored.fill,
-                        dash_style: authored
-                            .dash_style
-                            .or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
-                        line_cap: authored
-                            .line_cap
-                            .or_else(|| base.as_ref().and_then(|s| s.line_cap.clone())),
-                        head_end: authored
-                            .head_end
-                            .or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
-                        tail_end: authored
-                            .tail_end
-                            .or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
-                        cmpd: authored
-                            .cmpd
-                            .or_else(|| base.as_ref().and_then(|s| s.cmpd.clone())),
-                    }),
-                    (None, Some(base)) => Some(Stroke {
-                        color: base.color,
-                        width: ln_width.unwrap_or(base.width),
-                        fill: base.fill,
-                        dash_style: ln_dash.or(base.dash_style),
-                        line_cap: ln_cap.or(base.line_cap),
-                        head_end: ln_head.or(base.head_end),
-                        tail_end: ln_tail.or(base.tail_end),
-                        cmpd: ln_cmpd.or(base.cmpd),
-                    }),
-                    (None, None) => None,
-                }
-            }
-        }
+    let stroke = merge_local_stroke(child(sp_pr, "ln"), style_stroke, theme);
+
+    let style_effects = style_node
+        .and_then(|style| child(style, "effectRef"))
+        .map(|effect_ref| parse_style_matrix_effects(effect_ref, theme))
+        .unwrap_or_default();
+    let style_scene3d = style_effects.scene3d;
+    let style_sp3d = style_effects.sp3d;
+    let local_effect_node = child(sp_pr, "effectLst").or_else(|| child(sp_pr, "effectDag"));
+    let EffectLst {
+        shadow,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
+    } = if local_effect_node.is_some() {
+        parse_effect_lst(local_effect_node, theme)
+    } else {
+        style_effects.effects
     };
-
-    let shadow = child(sp_pr, "effectLst").and_then(|n| parse_shadow(n, theme));
 
     let cy = if t.cy == 0 { 1 } else { t.cy };
 
@@ -2425,10 +2955,10 @@ fn parse_connector(
         adj7: None,
         adj8: None,
         shadow,
-        inner_shadow: None,
-        glow: None,
-        soft_edge: None,
-        reflection: None,
+        inner_shadow,
+        glow,
+        soft_edge,
+        reflection,
         id: cnv.id,
         name: cnv.name,
         hyperlink: cnv.hyperlink,
@@ -2436,9 +2966,496 @@ fn parse_connector(
         placeholder_type: None,
         placeholder_idx: None,
         text_rect: None,
-        scene3d: parse_scene3d(sp_pr),
-        sp3d: parse_sp3d(sp_pr),
+        scene3d: parse_scene3d(sp_pr).or(style_scene3d),
+        sp3d: parse_sp3d(sp_pr, theme).or(style_sp3d),
     })
+}
+
+#[cfg(test)]
+mod style_ref_tests {
+    use super::*;
+    use crate::master::LayoutPlaceholders;
+    use crate::theme::PptxTheme;
+    use std::io::Cursor;
+
+    fn empty_zip() -> PptxZip {
+        let mut bytes = Vec::new();
+        {
+            let writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer.finish().unwrap();
+        }
+        PptxZip::new(Cursor::new(bytes)).unwrap()
+    }
+
+    #[test]
+    fn partial_shape_line_and_effect_refs_inherit_theme_styles() {
+        let theme = PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Regression">
+                  <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+                  <a:accent1><a:srgbClr val="4F81BD"/></a:accent1>
+                </a:clrScheme>
+                <a:fmtScheme name="Regression">
+                  <a:fillStyleLst/>
+                  <a:lnStyleLst>
+                    <a:ln w="9525"/><a:ln w="25400"/>
+                  <a:ln w="38100" cmpd="dbl"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                    <a:prstDash val="dash"/><a:headEnd type="triangle"/>
+                  </a:ln>
+                  </a:lnStyleLst>
+                  <a:effectStyleLst>
+                    <a:effectStyle><a:effectLst>
+                      <a:outerShdw blurRad="40000" dist="23000" dir="5400000">
+                        <a:schemeClr val="phClr"><a:alpha val="35000"/></a:schemeClr>
+                      </a:outerShdw>
+                    </a:effectLst>
+                      <a:scene3d><a:camera prst="isometricLeftUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                      <a:sp3d prstMaterial="matte"><a:bevelT w="12700" h="6350"/></a:sp3d>
+                    </a:effectStyle>
+                  </a:effectStyleLst>
+                  <a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:nvSpPr><p:cNvPr id="1" name="Styled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr>
+                <a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                <a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
+                <a:ln w="44444" cmpd="sng"><a:prstDash val="solid"/><a:headEnd type="none"/><a:tailEnd type="none"/></a:ln>
+                <a:effectLst/>
+              </p:spPr>
+              <p:style>
+                <a:lnRef idx="3"><a:schemeClr val="lt1"/></a:lnRef>
+                <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>
+                <a:effectRef idx="1"><a:schemeClr val="accent1"/></a:effectRef>
+                <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>
+              </p:style>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+
+        let shape = parse_shape(
+            doc.root_element(),
+            &LayoutPlaceholders::default(),
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .unwrap();
+
+        let stroke = shape.stroke.expect("theme line must survive partial a:ln");
+        assert_eq!(stroke.color, "FFFFFF");
+        assert_eq!(stroke.width, 44444, "local width overrides styled paint");
+        assert_eq!(stroke.dash_style, None, "explicit solid clears theme dash");
+        assert!(
+            stroke.head_end.is_none(),
+            "explicit none clears theme arrow"
+        );
+        assert_eq!(
+            stroke.cmpd, None,
+            "explicit single clears theme compound line"
+        );
+        assert!(
+            shape.shadow.is_none(),
+            "an authored effectLst replaces the theme effect component"
+        );
+        assert_eq!(
+            shape
+                .scene3d
+                .as_ref()
+                .map(|scene| scene.camera.prst.as_str()),
+            Some("isometricLeftUp"),
+            "effectRef retains the theme scene3d component"
+        );
+        assert_eq!(
+            shape
+                .sp3d
+                .as_ref()
+                .map(|surface| surface.prst_material.as_str()),
+            Some("matte"),
+            "effectRef retains the theme sp3d component"
+        );
+    }
+
+    #[test]
+    fn fixed_theme_line_color_does_not_require_a_color_on_ln_ref() {
+        let theme = PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Test"><a:accent1><a:srgbClr val="123456"/></a:accent1></a:clrScheme>
+                <a:fmtScheme name="Test"><a:fillStyleLst/><a:lnStyleLst>
+                  <a:ln w="19050" cap="rnd" algn="in"><a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
+                    <a:custDash><a:ds d="125000" sp="75000"/></a:custDash><a:miter lim="800000"/>
+                  </a:ln>
+                </a:lnStyleLst><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        );
+        let style = roxmltree::Document::parse(
+            r#"<p:style xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                  <a:lnRef idx="1"/>
+                </p:style>"#,
+        )
+        .unwrap();
+
+        let stroke = parse_style_stroke(Some(style.root_element()), &theme)
+            .expect("fixed recipe color should resolve");
+        assert_eq!(stroke.color, "123456");
+        assert_eq!(stroke.width, 19050);
+        assert_eq!(stroke.line_cap.as_deref(), Some("round"));
+        assert_eq!(stroke.dash_style, None);
+        assert_eq!(stroke.custom_dash.len(), 1);
+        assert!((stroke.custom_dash[0].dash - 1.25).abs() < f64::EPSILON);
+        assert!((stroke.custom_dash[0].space - 0.75).abs() < f64::EPSILON);
+        assert_eq!(stroke.line_join.as_deref(), Some("miter"));
+        assert_eq!(stroke.miter_limit, Some(8.0));
+        assert_eq!(stroke.alignment.as_deref(), Some("in"));
+    }
+
+    #[test]
+    fn slide_style_presence_replaces_placeholder_fill_and_line_including_no_style() {
+        let theme = PptxTheme::default();
+        let mut placeholders = LayoutPlaceholders::default();
+        placeholders.by_idx_fill.insert(
+            7,
+            Fill::Solid {
+                color: "AABBCC".to_owned(),
+            },
+        );
+        placeholders.by_idx_stroke.insert(
+            7,
+            Stroke {
+                color: "DDEEFF".to_owned(),
+                width: 12700,
+                fill: None,
+                dash_style: None,
+                custom_dash: Vec::new(),
+                line_cap: None,
+                line_join: None,
+                miter_limit: None,
+                alignment: None,
+                head_end: None,
+                tail_end: None,
+                cmpd: None,
+            },
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:nvSpPr><p:cNvPr id="1" name="Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="7"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx="0"/><a:fillRef idx="0"/><a:effectRef idx="0"/><a:fontRef idx="minor"/></p:style></p:sp>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+        let shape = parse_shape(
+            doc.root_element(),
+            &placeholders,
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("shape");
+
+        assert!(shape.stroke.is_none());
+        assert!(matches!(shape.fill, Some(Fill::None)));
+    }
+
+    #[test]
+    fn table_cell_projects_tcpr_vertical_text_and_margins_into_the_text_body() {
+        let doc = roxmltree::Document::parse(
+            r#"<a:tc xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Vertical label</a:t></a:r></a:p></a:txBody>
+              <a:tcPr vert="vert270" anchor="ctr" marL="100" marT="200" marR="300" marB="400"/>
+            </a:tc>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+        let cell = parse_table_cell(
+            doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "ppt/slides",
+            &mut zip,
+        );
+        let body = cell.text_body.expect("table cell text body");
+        assert_eq!(body.vert, "vert270");
+        assert_eq!(body.vertical_anchor, "ctr");
+        assert_eq!(
+            (body.l_ins, body.t_ins, body.r_ins, body.b_ins),
+            (100, 200, 300, 400)
+        );
+    }
+}
+
+#[cfg(test)]
+mod picture_property_resolution_tests {
+    use super::*;
+    use crate::master::{InheritedBlipFill, LayoutPlaceholders};
+    use std::io::{Cursor, Write};
+
+    fn tiny_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        bytes.extend_from_slice(&[0, 0, 0, 13]);
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    fn image_zip() -> PptxZip {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer
+                .start_file(
+                    "ppt/media/image1.png",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(&tiny_png()).unwrap();
+            writer.finish().unwrap();
+        }
+        PptxZip::new(Cursor::new(bytes)).unwrap()
+    }
+
+    fn theme_with_picture_style() -> crate::theme::PptxTheme {
+        crate::theme::PptxTheme::from_xml(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:themeElements>
+                <a:clrScheme name="Test"><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1></a:clrScheme>
+                <a:fmtScheme name="Test">
+                  <a:fillStyleLst/>
+                  <a:lnStyleLst><a:ln w="22222"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>
+                  <a:effectStyleLst><a:effectStyle>
+                    <a:effectLst><a:outerShdw blurRad="100" dist="200" dir="0"><a:srgbClr val="112233"/></a:outerShdw></a:effectLst>
+                    <a:scene3d><a:camera prst="isometricLeftUp"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                    <a:sp3d prstMaterial="matte"/>
+                  </a:effectStyle></a:effectStyleLst>
+                  <a:bgFillStyleLst/>
+                </a:fmtScheme>
+              </a:themeElements>
+            </a:theme>"#,
+        )
+    }
+
+    fn run_tree_child(
+        xml: &str,
+        placeholders: &LayoutPlaceholders,
+        theme: &(impl PptxThemeSource + ?Sized),
+        zip: &mut PptxZip,
+    ) -> PictureElement {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut out = Vec::new();
+        let rels = HashMap::from([("rIdImg".to_owned(), "../media/image1.png".to_owned())]);
+        parse_sp_tree_node(
+            doc.root_element(),
+            placeholders,
+            "ppt/slides",
+            &rels,
+            &HashMap::new(),
+            zip,
+            theme,
+            &mut out,
+            false,
+            None,
+            DepthGuard::root(),
+        );
+        let SlideElement::Picture(picture) = out.pop().expect("picture output") else {
+            panic!("expected PictureElement")
+        };
+        picture
+    }
+
+    fn assert_theme_properties(picture: &PictureElement) {
+        assert_eq!(
+            picture.stroke.as_ref().map(|stroke| stroke.width),
+            Some(22_222)
+        );
+        assert_eq!(picture.shadow.as_ref().map(|shadow| shadow.dist), Some(200));
+        assert_eq!(
+            picture
+                .scene3d
+                .as_ref()
+                .map(|scene| scene.camera.prst.as_str()),
+            Some("isometricLeftUp")
+        );
+        assert_eq!(
+            picture
+                .sp3d
+                .as_ref()
+                .map(|surface| surface.prst_material.as_str()),
+            Some("matte")
+        );
+    }
+
+    #[test]
+    fn normal_picture_and_blip_filled_shape_share_style_component_resolution() {
+        let theme = theme_with_picture_style();
+        let mut zip = image_zip();
+        let ordinary = run_tree_child(
+            r#"<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:nvPicPr><p:cNvPr id="1" name="Picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+              <p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+              <p:style><a:lnRef idx="1"><a:srgbClr val="FFFFFF"/></a:lnRef>
+                <a:effectRef idx="1"><a:srgbClr val="FFFFFF"/></a:effectRef></p:style>
+            </p:pic>"#,
+            &LayoutPlaceholders::default(),
+            &theme,
+            &mut zip,
+        );
+        assert_theme_properties(&ordinary);
+
+        let mut zip = image_zip();
+        let blip_shape = run_tree_child(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:nvSpPr><p:cNvPr id="2" name="Blip shape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm>
+                <a:blipFill><a:blip r:embed="rIdImg"/></a:blipFill></p:spPr>
+              <p:style><a:lnRef idx="1"><a:srgbClr val="FFFFFF"/></a:lnRef>
+                <a:effectRef idx="1"><a:srgbClr val="FFFFFF"/></a:effectRef></p:style>
+            </p:sp>"#,
+            &LayoutPlaceholders::default(),
+            &theme,
+            &mut zip,
+        );
+        assert_theme_properties(&blip_shape);
+    }
+
+    #[test]
+    fn inherited_blip_shape_and_transformless_picture_retain_layout_effects() {
+        let property_xml = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:spPr><a:ln w="33333"><a:solidFill><a:srgbClr val="445566"/></a:solidFill></a:ln>
+                <a:effectLst><a:outerShdw blurRad="500" dist="700" dir="0"><a:srgbClr val="112233"/></a:outerShdw></a:effectLst>
+                <a:scene3d><a:camera prst="perspectiveFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                <a:sp3d prstMaterial="plastic"/>
+              </p:spPr>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let properties = resolve_picture_shape_properties(
+            child(property_xml.root_element(), "spPr"),
+            None,
+            None,
+            &HashMap::new(),
+        );
+        let transform = Transform {
+            cx: 1000,
+            cy: 1000,
+            ..Default::default()
+        };
+        let inherited_blip = InheritedBlipFill {
+            image_path: "ppt/media/image1.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            src_rect: None,
+            alpha: None,
+            duotone: None,
+        };
+        let mut placeholders = LayoutPlaceholders::default();
+        placeholders.by_idx.insert(9, transform);
+        placeholders.by_idx_blip_fill.insert(9, inherited_blip);
+        placeholders.by_idx_picture_properties.insert(9, properties);
+
+        let assert_inherited = |picture: &PictureElement| {
+            assert_eq!(
+                picture.stroke.as_ref().map(|stroke| stroke.width),
+                Some(33_333)
+            );
+            assert_eq!(picture.shadow.as_ref().map(|shadow| shadow.dist), Some(700));
+            assert_eq!(
+                picture
+                    .scene3d
+                    .as_ref()
+                    .map(|scene| scene.camera.prst.as_str()),
+                Some("perspectiveFront")
+            );
+            assert_eq!(
+                picture
+                    .sp3d
+                    .as_ref()
+                    .map(|surface| surface.prst_material.as_str()),
+                Some("plastic")
+            );
+        };
+
+        let mut zip = image_zip();
+        let inherited_shape = run_tree_child(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:nvSpPr><p:cNvPr id="3" name="Inherited"/><p:cNvSpPr/><p:nvPr><p:ph type="pic" idx="9"/></p:nvPr></p:nvSpPr>
+              <p:spPr/>
+            </p:sp>"#,
+            &placeholders,
+            &HashMap::new(),
+            &mut zip,
+        );
+        assert_inherited(&inherited_shape);
+
+        let mut zip = image_zip();
+        let placeholder_picture = run_tree_child(
+            r#"<p:pic xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:nvPicPr><p:cNvPr id="4" name="Placeholder"/><p:cNvPicPr/><p:nvPr><p:ph type="pic" idx="9"/></p:nvPr></p:nvPicPr>
+              <p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill><p:spPr/>
+            </p:pic>"#,
+            &placeholders,
+            &HashMap::new(),
+            &mut zip,
+        );
+        assert_inherited(&placeholder_picture);
+    }
+
+    #[test]
+    fn explicit_effect_ref_clears_inherited_3d_components() {
+        let inherited_xml = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:spPr><a:scene3d><a:camera prst="perspectiveFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>
+                <a:sp3d prstMaterial="plastic"/></p:spPr>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let inherited = resolve_picture_shape_properties(
+            child(inherited_xml.root_element(), "spPr"),
+            None,
+            None,
+            &HashMap::new(),
+        );
+        let slide_xml = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:spPr/><p:style><a:effectRef idx="0"/></p:style>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let resolved = resolve_picture_shape_properties(
+            child(slide_xml.root_element(), "spPr"),
+            child(slide_xml.root_element(), "style"),
+            Some(inherited),
+            &HashMap::new(),
+        );
+        assert!(resolved.scene3d.is_none());
+        assert!(resolved.sp3d.is_none());
+    }
 }
 
 #[cfg(test)]

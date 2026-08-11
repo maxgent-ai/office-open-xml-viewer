@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 /**
- * Acceptance test for the slide-6 sp3d bevel ring (private/sample-11.pptx, the
+ * Acceptance test for the slide-6 sp3d bevel ring (private/sample-4.pptx, the
  * tilted-ellipse photo with a 15 pt a:ln beige border, bevelT hardEdge,
  * extrusionH and outerShdw under a perspectiveFront camera).
  *
@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
  * apex. The defect exists at every scale but its pixel size grows with the
  * render scale, which is why small-canvas verifications kept missing it.
  *
- * Ground truth (sample-11.pdf p6): the ring is a CONTINUOUS pale-beige band of
+ * Ground truth (sample-4.pdf p6): the ring is a CONTINUOUS pale-beige band of
  * the FULL border width on every apex — a soft outer shadow outside it, then
  * the bevel-lit beige band straddling the silhouette, then the photo, with NO
  * white interruption, no straight cut, and no saturated-white lit lip.
@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path';
  * 10 px loss inside the shadow falloff, dpr2 makes it a visible cut.
  */
 
-const SAMPLE = 'private/sample-11';
+const SAMPLE = 'private/sample-4';
 const SLIDE_INDEX = 5; // PDF p6, 0-based
 
 // EMU geometry of the deck (ppt/presentation.xml sldSz) and the ring border

@@ -764,6 +764,7 @@ export type PathCmd =
   | { cmd: 'moveTo'; x: number; y: number }
   | { cmd: 'lineTo'; x: number; y: number }
   | { cmd: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+  | { cmd: 'quadBezTo'; x1: number; y1: number; x: number; y: number }
   | { cmd: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 
@@ -841,10 +842,17 @@ export interface ShapeRun {
   fill: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
+  strokeFill?: ShapeStrokeFill | null;
   /** `<a:ln><a:prstDash val>` — ECMA-376 §20.1.8.48. Absent = solid. */
   strokeDash?: string | null;
+  /** `<a:ln><a:custDash>` segments as line-width multipliers. */
+  strokeCustomDash?: Array<{ dash: number; space: number }>;
   /** Normalized line cap: `butt` | `round` | `square`. */
   strokeCap?: 'butt' | 'round' | 'square' | null;
+  strokeJoin?: 'round' | 'bevel' | 'miter' | null;
+  strokeMiterLimit?: number | null;
+  strokeAlignment?: 'ctr' | 'in' | null;
+  strokeCompound?: string | null;
   /** `<a:ln><a:headEnd>` line-start decoration (ECMA-376 §20.1.8.3). */
   headEnd?: LineEnd | null;
   /** `<a:ln><a:tailEnd>` line-end decoration (ECMA-376 §20.1.8.3). */
@@ -1043,7 +1051,12 @@ export interface ShapeText {
 
 export type ShapeFill =
   | { fillType: 'solid'; color: string }
-  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string }
+  | {
+      fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string;
+      scaled?: boolean; path?: string; fillToRect?: FillRect; tileRect?: FillRect;
+      flip?: string; rotWithShape?: boolean;
+    }
+  | { fillType: 'pattern'; fg: string; bg: string; preset: string }
   | {
       /** ECMA-376 §20.1.8.14 picture fill on a DrawingML shape. */
       fillType: 'image';
@@ -1058,6 +1071,14 @@ export type ShapeFill =
       alpha?: number;
       duotone?: Duotone;
     };
+
+export type ShapeStrokeFill =
+  | {
+      fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string;
+      scaled?: boolean; path?: string; fillToRect?: FillRect; tileRect?: FillRect;
+      flip?: string; rotWithShape?: boolean;
+    }
+  | { fillType: 'pattern'; fg: string; bg: string; preset: string };
 
 export interface GradientStop {
   /** 0.0–1.0 */

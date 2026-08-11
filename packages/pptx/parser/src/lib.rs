@@ -6344,6 +6344,11 @@ mod tests {
             Some(false) => r#" showMasterSp="0""#.to_string(),
             None => String::new(),
         };
+        let layout_shape = if include_layout_and_slide_shapes {
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="20" name="LayoutBand"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="300000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
+        } else {
+            ""
+        };
         let slide_shape = if include_layout_and_slide_shapes {
             r#"<p:sp><p:nvSpPr><p:cNvPr id="30" name="SlideShape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="500000"/><a:ext cx="1000000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:sp>"#
         } else {
@@ -6414,15 +6419,6 @@ mod tests {
   <Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
 </Relationships>"#;
 
-        let layout_shape = if include_layout_and_slide_shapes {
-            r#"<p:sp>
-      <p:nvSpPr><p:cNvPr id="7" name="LayoutDecoration"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
-      <p:spPr><a:xfrm><a:off x="0" y="200000"/><a:ext cx="1000000" cy="200000"/></a:xfrm>
-        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
-    </p:sp>"#
-        } else {
-            ""
-        };
         let layout_xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"

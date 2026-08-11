@@ -49,13 +49,41 @@ function arrowEnd(end: ShapeRun['headEnd']): ArrowEnd | undefined {
   return end ? { type: end.type, w: end.w, len: end.len } : undefined;
 }
 
+function strokeFill(fill: DeepReadonly<ShapeRun['strokeFill']>): Stroke['fill'] | undefined {
+  if (!fill) return undefined;
+  if (fill.fillType === 'gradient') {
+    return {
+      fillType: 'gradient',
+      stops: fill.stops.map((stop) => ({ position: stop.position, color: stop.color })),
+      angle: fill.angle,
+      gradType: fill.gradType,
+      ...(fill.scaled === undefined ? {} : { scaled: fill.scaled }),
+      ...(fill.path === undefined ? {} : { path: fill.path }),
+      ...(fill.fillToRect === undefined ? {} : { fillToRect: { ...fill.fillToRect } }),
+      ...(fill.tileRect === undefined ? {} : { tileRect: { ...fill.tileRect } }),
+      ...(fill.flip === undefined ? {} : { flip: fill.flip }),
+      ...(fill.rotWithShape === undefined ? {} : { rotWithShape: fill.rotWithShape }),
+    };
+  }
+  return { fillType: 'pattern', fg: fill.fg, bg: fill.bg, preset: fill.preset };
+}
+
 function shapeStroke(shape: DeepReadonly<ShapeRun>): Stroke | null {
   if (!shape.stroke || !shape.strokeWidth || shape.strokeWidth <= 0) return null;
+  const fill = strokeFill(shape.strokeFill);
   return {
     color: shape.stroke,
     width: shape.strokeWidth,
+    ...(fill ? { fill } : {}),
     ...(shape.strokeDash ? { dashStyle: shape.strokeDash } : {}),
+    ...(shape.strokeCustomDash?.length ? { customDash: shape.strokeCustomDash } : {}),
     ...(shape.strokeCap ? { lineCap: shape.strokeCap } : {}),
+    ...(shape.strokeJoin ? { lineJoin: shape.strokeJoin } : {}),
+    ...(shape.strokeMiterLimit !== undefined && shape.strokeMiterLimit !== null
+      ? { miterLimit: shape.strokeMiterLimit }
+      : {}),
+    ...(shape.strokeAlignment ? { alignment: shape.strokeAlignment } : {}),
+    ...(shape.strokeCompound ? { cmpd: shape.strokeCompound } : {}),
     ...(arrowEnd(shape.headEnd) ? { headEnd: arrowEnd(shape.headEnd) } : {}),
     ...(arrowEnd(shape.tailEnd) ? { tailEnd: arrowEnd(shape.tailEnd) } : {}),
   };

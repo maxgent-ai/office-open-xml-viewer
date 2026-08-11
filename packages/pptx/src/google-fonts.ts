@@ -34,6 +34,19 @@ function* textBodyRuns(body: TextBody | null | undefined): Generator<string> {
   }
 }
 
+/** Yield every explicitly resolved family carried by one rendered text body. */
+function* textBodyFontFamilies(body: TextBody | null | undefined): Generator<string> {
+  for (const paragraph of body?.paragraphs ?? []) {
+    if (paragraph.defFontFamily) yield paragraph.defFontFamily;
+    for (const run of paragraph.runs) {
+      if (run.type !== 'text') continue;
+      if (run.fontFamily) yield run.fontFamily;
+      if (run.fontFamilyEa) yield run.fontFamilyEa;
+      if (run.fontFamilySym) yield run.fontFamilySym;
+    }
+  }
+}
+
 /** Yield every rendered text string in the presentation: shape text, table
  *  cell text and chart labels across all slides. Speaker notes and comments are
  *  not painted on the slide, so they are excluded (the renderer ignores them). */
@@ -56,22 +69,38 @@ export function* pptxSlideTextRuns(slide: Slide): Generator<string> {
 /** Incremental PPTX adapter over core's single script-classification source. */
 export class PptxFontPreloadAccumulator {
   private readonly scripts: ScriptPreloadAccumulator;
+  private readonly families: Set<string>;
 
   constructor(
     private readonly majorFont: string | null,
     private readonly minorFont: string | null,
     scripts?: ScriptPreloadAccumulator,
+    families?: Set<string>,
   ) {
     const cjkLang = classifyCjkFont(majorFont) ?? classifyCjkFont(minorFont) ?? null;
     this.scripts = scripts ?? new ScriptPreloadAccumulator(cjkLang);
+    this.families = families ?? new Set();
+    if (majorFont) this.families.add(majorFont);
+    if (minorFont) this.families.add(minorFont);
   }
 
   addSlide(slide: Slide): void {
     this.scripts.addText(pptxSlideTextRuns(slide));
+    for (const el of slide.elements as SlideElement[]) {
+      if (el.type === 'shape') {
+        for (const family of textBodyFontFamilies(el.textBody)) this.families.add(family);
+      } else if (el.type === 'table') {
+        for (const row of el.rows) {
+          for (const cell of row.cells) {
+            for (const family of textBodyFontFamilies(cell.textBody)) this.families.add(family);
+          }
+        }
+      }
+    }
   }
 
   names(): (string | null)[] {
-    return [this.majorFont, this.minorFont, ...this.scripts.names()];
+    return [...this.families, ...this.scripts.names()];
   }
 
   withSlide(slide: Slide): PptxFontPreloadAccumulator {
@@ -79,6 +108,7 @@ export class PptxFontPreloadAccumulator {
       this.majorFont,
       this.minorFont,
       this.scripts.clone(),
+      new Set(this.families),
     );
     candidate.addSlide(slide);
     return candidate;

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { drawProjected } from './scene3d-draw';
+import { drawProjected, projectQuadPoint } from './scene3d-draw';
 import { computeScene3dQuad, type Vec2 } from './scene3d-camera';
 
 /**
@@ -244,5 +244,21 @@ describe('drawProjected', () => {
       expect(d.sx + d.sw).toBeLessThanOrEqual(200 + 1e-6);
       expect(d.sy + d.sh).toBeLessThanOrEqual(150 + 1e-6);
     }
+  });
+});
+
+describe('projectQuadPoint', () => {
+  it('maps authored edge anchors through the projective face instead of its AABB', () => {
+    const corners: [Vec2, Vec2, Vec2, Vec2] = [
+      { x: 20, y: 10 },
+      { x: 95, y: 30 },
+      { x: 80, y: 100 },
+      { x: 5, y: 75 },
+    ];
+    expect(projectQuadPoint(corners, 1, 0)).toEqual(corners[1]);
+    const center = projectQuadPoint(corners, 0.5, 0.5);
+    expect(center).not.toBeNull();
+    expect(center!.x).toBeGreaterThan(5);
+    expect(center!.x).toBeLessThan(95);
   });
 });

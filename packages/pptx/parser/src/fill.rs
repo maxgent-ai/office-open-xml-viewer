@@ -5,10 +5,13 @@
 //! Shared XML helpers (`child`, `children_vec`, `attr`, `attr_r`, `attr_i64`,
 //! `attr_f64`) stay in `lib.rs` and are imported here.
 
-use crate::theme::PptxSchemeResolver;
+use crate::theme::{
+    theme_relationship_path, PptxRawSchemeResolver, PptxSchemeResolver, PptxThemeSource,
+};
 use crate::types::*;
-use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec};
+use crate::{attr, attr_f64, attr_i64, attr_r, child, parse_preflighted_pptx_xml};
 use ooxml_common::blip::{mime_from_ext, parse_blip_duotone};
+use ooxml_common::color::ThemeResolver;
 use std::collections::HashMap;
 
 /// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node
@@ -57,12 +60,31 @@ pub(crate) fn parse_fill(
     node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Fill> {
+    parse_fill_tint(node, theme, ooxml_common::color::TintMode::PowerPointLinear)
+}
+
+/// Parse DrawingML fill properties with the caller-selected tint semantics.
+/// Presentation fills use PowerPoint's linear-light tint interpolation. A few
+/// specialized callers, such as table styles, select their own tint semantics.
+fn parse_fill_tint(
+    node: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Fill> {
+    parse_fill_with_resolver(node, &PptxSchemeResolver { theme }, tint_mode)
+}
+
+fn parse_fill_with_resolver<R: ThemeResolver + ?Sized>(
+    node: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Fill> {
     for c in node.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "solidFill" => {
                 // If the color resolves, use it. If not (e.g. phClr with no theme slot),
                 // return None so the caller can fall back to the shape style color.
-                if let Some(color) = parse_color_node(c, theme) {
+                if let Some(color) = ooxml_common::color::parse_color_node(c, resolver, tint_mode) {
                     return Some(Fill::Solid { color });
                 }
                 // Unresolvable → don't default to black; let fallback logic handle it
@@ -73,25 +95,23 @@ pub(crate) fn parse_fill(
                 // Shared parse (ooxml_common::fill); colors resolve with pptx's
                 // PowerPointLinear tint via PptxSchemeResolver.
                 let ooxml_common::fill::PatternFill { fg, bg, preset } =
-                    ooxml_common::fill::parse_patt_fill(
-                        c,
-                        &PptxSchemeResolver { theme },
-                        ooxml_common::color::TintMode::PowerPointLinear,
-                    );
+                    ooxml_common::fill::parse_patt_fill(c, resolver, tint_mode);
                 return Some(Fill::Pattern { fg, bg, preset });
             }
             "gradFill" => {
                 // Shared parse (ooxml_common::fill). Returns None when there are
                 // no resolvable stops, so we keep scanning sibling fill elements.
-                if let Some(g) = ooxml_common::fill::parse_grad_fill(
-                    c,
-                    &PptxSchemeResolver { theme },
-                    ooxml_common::color::TintMode::PowerPointLinear,
-                ) {
+                if let Some(g) = ooxml_common::fill::parse_grad_fill(c, resolver, tint_mode) {
                     return Some(Fill::Gradient {
                         stops: g.stops,
                         angle: g.angle,
                         grad_type: g.grad_type,
+                        scaled: g.scaled,
+                        path: g.path,
+                        fill_to_rect: g.fill_to_rect,
+                        tile_rect: g.tile_rect,
+                        flip: g.flip,
+                        rot_with_shape: g.rot_with_shape,
                     });
                 }
             }
@@ -99,6 +119,107 @@ pub(crate) fn parse_fill(
         }
     }
     None
+}
+
+/// Resolve a fill/background style reference through the structured shared
+/// theme model. Fixed scheme colors are read from the authored scheme while
+/// only `phClr` is substituted from the reference's effective mapped color.
+pub(crate) fn parse_style_matrix_fill_from_source(
+    style_ref: roxmltree::Node<'_, '_>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
+) -> Option<Fill> {
+    use ooxml_common::color::{StyleMatrixColorResolver, TintMode};
+    use ooxml_common::theme::StyleMatrixLookup;
+
+    let idx = attr(&style_ref, "idx")?.parse::<usize>().ok()?;
+    let Some(format_scheme) = theme_source.format_scheme() else {
+        return parse_style_matrix_fill(style_ref, theme_source.colors(), false);
+    };
+    let entry = match format_scheme.lookup_fill_ref(idx) {
+        StyleMatrixLookup::NoStyle => return Some(Fill::None),
+        StyleMatrixLookup::Missing => return None,
+        StyleMatrixLookup::Entry(entry) => entry,
+    };
+    let entry_xml = entry.to_xml();
+    let document = roxmltree::Document::parse(&entry_xml).ok()?;
+    let theme = theme_source.colors();
+    let placeholder_color = parse_color_node_tint(style_ref, theme, TintMode::PowerPointLinear);
+    let raw_resolver = PptxRawSchemeResolver { theme };
+    let resolver = StyleMatrixColorResolver::new(&raw_resolver, placeholder_color.as_deref());
+    if let Some(blip_fill) = child(document.root_element(), "blipFill") {
+        let mut resolve_blip = |relationship_id: &str| {
+            theme_relationship_path(theme, relationship_id).map(str::to_owned)
+        };
+        if let Some(fill) =
+            parse_blip_fill_with_color_resolver(blip_fill, &resolver, &mut resolve_blip)
+        {
+            return Some(fill);
+        }
+    }
+    parse_fill_with_resolver(
+        document.root_element(),
+        &resolver,
+        TintMode::PowerPointLinear,
+    )
+}
+
+struct StyleMatrixSchemeResolver<'a> {
+    theme: &'a HashMap<String, String>,
+    placeholder_color: Option<&'a str>,
+}
+
+impl ThemeResolver for StyleMatrixSchemeResolver<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        if name == "phClr" {
+            return self.placeholder_color.map(str::to_owned);
+        }
+        PptxRawSchemeResolver { theme: self.theme }.resolve_scheme_color(name)
+    }
+}
+
+/// Resolve a shape `fillRef` or slide/master `bgRef` through the theme's format
+/// style matrix. `phClr` inside the selected style is substituted with the
+/// reference element's colour before its own transforms are applied.
+///
+/// ECMA-376 Part 1 §19.3.1.3: bgRef 1..999 indexes fillStyleLst, 1001+
+/// indexes bgFillStyleLst (1001 = first); 0 and 1000 mean no background.
+pub(crate) fn parse_style_matrix_fill(
+    style_ref: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+    _background: bool,
+) -> Option<Fill> {
+    use ooxml_common::color::TintMode::PowerPointLinear;
+
+    let idx = attr(&style_ref, "idx")?.parse::<u32>().ok()?;
+    // ECMA-376 §20.1.4.2.10 and §19.3.1.3 share one index space.
+    let key = match idx {
+        0 | 1000 => return Some(Fill::None),
+        1..=999 => format!("+fillStyle-{idx}"),
+        _ => format!("+bgFillStyle-{}", idx - 1000),
+    };
+    let fragment = theme.get(&key)?;
+
+    let placeholder_color = parse_color_node_tint(style_ref, theme, PowerPointLinear);
+
+    let wrapped = format!(
+        r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{fragment}</root>"#
+    );
+    let doc = parse_preflighted_pptx_xml(&wrapped).ok()?;
+    let resolver = StyleMatrixSchemeResolver {
+        theme,
+        placeholder_color: placeholder_color.as_deref(),
+    };
+    if let Some(blip_fill) = child(doc.root_element(), "blipFill") {
+        let mut resolve_blip = |relationship_id: &str| {
+            theme_relationship_path(theme, relationship_id).map(str::to_owned)
+        };
+        if let Some(fill) =
+            parse_blip_fill_with_color_resolver(blip_fill, &resolver, &mut resolve_blip)
+        {
+            return Some(fill);
+        }
+    }
+    parse_fill_with_resolver(doc.root_element(), &resolver, PowerPointLinear)
 }
 
 /// ECMA-376 §20.1.8.14 `a:blipFill` → `Fill::Image`. The `resolve_blip`
@@ -124,6 +245,17 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     theme: &HashMap<String, String>,
     resolve_blip: &mut F,
 ) -> Option<Fill> {
+    parse_blip_fill_with_color_resolver(blip_fill, &PptxSchemeResolver { theme }, resolve_blip)
+}
+
+fn parse_blip_fill_with_color_resolver<
+    R: ThemeResolver + ?Sized,
+    F: FnMut(&str) -> Option<String>,
+>(
+    blip_fill: roxmltree::Node<'_, '_>,
+    color_resolver: &R,
+    resolve_blip: &mut F,
+) -> Option<Fill> {
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
     let image_path = resolve_blip(&r_id)?;
     let mime_type = mime_from_ext(&image_path).to_owned();
@@ -132,7 +264,7 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     // linear tint (same call the `<p:pic>` paths use). `None` ⇒ no effect.
     let duotone = parse_blip_duotone(
         blip_fill,
-        &PptxSchemeResolver { theme },
+        color_resolver,
         ooxml_common::color::TintMode::PowerPointLinear,
     );
     // §20.1.8.58 tile takes precedence when present (stretch/tile are an
@@ -158,71 +290,118 @@ pub(crate) fn parse_blip_fill<F: FnMut(&str) -> Option<String>>(
     })
 }
 
-pub(crate) fn parse_arrow_end(node: roxmltree::Node<'_, '_>) -> ArrowEnd {
-    let kind = attr(&node, "type").unwrap_or_else(|| "none".to_owned());
-    let w = attr(&node, "w").unwrap_or_else(|| "med".to_owned());
-    let len = attr(&node, "len").unwrap_or_else(|| "med".to_owned());
-    ArrowEnd { kind, w, len }
+fn canvas_line_cap(cap: &str) -> Option<String> {
+    match cap {
+        "rnd" => Some("round".to_owned()),
+        "sq" => Some("square".to_owned()),
+        "flat" => Some("butt".to_owned()),
+        _ => None,
+    }
+}
+
+pub(crate) fn line_properties_to_stroke(
+    line: &ooxml_common::line::LineProperties,
+    fallback_color: Option<String>,
+) -> Option<Stroke> {
+    use ooxml_common::line::{LineDash, LineEnd, LineJoin, LinePaint};
+
+    let (color, fill) = match line.paint.as_ref()? {
+        LinePaint::NoFill => return None,
+        LinePaint::Solid { color } => (color.clone().or(fallback_color)?, None),
+        LinePaint::Gradient(Some(gradient)) => {
+            let color = gradient
+                .stops
+                .iter()
+                .rev()
+                .find(|stop| !stop.color.ends_with("00"))
+                .or_else(|| gradient.stops.last())?
+                .color
+                .clone();
+            (
+                color,
+                Some(Fill::Gradient {
+                    stops: gradient.stops.clone(),
+                    angle: gradient.angle,
+                    grad_type: gradient.grad_type.clone(),
+                    scaled: gradient.scaled,
+                    path: gradient.path.clone(),
+                    fill_to_rect: gradient.fill_to_rect.clone(),
+                    tile_rect: gradient.tile_rect.clone(),
+                    flip: gradient.flip.clone(),
+                    rot_with_shape: gradient.rot_with_shape,
+                }),
+            )
+        }
+        LinePaint::Gradient(None) => return None,
+        LinePaint::Pattern(pattern) => (
+            pattern.fg.clone(),
+            Some(Fill::Pattern {
+                fg: pattern.fg.clone(),
+                bg: pattern.bg.clone(),
+                preset: pattern.preset.clone(),
+            }),
+        ),
+    };
+    let dash_style = match line.dash.as_ref() {
+        Some(LineDash::Preset(Some(value))) if value != "solid" => Some(value.clone()),
+        _ => None,
+    };
+    let custom_dash = match line.dash.as_ref() {
+        Some(LineDash::Custom(stops)) => stops
+            .iter()
+            .map(|stop| StrokeDashSegment {
+                dash: stop.dash as f64 / 100_000.0,
+                space: stop.space as f64 / 100_000.0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let (line_join, miter_limit) = match line.join.as_ref() {
+        Some(LineJoin::Round) => (Some("round".to_owned()), None),
+        Some(LineJoin::Bevel) => (Some("bevel".to_owned()), None),
+        Some(LineJoin::Miter { limit }) => (
+            Some("miter".to_owned()),
+            limit.map(|value| value as f64 / 100_000.0),
+        ),
+        None => (None, None),
+    };
+    let arrow = |end: &LineEnd| {
+        let kind = end.kind.clone().unwrap_or_else(|| "none".to_owned());
+        (kind != "none").then(|| ArrowEnd {
+            kind,
+            w: end.width.clone().unwrap_or_else(|| "med".to_owned()),
+            len: end.length.clone().unwrap_or_else(|| "med".to_owned()),
+        })
+    };
+    Some(Stroke {
+        color,
+        width: line.width.unwrap_or(9525),
+        fill,
+        dash_style,
+        custom_dash,
+        line_cap: line.cap.as_deref().and_then(canvas_line_cap),
+        line_join,
+        miter_limit,
+        alignment: line
+            .alignment
+            .clone()
+            .filter(|value| matches!(value.as_str(), "ctr" | "in")),
+        head_end: line.head_end.as_ref().and_then(arrow),
+        tail_end: line.tail_end.as_ref().and_then(arrow),
+        cmpd: line.compound.clone().filter(|value| value != "sng"),
+    })
 }
 
 pub(crate) fn parse_stroke(
     ln_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Stroke> {
-    if child(ln_node, "noFill").is_some() {
-        return None;
-    }
-    let width = attr_i64(&ln_node, "w").unwrap_or(9525);
-    // CT_LineProperties uses EG_LineFillProperties (§20.1.8.38), so a line can
-    // carry the same solid/gradient/pattern paints as a shape. Keep a solid
-    // fallback colour for arrowheads and consumers that do not yet understand
-    // non-solid line paint.
-    let parsed_fill = parse_fill(ln_node, theme)?;
-    let color = match &parsed_fill {
-        Fill::Solid { color } => color.clone(),
-        Fill::Gradient { stops, .. } => stops
-            .iter()
-            .rev()
-            .find(|stop| !stop.color.ends_with("00"))
-            .or_else(|| stops.last())
-            .map(|stop| stop.color.clone())?,
-        Fill::Pattern { fg, .. } => fg.clone(),
-        Fill::None | Fill::Image { .. } => return None,
-    };
-    let fill = match parsed_fill {
-        Fill::Gradient { .. } | Fill::Pattern { .. } => Some(parsed_fill),
-        Fill::Solid { .. } => None,
-        Fill::None | Fill::Image { .. } => unreachable!(),
-    };
-    let dash_style = child(ln_node, "prstDash")
-        .and_then(|n| attr(&n, "val"))
-        .filter(|v| v != "solid");
-    let line_cap = attr(&ln_node, "cap").and_then(|cap| match cap.as_str() {
-        "rnd" => Some("round".to_owned()),
-        "sq" => Some("square".to_owned()),
-        "flat" => Some("butt".to_owned()),
-        _ => None,
-    });
-    // Arrow ends — only emit when type != "none"
-    let head_end = child(ln_node, "headEnd")
-        .map(parse_arrow_end)
-        .filter(|a| a.kind != "none");
-    let tail_end = child(ln_node, "tailEnd")
-        .map(parse_arrow_end)
-        .filter(|a| a.kind != "none");
-    // ECMA-376 §20.1.8.42 ST_CompoundLine. Default "sng" stays absent so the
-    // renderer keeps its single-stroke fast path.
-    let cmpd = attr(&ln_node, "cmpd").filter(|v| v != "sng");
-    Some(Stroke {
-        color,
-        width,
-        fill,
-        dash_style,
-        line_cap,
-        head_end,
-        tail_end,
-        cmpd,
-    })
+    let properties = ooxml_common::line::parse_line_properties(
+        ln_node,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    line_properties_to_stroke(&properties, None)
 }
 
 // ===========================
@@ -240,6 +419,7 @@ pub(crate) fn parse_shadow(
 /// Parse spPr > effectLst > innerShdw into a Shadow. ECMA-376 §20.1.8.21
 /// (CT_InnerShadowEffect) — same field shape as outerShdw, semantics differ
 /// at render time (cast inward).
+#[cfg(test)]
 pub(crate) fn parse_inner_shadow(
     effect_lst: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -253,11 +433,33 @@ pub(crate) fn parse_shadow_node(
     n: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Shadow> {
+    parse_shadow_node_with_resolver(
+        n,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_shadow_node_with_resolver<R: ThemeResolver + ?Sized>(
+    n: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Shadow> {
     let blur = attr_i64(&n, "blurRad").unwrap_or(0);
     let dist = attr_i64(&n, "dist").unwrap_or(0);
     let dir = attr_f64(&n, "dir").unwrap_or(0.0) / 60_000.0;
+    // CT_OuterShadowEffect (§20.1.8.45). These attributes do not exist on
+    // CT_InnerShadowEffect, so the shared reader keeps them optional.
+    let sx = attr_f64(&n, "sx").map(|value| value / 100_000.0);
+    let sy = attr_f64(&n, "sy").map(|value| value / 100_000.0);
+    let kx = attr_f64(&n, "kx").map(|value| value / 60_000.0);
+    let ky = attr_f64(&n, "ky").map(|value| value / 60_000.0);
+    let algn = attr(&n, "algn");
+    let rot_with_shape =
+        attr(&n, "rotWithShape").map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
 
-    let color_str = parse_color_node(n, theme).unwrap_or_else(|| "000000".to_owned());
+    let color_str = ooxml_common::color::parse_color_node(n, resolver, tint_mode)
+        .unwrap_or_else(|| "000000".to_owned());
     let (color, alpha) = if color_str.len() >= 8 {
         let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
         (color_str[..6].to_owned(), a)
@@ -271,18 +473,38 @@ pub(crate) fn parse_shadow_node(
         blur,
         dist,
         dir,
+        sx,
+        sy,
+        kx,
+        ky,
+        algn,
+        rot_with_shape,
     })
 }
 
 /// Parse spPr > effectLst > glow into a Glow effect — ECMA-376 §20.1.8.17
 /// (CT_GlowEffect): a coloured halo with a blur radius, no offset.
+#[cfg(test)]
 pub(crate) fn parse_glow(
     effect_lst: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Glow> {
     let g = child(effect_lst, "glow")?;
+    parse_glow_node_with_resolver(
+        g,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_glow_node_with_resolver<R: ThemeResolver + ?Sized>(
+    g: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Glow> {
     let radius = attr_i64(&g, "rad").unwrap_or(0);
-    let color_str = parse_color_node(g, theme).unwrap_or_else(|| "000000".to_owned());
+    let color_str = ooxml_common::color::parse_color_node(g, resolver, tint_mode)
+        .unwrap_or_else(|| "000000".to_owned());
     let (color, alpha) = if color_str.len() >= 8 {
         let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
         (color_str[..6].to_owned(), a)
@@ -328,6 +550,7 @@ pub(crate) fn parse_reflection(effect_lst: roxmltree::Node<'_, '_>) -> Option<Re
 /// siblings inside `CT_EffectList` — ECMA-376 §20.1.8.16. Used by both shapes
 /// (`p:sp`) and pictures (`p:pic`): `p:spPr` is `CT_ShapeProperties` in both
 /// cases (§19.3.1.37), so `effectLst` applies equally to images.
+#[derive(Default)]
 pub(crate) struct EffectLst {
     pub(crate) shadow: Option<Shadow>,
     pub(crate) inner_shadow: Option<Shadow>,
@@ -336,18 +559,103 @@ pub(crate) struct EffectLst {
     pub(crate) reflection: Option<Reflection>,
 }
 
+/// One entry in theme `effectStyleLst` (ECMA-376 §20.1.4.1.11).
+/// `scene3d` and `sp3d` are peers of the effect property choice and must not be
+/// discarded when a shape resolves `effectRef`.
+#[derive(Default)]
+pub(crate) struct StyleMatrixEffects {
+    pub(crate) effects: EffectLst,
+    pub(crate) scene3d: Option<Scene3d>,
+    pub(crate) sp3d: Option<Sp3d>,
+}
+
 /// Read every `effectLst` child shapes and pictures share. `effect_lst` is the
 /// optional `<a:effectLst>` node; missing nodes yield an all-`None` result.
 pub(crate) fn parse_effect_lst(
     effect_lst: Option<roxmltree::Node<'_, '_>>,
     theme: &HashMap<String, String>,
 ) -> EffectLst {
+    parse_effect_lst_with_resolver(
+        effect_lst,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_effect_lst_with_resolver<R: ThemeResolver + ?Sized>(
+    effect_lst: Option<roxmltree::Node<'_, '_>>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> EffectLst {
     EffectLst {
-        shadow: effect_lst.and_then(|n| parse_shadow(n, theme)),
-        inner_shadow: effect_lst.and_then(|n| parse_inner_shadow(n, theme)),
-        glow: effect_lst.and_then(|n| parse_glow(n, theme)),
+        shadow: effect_lst
+            .and_then(|node| child(node, "outerShdw"))
+            .and_then(|node| parse_shadow_node_with_resolver(node, resolver, tint_mode)),
+        inner_shadow: effect_lst
+            .and_then(|node| child(node, "innerShdw"))
+            .and_then(|node| parse_shadow_node_with_resolver(node, resolver, tint_mode)),
+        glow: effect_lst
+            .and_then(|node| child(node, "glow"))
+            .and_then(|node| parse_glow_node_with_resolver(node, resolver, tint_mode)),
         soft_edge: effect_lst.and_then(parse_soft_edge),
         reflection: effect_lst.and_then(parse_reflection),
+    }
+}
+
+/// Resolve `p:style/a:effectRef` through the theme format matrix.
+///
+/// `effectRef@idx` is one-based into `a:effectStyleLst`. Any `phClr` inside
+/// that effect style is supplied by the color child of the reference before
+/// the ordinary DrawingML transforms are applied.
+pub(crate) fn parse_style_matrix_effects(
+    effect_ref: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> StyleMatrixEffects {
+    let Some(idx) = attr(&effect_ref, "idx").and_then(|value| value.parse::<u32>().ok()) else {
+        return StyleMatrixEffects::default();
+    };
+    if idx == 0 {
+        return StyleMatrixEffects::default();
+    }
+    let Some(fragment) = theme.get(&format!("+effectStyle-{idx}")) else {
+        return StyleMatrixEffects::default();
+    };
+
+    let placeholder_color = parse_color_node_tint(
+        effect_ref,
+        theme,
+        ooxml_common::color::TintMode::PowerPointLinear,
+    );
+    let wrapped = format!(
+        r#"<root xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{fragment}</root>"#
+    );
+    let Ok(doc) = parse_preflighted_pptx_xml(&wrapped) else {
+        return StyleMatrixEffects::default();
+    };
+    let effect_style = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "effectStyle");
+    let effect_properties =
+        effect_style.and_then(|node| child(node, "effectLst").or_else(|| child(node, "effectDag")));
+    let resolver = StyleMatrixSchemeResolver {
+        theme,
+        placeholder_color: placeholder_color.as_deref(),
+    };
+    StyleMatrixEffects {
+        effects: parse_effect_lst_with_resolver(
+            effect_properties,
+            &resolver,
+            ooxml_common::color::TintMode::PowerPointLinear,
+        ),
+        scene3d: effect_style.and_then(parse_scene3d),
+        sp3d: effect_style.and_then(|node| {
+            parse_sp3d_with_resolver(
+                node,
+                &resolver,
+                ooxml_common::color::TintMode::PowerPointLinear,
+            )
+        }),
     }
 }
 
@@ -405,17 +713,33 @@ pub(crate) fn parse_bevel3d(bevel: roxmltree::Node<'_, '_>) -> Bevel3d {
 /// Parse `<a:sp3d>` (`CT_Shape3D`, ECMA-376 §20.1.5.12). Defaults follow the
 /// schema: z=0, extrusionH=0, contourW=0, prstMaterial="warmMatte". Parsed in
 /// full but not rendered in Phase A.
-pub(crate) fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
+pub(crate) fn parse_sp3d(
+    sppr: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Sp3d> {
+    parse_sp3d_with_resolver(
+        sppr,
+        &PptxSchemeResolver { theme },
+        ooxml_common::color::TintMode::PowerPointLinear,
+    )
+}
+
+fn parse_sp3d_with_resolver<R: ThemeResolver + ?Sized>(
+    sppr: roxmltree::Node<'_, '_>,
+    resolver: &R,
+    tint_mode: ooxml_common::color::TintMode,
+) -> Option<Sp3d> {
     let n = child(sppr, "sp3d")?;
-    // contourClr is colour-only here; pass an empty theme map because sp3d
-    // contour colours in practice are srgbClr (no theme lookup needed) and this
-    // parser has the theme threaded only into the line/fill paths.
-    let contour_clr = child(n, "contourClr").and_then(|c| parse_color_node(c, &HashMap::new()));
+    let contour_clr = child(n, "contourClr")
+        .and_then(|c| ooxml_common::color::parse_color_node(c, resolver, tint_mode));
+    let extrusion_clr = child(n, "extrusionClr")
+        .and_then(|c| ooxml_common::color::parse_color_node(c, resolver, tint_mode));
     Some(Sp3d {
         z: attr_i64(&n, "z").unwrap_or(0),
         extrusion_h: attr_i64(&n, "extrusionH").unwrap_or(0),
         contour_w: attr_i64(&n, "contourW").unwrap_or(0),
         contour_clr,
+        extrusion_clr,
         prst_material: attr(&n, "prstMaterial").unwrap_or_else(|| "warmMatte".into()),
         bevel_t: child(n, "bevelT").map(parse_bevel3d),
         bevel_b: child(n, "bevelB").map(parse_bevel3d),
@@ -426,80 +750,63 @@ pub(crate) fn parse_sp3d(sppr: roxmltree::Node<'_, '_>) -> Option<Sp3d> {
 //  Custom geometry parsing
 // ===========================
 
-/// Parse a single path command node; coordinates are normalised to [0,1].
-pub(crate) fn parse_path_cmd(
-    cmd_node: roxmltree::Node<'_, '_>,
-    path_w: f64,
-    path_h: f64,
-) -> Option<PathCmd> {
-    match cmd_node.tag_name().name() {
-        "moveTo" => {
-            let pt = child(cmd_node, "pt")?;
-            let x = attr_f64(&pt, "x")? / path_w;
-            let y = attr_f64(&pt, "y")? / path_h;
-            Some(PathCmd::MoveTo { x, y })
-        }
-        "lnTo" => {
-            let pt = child(cmd_node, "pt")?;
-            let x = attr_f64(&pt, "x")? / path_w;
-            let y = attr_f64(&pt, "y")? / path_h;
-            Some(PathCmd::LineTo { x, y })
-        }
-        "cubicBezTo" => {
-            let pts: Vec<_> = children_vec(cmd_node, "pt");
-            if pts.len() < 3 {
-                return None;
-            }
-            let x1 = attr_f64(&pts[0], "x")? / path_w;
-            let y1 = attr_f64(&pts[0], "y")? / path_h;
-            let x2 = attr_f64(&pts[1], "x")? / path_w;
-            let y2 = attr_f64(&pts[1], "y")? / path_h;
-            let x = attr_f64(&pts[2], "x")? / path_w;
-            let y = attr_f64(&pts[2], "y")? / path_h;
-            Some(PathCmd::CubicBezTo {
-                x1,
-                y1,
-                x2,
-                y2,
-                x,
-                y,
-            })
-        }
-        "arcTo" => {
-            // wR/hR are radii in path-local units; stAng/swAng in 60000ths of a degree
-            let wr = attr_f64(&cmd_node, "wR").unwrap_or(0.0) / path_w;
-            let hr = attr_f64(&cmd_node, "hR").unwrap_or(0.0) / path_h;
-            let st_ang = attr_f64(&cmd_node, "stAng").unwrap_or(0.0) / 60000.0;
-            let sw_ang = attr_f64(&cmd_node, "swAng").unwrap_or(0.0) / 60000.0;
-            Some(PathCmd::ArcTo {
-                wr,
-                hr,
-                st_ang,
-                sw_ang,
-            })
-        }
-        "close" => Some(PathCmd::Close),
-        _ => None,
-    }
-}
-
 /// Parse custGeom > pathLst into a list of sub-paths (one per <a:path> element).
-pub(crate) fn parse_cust_geom(cust_geom: roxmltree::Node<'_, '_>) -> Vec<Vec<PathCmd>> {
-    let path_lst = match child(cust_geom, "pathLst") {
-        Some(n) => n,
-        None => return vec![],
-    };
+pub(crate) fn parse_cust_geom(
+    cust_geom: roxmltree::Node<'_, '_>,
+    shape_w: f64,
+    shape_h: f64,
+) -> Vec<Vec<PathCmd>> {
+    use ooxml_common::custom_geometry::{parse_custom_geometry, PathCommand};
 
-    path_lst
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "path")
-        .map(|path_node| {
-            let path_w = attr_f64(&path_node, "w").unwrap_or(1.0).max(1.0);
-            let path_h = attr_f64(&path_node, "h").unwrap_or(1.0).max(1.0);
-            path_node
-                .children()
-                .filter(|n| n.is_element())
-                .filter_map(|cmd| parse_path_cmd(cmd, path_w, path_h))
+    parse_custom_geometry(cust_geom, shape_w, shape_h)
+        .paths
+        .into_iter()
+        .map(|path| {
+            path.commands
+                .into_iter()
+                .map(|command| match command {
+                    PathCommand::MoveTo { x, y } => PathCmd::MoveTo {
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::LineTo { x, y } => PathCmd::LineTo {
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::CubicBezierTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x,
+                        y,
+                    } => PathCmd::CubicBezTo {
+                        x1: x1 / path.width,
+                        y1: y1 / path.height,
+                        x2: x2 / path.width,
+                        y2: y2 / path.height,
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::QuadraticBezierTo { x1, y1, x, y } => PathCmd::QuadBezTo {
+                        x1: x1 / path.width,
+                        y1: y1 / path.height,
+                        x: x / path.width,
+                        y: y / path.height,
+                    },
+                    PathCommand::ArcTo {
+                        wr,
+                        hr,
+                        st_ang,
+                        sw_ang,
+                    } => PathCmd::ArcTo {
+                        wr: wr / path.width,
+                        hr: hr / path.height,
+                        st_ang: st_ang / 60000.0,
+                        sw_ang: sw_ang / 60000.0,
+                    },
+                    PathCommand::Close => PathCmd::Close,
+                })
                 .collect()
         })
         .collect()
@@ -540,9 +847,10 @@ pub(crate) fn parse_xfrm(xfrm: roxmltree::Node<'_, '_>) -> Transform {
 /// against the correct relationship base.
 pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
     c_sld: roxmltree::Node<'_, '_>,
-    theme: &HashMap<String, String>,
+    theme_source: &(impl PptxThemeSource + ?Sized),
     resolve_blip: &mut F,
 ) -> Option<Fill> {
+    let theme = theme_source.colors();
     let bg = child(c_sld, "bg")?;
     // bgPr contains an explicit fill specification
     if let Some(bg_pr) = child(bg, "bgPr") {
@@ -554,11 +862,16 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
                 return Some(fill);
             }
         }
-        return parse_fill(bg_pr, theme);
+        return parse_fill_tint(
+            bg_pr,
+            theme,
+            ooxml_common::color::TintMode::PowerPointLinear,
+        );
     }
     // bgRef references a theme background style; its child is a color element
     if let Some(bg_ref) = child(bg, "bgRef") {
-        return parse_color_node(bg_ref, theme).map(|c| Fill::Solid { color: c });
+        return parse_style_matrix_fill_from_source(bg_ref, theme_source)
+            .or_else(|| parse_color_node(bg_ref, theme).map(|c| Fill::Solid { color: c }));
     }
     None
 }

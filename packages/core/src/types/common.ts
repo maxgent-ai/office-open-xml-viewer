@@ -8,6 +8,7 @@ export type PathCmd =
   | { cmd: 'moveTo';     x: number; y: number }
   | { cmd: 'lineTo';     x: number; y: number }
   | { cmd: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+  | { cmd: 'quadBezTo';  x1: number; y1: number; x: number; y: number }
   | { cmd: 'arcTo';      wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 
@@ -34,6 +35,18 @@ export interface GradientFill {
   angle: number;
   /** 'linear' | 'radial' */
   gradType: string;
+  /** ECMA-376 §20.1.8.41: scale the gradient vector by the fill width/height. */
+  scaled?: boolean;
+  /** ECMA-376 §20.1.8.46 path shade geometry. */
+  path?: 'shape' | 'circle' | 'rect' | string;
+  /** Path-gradient focus rectangle, relative to the gradient tile. */
+  fillToRect?: FillRect;
+  /** Gradient tile rectangle, relative to the shape bounds. */
+  tileRect?: FillRect;
+  /** Gradient tile mirroring. */
+  flip?: 'none' | 'x' | 'y' | 'xy' | string;
+  /** Whether the gradient rotates with the containing shape. */
+  rotWithShape?: boolean;
 }
 
 /**
@@ -133,6 +146,18 @@ export interface Shadow {
   dist: number;   // EMU
   /** degrees clockwise from East */
   dir: number;
+  /** Horizontal scale (1.0 = unchanged). Outer shadows only. */
+  sx?: number;
+  /** Vertical scale (1.0 = unchanged). Outer shadows only. */
+  sy?: number;
+  /** Horizontal skew in degrees. Outer shadows only. */
+  kx?: number;
+  /** Vertical skew in degrees. Outer shadows only. */
+  ky?: number;
+  /** Alignment origin used before scaling/skewing. Default `b`. */
+  algn?: 'tl' | 't' | 'tr' | 'l' | 'ctr' | 'r' | 'bl' | 'b' | 'br';
+  /** Whether shadow transforms and offset rotate with the shape. Default true. */
+  rotWithShape?: boolean;
 }
 
 /** ECMA-376 §20.1.8.17 (CT_GlowEffect) — coloured halo with blur radius. */
@@ -187,8 +212,20 @@ export interface Stroke {
   fill?: Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
   /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
   dashStyle?: string;
+  /**
+   * DrawingML `<a:custDash>` segments as line-width multipliers
+   * (`1` = 100% of the rendered line width). When present this takes
+   * precedence over {@link Stroke.dashStyle}.
+   */
+  customDash?: ReadonlyArray<{ dash: number; space: number }>;
   /** Canvas line cap normalized from DrawingML/VML (`flat` → `butt`). */
   lineCap?: 'butt' | 'round' | 'square';
+  /** DrawingML line join (`<a:round>`, `<a:bevel>`, or `<a:miter>`). */
+  lineJoin?: 'round' | 'bevel' | 'miter';
+  /** Miter limit multiplier (`8` means 800%). Only used with `lineJoin: 'miter'`. */
+  miterLimit?: number;
+  /** Authored DrawingML pen alignment. Canvas currently paints `ctr` and retains `in`. */
+  alignment?: 'ctr' | 'in';
   /** Arrow head at the start of the line */
   headEnd?: ArrowEnd;
   /** Arrow head at the end of the line */
@@ -257,7 +294,7 @@ export type Bullet =
   | { type: 'none' }
   | { type: 'inherit' }
   | { type: 'char'; char: string; color: string | null; sizePct: number | null; sizePts?: number; fontFamily: string | null }
-  | { type: 'autoNum'; numType: string; startAt: number | null; color: string | null };
+  | { type: 'autoNum'; numType: string; startAt: number | null; color: string | null; sizePct?: number | null; sizePts?: number; fontFamily?: string | null };
 
 export interface TabStop {
   /** Position in EMU from the LEADING text-inset edge of the text area —
@@ -401,6 +438,12 @@ export interface TextRunData {
    * Absent means no run-level shadow.
    */
   shadow?: Shadow;
+  /**
+   * Mirrored reflection on this run's glyphs
+   * (`<a:rPr><a:effectLst><a:reflection>`), ECMA-376 §20.1.8.50.
+   * This is independent of a shape-level reflection on `spPr`.
+   */
+  reflection?: Reflection;
   /**
    * Run-level glyph outline (`<a:rPr><a:ln w="..">`), ECMA-376 §20.1.2.2.24
    * (CT_TextOutlineEffect). Renderer strokes each glyph with the given

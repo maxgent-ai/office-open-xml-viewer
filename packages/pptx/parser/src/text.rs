@@ -5,7 +5,7 @@
 //! `children_vec`, `attr`, `attr_r`, `attr_i64`, `attr_f64`, `resolve_path`)
 //! stay in `lib.rs`; the colour + theme helpers live in `fill` / `theme`.
 
-use crate::fill::{parse_color_node, parse_shadow};
+use crate::fill::{parse_color_node, parse_reflection, parse_shadow};
 use crate::theme::resolve_theme_typeface;
 use crate::types::*;
 use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec, resolve_path, PptxZip};
@@ -238,9 +238,9 @@ impl BulletProps {
     ///   (§21.1.2.4.10, absolute points); `FollowText`/inherit → both `None`. The
     ///   two size fields are mutually exclusive (one `xsd:choice`);
     /// - font: `Font(f)` → `Some(f)`; `FollowText`/inherit → `None`.
-    ///   Auto-number and picture markers carry no font/size in the `Bullet`
-    ///   contract (the renderer draws numbers in the run font and pictures as a
-    ///   sized bitmap), so those groups only participate in cascade blocking.
+    ///   Auto-number markers retain both font and size because their glyph
+    ///   metrics determine whether multi-digit labels fit the hanging gutter.
+    ///   Picture markers retain size but have no applicable font.
     pub(crate) fn resolve(&self) -> Bullet {
         let color = match &self.color {
             Some(BuColor::Color(c)) => Some(c.clone()),
@@ -274,6 +274,9 @@ impl BulletProps {
                 num_type: num_type.clone(),
                 start_at: *start_at,
                 color,
+                size_pct,
+                size_pts,
+                font_family,
             },
             Some(BuMarker::Blip {
                 image_path,
@@ -371,12 +374,14 @@ pub(crate) fn parse_text_body(
     rels: &HashMap<String, String>,
     source_dir: &str,
     inherited_font_size: Option<f64>,
+    inherited_font_family: Option<String>,
     inherited_level_font_sizes: LevelFontSizes,
     inherited_level_indents: LevelIndents,
     inherited_level_bullets: &LevelBullets,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
     inherited_caps: Option<String>,
+    inherited_reflection: Option<Reflection>,
     inherited_anchor: Option<String>,
     inherited_text_insets: Option<[Option<i64>; 4]>,
     inherited_alignment: Option<String>,
@@ -534,10 +539,20 @@ pub(crate) fn parse_text_body(
     // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
     let own_lvl1_ppr = child(tx_body, "lstStyle").and_then(|ls| child(ls, "lvl1pPr"));
     let own_def_rpr = own_lvl1_ppr.and_then(|lp| child(lp, "defRPr"));
+    let own_effects = own_def_rpr.and_then(|rp| child(rp, "effectLst"));
+    let default_reflection = match own_effects {
+        Some(effect_lst) => parse_reflection(effect_lst),
+        None => inherited_reflection,
+    };
     let default_font_size = own_def_rpr
         .and_then(|rp| attr_f64(&rp, "sz"))
         .map(|v| v / 100.0)
         .or(inherited_font_size);
+    let default_font_family = own_def_rpr
+        .and_then(|rp| child(rp, "latin"))
+        .and_then(|latin| attr(&latin, "typeface"))
+        .map(|face| resolve_theme_typeface(&face, theme))
+        .or(inherited_font_family);
     // Effective per-list-level default sizes: this shape's own lstStyle wins per
     // level, else the layout/master inherited per-level sizes. Paragraphs pick
     // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
@@ -620,6 +635,8 @@ pub(crate) fn parse_text_body(
                 body_default_space_before,
                 body_default_space_after,
                 body_default_line_spacing,
+                default_font_family.as_deref(),
+                default_reflection.as_ref(),
                 &effective_level_sizes,
                 &effective_level_indents,
                 &effective_level_bullets,
@@ -765,6 +782,8 @@ pub(crate) fn parse_paragraph(
     body_default_space_before: Option<i64>,
     body_default_space_after: Option<i64>,
     body_default_line_spacing: Option<f64>,
+    body_default_font_family: Option<&str>,
+    body_default_reflection: Option<&Reflection>,
     level_font_sizes: &LevelFontSizes,
     level_indents: &LevelIndents,
     level_bullets: &LevelBullets,
@@ -921,13 +940,16 @@ pub(crate) fn parse_paragraph(
     let def_font_family = def_rpr
         .and_then(|n| child(n, "latin"))
         .and_then(|n| attr(&n, "typeface"))
-        .map(|tf| resolve_theme_typeface(&tf, theme));
+        .map(|tf| resolve_theme_typeface(&tf, theme))
+        .or_else(|| body_default_font_family.map(str::to_owned));
 
     let mut runs = Vec::new();
     for node in p_node.children().filter(|n| n.is_element()) {
         match node.tag_name().name() {
             "r" => {
-                if let Some(run) = parse_run(node, def_rpr, theme, rels) {
+                if let Some(run) =
+                    parse_run_with_reflection(node, def_rpr, body_default_reflection, theme, rels)
+                {
                     runs.push(TextRun::Text(run));
                 }
             }
@@ -992,6 +1014,10 @@ pub(crate) fn parse_paragraph(
                     hyperlink: None,
                     hyperlink_action: None,
                     shadow: None,
+                    reflection: match r_pr.and_then(|n| child(n, "effectLst")) {
+                        Some(effect_lst) => parse_reflection(effect_lst),
+                        None => body_default_reflection.cloned(),
+                    },
                     outline: None,
                     highlight,
                 }));
@@ -1078,7 +1104,22 @@ fn parse_bullet_marker<F: FnMut(&str) -> Option<String>>(
 
     // Character bullet
     if let Some(bu_char) = child(p_pr, "buChar") {
-        let ch = attr(&bu_char, "char").unwrap_or_else(|| "\u{2022}".into()); // •
+        // CT_TextCharBullet's attribute is schema-typed as a string. Flattened
+        // SmartArt caches can nevertheless repeat one marker (for example
+        // `••`) even though PowerPoint paints it once. Collapse only that
+        // duplicate-marker form; preserve genuinely multi-character values.
+        let ch = attr(&bu_char, "char")
+            .map(|value| {
+                let mut chars = value.chars();
+                let first = chars.next();
+                match first {
+                    Some(marker) if chars.clone().count() > 0 && chars.all(|ch| ch == marker) => {
+                        marker.to_string()
+                    }
+                    _ => value,
+                }
+            })
+            .unwrap_or_else(|| "\u{2022}".into()); // •
         return Some(BuMarker::Char(ch));
     }
 
@@ -1195,9 +1236,26 @@ pub(crate) fn parse_bullet<F: FnMut(&str) -> Option<String>>(
     parse_bullet_props(p_pr, theme, resolve_blip).resolve()
 }
 
+/// Parse a standalone text run without a shape/master-level reflection input.
+///
+/// Most call sites (and the parser's focused tests) only need run-local and
+/// paragraph `defRPr` inheritance. Text-body parsing uses the private extended
+/// form below because placeholder title styles can additionally contribute a
+/// reflection through the master/layout cascade.
+#[cfg(test)]
 pub(crate) fn parse_run(
     r_node: roxmltree::Node<'_, '_>,
     def_rpr: Option<roxmltree::Node<'_, '_>>,
+    theme: &HashMap<String, String>,
+    rels: &HashMap<String, String>,
+) -> Option<TextRunData> {
+    parse_run_with_reflection(r_node, def_rpr, None, theme, rels)
+}
+
+fn parse_run_with_reflection(
+    r_node: roxmltree::Node<'_, '_>,
+    def_rpr: Option<roxmltree::Node<'_, '_>>,
+    inherited_reflection: Option<&Reflection>,
     theme: &HashMap<String, String>,
     rels: &HashMap<String, String>,
 ) -> Option<TextRunData> {
@@ -1336,9 +1394,18 @@ pub(crate) fn parse_run(
     // ECMA-376 §20.1.8.45 — `<a:rPr><a:effectLst><a:outerShdw>` glyph drop
     // shadow. Reuse the shape-level outerShdw reader so parse semantics
     // stay identical (blurRad, dist, dir, color + alphaModFix).
-    let shadow = r_pr
-        .and_then(|n| child(n, "effectLst"))
-        .and_then(|el| parse_shadow(el, theme));
+    let local_effects = r_pr.and_then(|n| child(n, "effectLst"));
+    let inherited_effects = def_rpr.and_then(|n| child(n, "effectLst"));
+    let shadow = match local_effects {
+        Some(el) => parse_shadow(el, theme),
+        None => inherited_effects.and_then(|el| parse_shadow(el, theme)),
+    };
+    let reflection = match local_effects {
+        Some(el) => parse_reflection(el),
+        None => inherited_effects
+            .and_then(parse_reflection)
+            .or_else(|| inherited_reflection.cloned()),
+    };
 
     // ECMA-376 §20.1.2.2.24 (CT_TextOutlineEffect) — `<a:rPr><a:ln w="..">`
     // strokes each glyph outline. `<a:noFill>` inside the ln means "no
@@ -1389,6 +1456,7 @@ pub(crate) fn parse_run(
         hyperlink,
         hyperlink_action,
         shadow,
+        reflection,
         outline,
         highlight,
     })

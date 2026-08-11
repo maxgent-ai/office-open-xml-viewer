@@ -18,6 +18,9 @@ function shape(overrides: Partial<ShapeRun> = {}): ShapeRun {
       stops: [{ position: 0, color: 'FF0000' }, { position: 1, color: '0000FF' }],
     },
     stroke: '123456', strokeWidth: 2, strokeDash: 'dash', strokeCap: 'round',
+    strokeCustomDash: [{ dash: 1.25, space: .75 }],
+    strokeJoin: 'miter', strokeMiterLimit: 8, strokeAlignment: 'in',
+    strokeCompound: 'dbl',
     headEnd: { type: 'arrow', w: 'sm', len: 'sm' },
     tailEnd: { type: 'triangle', w: 'med', len: 'lg' },
     rotation: 30, flipH: true, flipV: false,
@@ -52,6 +55,8 @@ describe('ShapeRun drawing command planner', () => {
         fill: { fillType: 'gradient' },
         stroke: {
           color: '123456', width: 2, dashStyle: 'dash', lineCap: 'round',
+          customDash: [{ dash: 1.25, space: .75 }],
+          lineJoin: 'miter', miterLimit: 8, alignment: 'in', cmpd: 'dbl',
           headEnd: { type: 'arrow', w: 'sm', len: 'sm' },
           tailEnd: { type: 'triangle', w: 'med', len: 'lg' },
         },

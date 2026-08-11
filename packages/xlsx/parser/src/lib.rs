@@ -369,6 +369,10 @@ struct WorkbookShared {
     rels_xml: String,
     sheets: Vec<SheetMeta>,
     theme_colors: Rc<[String]>,
+    /// DrawingML `fmtScheme`, parsed once per workbook and reused by every
+    /// sheet's shape tree. Keeping the complete recipes avoids the previous
+    /// per-sheet theme re-inflate and width-only `lnStyleLst` projection.
+    theme_format_scheme: Rc<ooxml_common::theme::ThemeFormatScheme>,
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
@@ -384,6 +388,41 @@ struct WorkbookShared {
     /// worksheet so the renderer/cell formatter can resolve serial dates
     /// without a back-reference to the workbook.
     date1904: bool,
+}
+
+#[derive(Default)]
+struct XlsxThemeData {
+    colors: Vec<String>,
+    format_scheme: ooxml_common::theme::ThemeFormatScheme,
+    fonts: (Option<String>, Option<String>),
+}
+
+impl XlsxThemeData {
+    fn load(archive: &mut XlsxZip, workbook_rels_xml: &str) -> Self {
+        let Some(target) = find_internal_rel_target_by_type(workbook_rels_xml, "/theme") else {
+            return Self::default();
+        };
+        let theme_path = resolve_zip_path("xl", &target);
+        let Ok(xml) = read_zip_string(archive, &theme_path) else {
+            return Self::default();
+        };
+        Self::parse(&xml)
+    }
+
+    fn parse(xml: &str) -> Self {
+        let colors = ooxml_common::theme::ThemeColorScheme::parse(xml)
+            .slots_in_order()
+            .into_iter()
+            .flatten()
+            .map(|hex| format!("#{}", hex.to_uppercase()))
+            .collect();
+        let theme_fonts = ooxml_common::theme::ThemeFonts::parse(xml);
+        Self {
+            colors,
+            format_scheme: ooxml_common::theme::ThemeFormatScheme::parse(xml),
+            fonts: (theme_fonts.major.latin, theme_fonts.minor.latin),
+        }
+    }
 }
 
 impl WorkbookShared {
@@ -405,8 +444,10 @@ impl WorkbookShared {
             )
         };
         let rels_xml = read_zip_string(archive, "xl/_rels/workbook.xml.rels").unwrap_or_default();
-        let theme_colors: Rc<[String]> = parse_theme_colors(archive).into();
-        let theme_fonts = parse_theme_fonts(archive);
+        let theme = XlsxThemeData::load(archive, &rels_xml);
+        let theme_colors: Rc<[String]> = theme.colors.into();
+        let theme_format_scheme = Rc::new(theme.format_scheme);
+        let theme_fonts = theme.fonts;
         let (shared_strings, shared_strings_error) =
             read_shared_strings(archive, theme_colors.as_ref());
         Ok(WorkbookShared {
@@ -414,6 +455,7 @@ impl WorkbookShared {
             rels_xml,
             sheets,
             theme_colors,
+            theme_format_scheme,
             theme_fonts,
             shared_strings: shared_strings.into(),
             shared_strings_error,
@@ -539,7 +581,12 @@ fn finalize_projected_sheet(
         ),
     );
     ws.charts = charts;
-    ws.shape_groups = load_sheet_shape_groups(archive, sheet_path, theme_colors);
+    ws.shape_groups = load_sheet_shape_groups(
+        archive,
+        sheet_path,
+        theme_colors,
+        shared.theme_format_scheme.as_ref(),
+    );
     ws.hyperlinks = load_hyperlinks(archive, sheet_path, hyperlink_rids);
     ws.comments = load_sheet_comments(archive, sheet_path);
     ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
@@ -853,51 +900,6 @@ fn extract_tab_color_from_head(head: &str, theme_colors: &[String]) -> Option<St
         attr("indexed"),
         theme_colors,
     )
-}
-
-/// Theme `fmtScheme > lnStyleLst` line widths (EMU), in declaration order.
-/// A drawing shape's `<a:style><a:lnRef idx="N">` resolves its outline width
-/// from entry N (1-based) of this list (ECMA-376 §20.1.4.2.19); an entry
-/// without an explicit `w` uses the CT_LineProperties default 9525 EMU =
-/// 0.75 pt (§20.1.2.2.24).
-pub(crate) fn parse_theme_ln_widths(archive: &mut XlsxZip) -> Vec<i64> {
-    let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
-        return Vec::new();
-    };
-    // Shared parse: reference line widths (EMU) in declaration order, filling the
-    // CT_LineProperties 9525 default for a bare `<a:ln>` — matching xlsx's prior
-    // behavior exactly (ECMA-376 §20.1.4.2.19 / §20.1.2.2.24).
-    ooxml_common::theme::parse_ln_style_widths(&xml)
-}
-
-fn parse_theme_colors(archive: &mut XlsxZip) -> Vec<String> {
-    let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
-        return Vec::new();
-    };
-    // Shared clrScheme parse; xlsx keeps its own `#RRGGBB` uppercase formatting
-    // and positional (spec-order) Vec. Slots are emitted in the canonical order
-    // dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink; a slot with no readable
-    // color is skipped (compacting the Vec), preserving the prior contract.
-    // prstClr now resolves through the shared preset table (previously dropped),
-    // so a preset scheme slot contributes its color instead of being skipped.
-    ooxml_common::theme::ThemeColorScheme::parse(&xml)
-        .slots_in_order()
-        .into_iter()
-        .flatten()
-        .map(|hex| format!("#{}", hex.to_uppercase()))
-        .collect()
-}
-
-/// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
-/// (`<a:fontScheme>`, ECMA-376 §20.1.4.2). Used as the chart-text fallback font
-/// (CH10) when a chart element's `<c:txPr>` carries no explicit `<a:latin>`.
-/// `(None, None)` when the theme is absent or declares no font scheme.
-fn parse_theme_fonts(archive: &mut XlsxZip) -> (Option<String>, Option<String>) {
-    let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
-        return (None, None);
-    };
-    let fonts = ooxml_common::theme::ThemeFonts::parse(&xml);
-    (fonts.major.latin, fonts.minor.latin)
 }
 
 /// Convert hex color + tint to resulting hex color using HLS model.
@@ -2177,6 +2179,25 @@ pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Opti
             if rel_type.ends_with(type_suffix) {
                 return rel.attribute("Target").map(|t| t.to_string());
             }
+        }
+    }
+    None
+}
+
+/// Internal package-part target of the first relationship whose type ends in
+/// `type_suffix`. Unlike hyperlink-oriented callers, workbook-owned resources
+/// such as the theme must never treat an external URI as a ZIP part name.
+fn find_internal_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
+    let doc = parse_guarded(rels_xml).ok()?;
+    for rel in doc.root_element().children().filter(|n| n.is_element()) {
+        if rel
+            .attribute("Type")
+            .is_some_and(|rel_type| rel_type.ends_with(type_suffix))
+            && !rel
+                .attribute("TargetMode")
+                .is_some_and(|mode| mode.eq_ignore_ascii_case("External"))
+        {
+            return rel.attribute("Target").map(str::to_owned);
         }
     }
     None
@@ -4440,6 +4461,49 @@ mod sheet_visibility_tests {
         assert_eq!(sheets[1].visibility, SheetVisibility::Hidden);
         assert_eq!(sheets[2].visibility, SheetVisibility::VeryHidden);
         assert_eq!(sheets[3].visibility, SheetVisibility::Visible);
+    }
+}
+
+#[cfg(test)]
+mod workbook_theme_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    #[test]
+    fn loads_the_theme_target_declared_by_workbook_relationships_once() {
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="themes/custom.xml"/></Relationships>"#;
+        let custom = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="custom"><a:dk1><a:srgbClr val="010203"/></a:dk1></a:clrScheme><a:fontScheme name="custom"><a:majorFont><a:latin typeface="Major Custom"/></a:majorFont><a:minorFont><a:latin typeface="Minor Custom"/></a:minorFont></a:fontScheme><a:fmtScheme name="custom"><a:fillStyleLst><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#;
+        let decoy = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="decoy"><a:dk1><a:srgbClr val="FFFFFF"/></a:dk1></a:clrScheme></a:themeElements></a:theme>"#;
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, body) in [
+                ("xl/themes/custom.xml", custom),
+                ("xl/theme/theme1.xml", decoy),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut archive = XlsxZip::new(Cursor::new(bytes)).unwrap();
+        archive.begin_operation("theme-test").unwrap();
+        let theme = XlsxThemeData::load(&mut archive, rels);
+
+        assert_eq!(theme.colors.first().map(String::as_str), Some("#010203"));
+        assert_eq!(theme.fonts.0.as_deref(), Some("Major Custom"));
+        assert_eq!(theme.fonts.1.as_deref(), Some("Minor Custom"));
+        assert!(matches!(
+            theme.format_scheme.lookup_fill_ref(1),
+            ooxml_common::theme::StyleMatrixLookup::Entry(_)
+        ));
+    }
+
+    #[test]
+    fn external_theme_relationship_is_not_treated_as_a_package_part() {
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="https://example.invalid/theme.xml" TargetMode="External"/></Relationships>"#;
+        assert_eq!(find_internal_rel_target_by_type(rels, "/theme"), None);
     }
 }
 

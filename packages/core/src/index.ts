@@ -133,7 +133,11 @@ export {
 } from './fonts/symbol-font';
 export { renderChart } from './chart/renderer';
 export { autoResize, type AutoResizeOptions } from './autoResize';
-export { buildCustomPath } from './shape/custGeom';
+export {
+  buildCustomPath,
+  getCustomGeometryBounds,
+  type CustomGeometryBounds,
+} from './shape/custGeom';
 export {
   getCustGeomEndpoints,
   type CustGeomEndpoint,
@@ -149,7 +153,12 @@ export {
   type DrawingMLShapeGeometry,
   type DrawingMLShapePaintPlan,
 } from './shape/drawingml-shape';
-export { drawArrowHead, lineEndRetract, retractLineEndpoint } from './shape/arrow';
+export {
+  drawArrowHead,
+  lineEndPaintExtent,
+  lineEndRetract,
+  retractLineEndpoint,
+} from './shape/arrow';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
@@ -261,6 +270,7 @@ export {
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
+  getPresetGeometryBounds,
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';
@@ -280,6 +290,7 @@ export {
   type Polyline,
 } from './shape/text-warp';
 export {
+  applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
   applyReflection,
@@ -299,7 +310,7 @@ export {
   type Scene3dQuad,
   type Vec2,
 } from './shape/scene3d-camera';
-export { drawProjected, expandProjectedQuad } from './shape/scene3d-draw';
+export { drawProjected, expandProjectedQuad, projectQuadPoint } from './shape/scene3d-draw';
 // DrawingML 3D bevel shading (Phase B). ECMA-376 §20.1.5.12 (sp3d) /
 // §20.1.5.3 (bevel) / §20.1.10.9 (ST_BevelPresetType) / §20.1.5.9 (lightRig).
 // `edt1d` / `shadePixel` / `shadeParamsFor` / `fillDirFromKey` are internal

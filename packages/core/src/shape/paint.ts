@@ -1,6 +1,88 @@
-import type { Fill, PatternFill, Stroke } from '../types/common';
+import type { Fill, GradientFill, PatternFill, Stroke } from '../types/common';
 import { buildPatternBitmap } from './pattern-bitmaps';
 import { shapeStrokeDashArray } from '../draw/dash';
+import { createAuxCanvasForContext } from '../canvas/aux-canvas';
+
+const MAX_GRADIENT_TILE_EDGE = 512;
+
+function tiledGradient(
+  fill: GradientFill,
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  shapeRotationDeg: number,
+): CanvasPattern | null {
+  const tile = fill.tileRect;
+  if (!tile) return null;
+  // An explicitly authored all-zero CT_RelativeRect is the complete fill
+  // region. It has exactly one tile, so allocating two auxiliary canvases and
+  // a repeating pattern would change no pixels and only add per-shape work.
+  if ((tile.l ?? 0) === 0 && (tile.t ?? 0) === 0
+      && (tile.r ?? 0) === 0 && (tile.b ?? 0) === 0) return null;
+  const tileX = x + w * (tile.l ?? 0);
+  const tileY = y + h * (tile.t ?? 0);
+  const tileW = w * (1 - (tile.l ?? 0) - (tile.r ?? 0));
+  const tileH = h * (1 - (tile.t ?? 0) - (tile.b ?? 0));
+  if (!Number.isFinite(tileW) || !Number.isFinite(tileH)
+      || Math.abs(tileW) < 1e-9 || Math.abs(tileH) < 1e-9) return null;
+
+  const scale = Math.min(
+    1,
+    MAX_GRADIENT_TILE_EDGE / Math.abs(tileW),
+    MAX_GRADIENT_TILE_EDGE / Math.abs(tileH),
+  );
+  const baseW = Math.max(1, Math.ceil(Math.abs(tileW) * scale));
+  const baseH = Math.max(1, Math.ceil(Math.abs(tileH) * scale));
+  const base = createAuxCanvasForContext(ctx, baseW, baseH);
+  const baseCtx = base?.getContext('2d');
+  if (!base || !baseCtx) return null;
+  const basePaint = resolveFill(
+    { ...fill, tileRect: undefined, flip: undefined },
+    baseCtx as CanvasRenderingContext2D,
+    0,
+    0,
+    baseW,
+    baseH,
+    shapeRotationDeg,
+  );
+  if (!basePaint) return null;
+  baseCtx.fillStyle = basePaint;
+  baseCtx.fillRect(0, 0, baseW, baseH);
+
+  const flipX = fill.flip === 'x' || fill.flip === 'xy';
+  const flipY = fill.flip === 'y' || fill.flip === 'xy';
+  let patternSource = base;
+  if (flipX || flipY) {
+    const repeatW = baseW * (flipX ? 2 : 1);
+    const repeatH = baseH * (flipY ? 2 : 1);
+    const repeat = createAuxCanvasForContext(ctx, repeatW, repeatH);
+    const repeatCtx = repeat?.getContext('2d');
+    if (!repeat || !repeatCtx) return null;
+    for (let row = 0; row < (flipY ? 2 : 1); row += 1) {
+      for (let col = 0; col < (flipX ? 2 : 1); col += 1) {
+        repeatCtx.save();
+        repeatCtx.translate(col * baseW, row * baseH);
+        repeatCtx.scale(col === 1 ? -1 : 1, row === 1 ? -1 : 1);
+        repeatCtx.drawImage(base, col === 1 ? -baseW : 0, row === 1 ? -baseH : 0);
+        repeatCtx.restore();
+      }
+    }
+    patternSource = repeat;
+  }
+  const pattern = ctx.createPattern(patternSource, 'repeat');
+  if (!pattern || typeof pattern.setTransform !== 'function') return null;
+  pattern.setTransform({
+    a: tileW / baseW,
+    b: 0,
+    c: 0,
+    d: tileH / baseH,
+    e: tileX,
+    f: tileY,
+  });
+  return pattern;
+}
 
 /**
  * Convert a 6- or 8-char hex colour to a CSS `rgba()` string.
@@ -53,6 +135,7 @@ export function resolveFill(
   fill: Fill | null,
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
+  shapeRotationDeg = 0,
 ): string | CanvasGradient | CanvasPattern | null {
   if (!fill || fill.fillType === 'none') return null;
   if (fill.fillType === 'solid') return hexToRgba(fill.color);
@@ -64,20 +147,57 @@ export function resolveFill(
     if (stops.length === 0) return null;
     if (stops.length === 1) return hexToRgba(stops[0].color);
 
+    const repeated = tiledGradient(fill, ctx, x, y, w, h, shapeRotationDeg);
+    if (repeated) return repeated;
+
     let gradient: CanvasGradient;
+    const tile = fill.tileRect;
+    const tileX = x + w * (tile?.l ?? 0);
+    const tileY = y + h * (tile?.t ?? 0);
+    const tileW = w * (1 - (tile?.l ?? 0) - (tile?.r ?? 0));
+    const tileH = h * (1 - (tile?.t ?? 0) - (tile?.b ?? 0));
     if (fill.gradType === 'radial') {
-      const cx = x + w / 2;
-      const cy = y + h / 2;
-      const r = Math.sqrt(w * w + h * h) / 2;
-      gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      // §20.1.8.31: fillToRect is the center-shade (focus) rectangle inside
+      // the gradient tile. Canvas has a point focus rather than a rectangular
+      // focus, so use its authored centre and retain the full rectangle on the
+      // public model for richer hosts.
+      const focus = fill.fillToRect;
+      const focusX = tileX + tileW * (focus?.l ?? 0);
+      const focusY = tileY + tileH * (focus?.t ?? 0);
+      const focusW = tileW * (1 - (focus?.l ?? 0) - (focus?.r ?? 0));
+      const focusH = tileH * (1 - (focus?.t ?? 0) - (focus?.b ?? 0));
+      const cx = focusX + focusW / 2;
+      const cy = focusY + focusH / 2;
+      const rx = Math.max(Math.abs(cx - tileX), Math.abs(tileX + tileW - cx));
+      const ry = Math.max(Math.abs(cy - tileY), Math.abs(tileY + tileH - cy));
+      const r = fill.path === 'rect'
+        ? Math.max(rx, ry)
+        : Math.sqrt(rx * rx + ry * ry);
+      gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(r, 1e-9));
     } else {
-      const rad = (fill.angle * Math.PI) / 180;
-      const cx = x + w / 2;
-      const cy = y + h / 2;
-      const gradLen = (Math.abs(Math.cos(rad)) * w + Math.abs(Math.sin(rad)) * h) / 2;
+      const authoredAngle = fill.rotWithShape === false
+        ? fill.angle - shapeRotationDeg
+        : fill.angle;
+      const rad = (authoredAngle * Math.PI) / 180;
+      let dx = Math.cos(rad);
+      let dy = Math.sin(rad);
+      if (fill.scaled === true) {
+        // §20.1.8.41: (cos x, sin x) becomes (w cos x, h sin x)
+        // before normalization.
+        dx *= tileW;
+        dy *= tileH;
+        const magnitude = Math.hypot(dx, dy);
+        if (magnitude > 0) {
+          dx /= magnitude;
+          dy /= magnitude;
+        }
+      }
+      const cx = tileX + tileW / 2;
+      const cy = tileY + tileH / 2;
+      const gradLen = (Math.abs(dx) * tileW + Math.abs(dy) * tileH) / 2;
       gradient = ctx.createLinearGradient(
-        cx - Math.cos(rad) * gradLen, cy - Math.sin(rad) * gradLen,
-        cx + Math.cos(rad) * gradLen, cy + Math.sin(rad) * gradLen,
+        cx - dx * gradLen, cy - dy * gradLen,
+        cx + dx * gradLen, cy + dy * gradLen,
       );
     }
     for (const stop of stops) {
@@ -137,12 +257,21 @@ export function applyStroke(
     ctx.lineWidth = 0;
     ctx.setLineDash([]);
     ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
+    ctx.miterLimit = 10;
     return;
   }
   ctx.strokeStyle = hexToRgba(stroke.color);
   const lw = Math.max(0.5, stroke.width * emuPerPx);
   ctx.lineWidth = lw;
-  const dash = stroke.dashStyle ? shapeStrokeDashArray(stroke.dashStyle, lw) : [];
+  const dash = stroke.customDash
+    ? stroke.customDash.flatMap((segment) => [
+        Math.max(0, segment.dash) * lw,
+        Math.max(0, segment.space) * lw,
+      ])
+    : stroke.dashStyle
+      ? shapeStrokeDashArray(stroke.dashStyle, lw)
+      : [];
   const requestedCap = stroke.lineCap ?? 'butt';
   // ECMA-376 Part 4 §19.1.2.21: a zero in VML's numeric dash grammar is a
   // visible fourfold-symmetric dot, even though VML's default endcap is flat.
@@ -151,5 +280,7 @@ export function applyStroke(
   // explicit round/square caps keep their authored shape.
   const hasZeroDash = dash.some((length, index) => index % 2 === 0 && length === 0);
   ctx.lineCap = requestedCap === 'butt' && hasZeroDash ? 'square' : requestedCap;
+  ctx.lineJoin = stroke.lineJoin ?? 'miter';
+  ctx.miterLimit = stroke.miterLimit ?? 10;
   ctx.setLineDash(dash);
 }

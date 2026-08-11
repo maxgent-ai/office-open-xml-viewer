@@ -372,6 +372,16 @@ impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
         resolve_fill_color(&node, self.theme_colors)
     }
 
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        ooxml_common::color::ThemeResolver::resolve_scheme_color(
+            &crate::drawing::XlsxSchemeResolver {
+                theme_colors: self.theme_colors,
+            },
+            name,
+        )
+        .map(|hex| hex.to_lowercase())
+    }
+
     /// Shape fills (series / marker / dPt / errBars) resolve through the FULL
     /// DrawingML color grammar (transforms included), matching the historical
     /// `extract_solid_fill_in_drawingml` path so a scheme-color marker with a
@@ -556,6 +566,38 @@ mod solid_fill_color_tests {
         };
         let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver).unwrap();
         assert_eq!(chart.series[0].color.as_deref(), Some("A6A6A6"));
+    }
+
+    #[test]
+    fn chart_part_honors_chart_local_color_map_override() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="{A_NS}">
+              <c:clrMapOvr bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"
+                accent1="accent2" accent2="accent2" accent3="accent3"
+                accent4="accent4" accent5="accent5" accent6="accent6"
+                hlink="hlink" folHlink="folHlink"/>
+              <c:chart><c:plotArea><c:barChart>
+                <c:barDir val="col"/><c:grouping val="clustered"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:barChart></c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let palette = theme();
+        let resolver = XlsxColorResolver {
+            theme_colors: &palette,
+            theme_major_font_latin: None,
+            theme_minor_font_latin: None,
+        };
+        let doc = Document::parse(&xml).expect("chartSpace fixture");
+
+        let chart = ooxml_common::chart::parse_chart_part(doc.root_element(), &resolver)
+            .expect("chart should parse");
+
+        assert_eq!(chart.series[0].color.as_deref(), Some("00AA00"));
     }
 }
 

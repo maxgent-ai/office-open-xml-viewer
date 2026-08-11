@@ -38,7 +38,8 @@ export interface CustGeomEndpoints {
 const EPS = 1e-9;
 
 function isDrawCmd(cmd: PathCmd): boolean {
-  return cmd.cmd === 'lineTo' || cmd.cmd === 'cubicBezTo' || cmd.cmd === 'arcTo';
+  return cmd.cmd === 'lineTo' || cmd.cmd === 'cubicBezTo' ||
+    cmd.cmd === 'quadBezTo' || cmd.cmd === 'arcTo';
 }
 
 function makeEndpoint(x: number, y: number, dx: number, dy: number): CustGeomEndpoint {
@@ -77,6 +78,15 @@ function startForwardTangent(
       }
       return { dx, dy };
     }
+    case 'quadBezTo': {
+      let dx = cmd.x1 - penX;
+      let dy = cmd.y1 - penY;
+      if (Math.abs(dx) < EPS && Math.abs(dy) < EPS) {
+        dx = cmd.x - penX;
+        dy = cmd.y - penY;
+      }
+      return { dx, dy };
+    }
     case 'arcTo': {
       // Ellipse: P(t) = (cx + wr cos t, cy + hr sin t), with the pen at t=stAng
       // (matches buildCustomPath). Tangent dP/dt = (-wr sin t, hr cos t); for
@@ -106,6 +116,7 @@ function advancePen(px: number, py: number, cmd: PathCmd): { x: number; y: numbe
     case 'moveTo':
     case 'lineTo':
     case 'cubicBezTo':
+    case 'quadBezTo':
       return { x: cmd.x, y: cmd.y };
     case 'arcTo': {
       // Same degenerate guard as buildCustomPath (`rw<=0 || rh<=0`, with w,h>0
@@ -150,6 +161,15 @@ function endForwardTangent(
       }
       if (Math.abs(dx) < EPS && Math.abs(dy) < EPS) {
         // Fully degenerate → chord from the previous point to the end.
+        dx = cmd.x - prevX;
+        dy = cmd.y - prevY;
+      }
+      return { dx, dy, x, y };
+    }
+    case 'quadBezTo': {
+      let dx = cmd.x - cmd.x1;
+      let dy = cmd.y - cmd.y1;
+      if (Math.abs(dx) < EPS && Math.abs(dy) < EPS) {
         dx = cmd.x - prevX;
         dy = cmd.y - prevY;
       }

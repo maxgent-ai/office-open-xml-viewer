@@ -4,6 +4,7 @@ import {
   hasPreset,
   buildPresetGeometryPath,
   buildPresetGeometryFillPath,
+  getPresetGeometryBounds,
   getConnectorAnchors,
 } from './index';
 
@@ -62,6 +63,31 @@ function distinct(points: Array<{ x: number; y: number }>) {
 }
 
 describe('renderPresetShape (core preset-geometry engine)', () => {
+  it('includes a wedge-callout tip outside the transform box in its effect bounds', () => {
+    expect(getPresetGeometryBounds(
+      'wedgeRoundRectCallout',
+      100,
+      200,
+      200,
+      100,
+      [41242, 92245, 16667],
+    )).toEqual({ x: 100, y: 200, w: 200, h: 142.245 });
+
+    const rightFacing = getPresetGeometryBounds(
+      'wedgeRoundRectCallout',
+      100,
+      200,
+      200,
+      100,
+      [-89365, 13468, 16667],
+    );
+    expect(rightFacing).not.toBeNull();
+    expect(rightFacing?.x).toBeCloseTo(21.27);
+    expect(rightFacing?.y).toBe(200);
+    expect(rightFacing?.w).toBeCloseTo(278.73);
+    expect(rightFacing?.h).toBe(100);
+  });
+
   it('knows the common xlsx preset names', () => {
     expect(hasPreset('parallelogram')).toBe(true);
     expect(hasPreset('rtTriangle')).toBe(true);

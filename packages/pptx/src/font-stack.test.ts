@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cssFontStack } from './renderer.js';
+import { buildFont, cssFontStack } from './renderer.js';
 
 describe('cssFontStack — Arabic faces keep the Arabic chain (regression)', () => {
   it('leads with the Arabic Noto fallbacks for an Arabic-script face', () => {
@@ -76,5 +76,26 @@ describe('cssFontStack — serif/sans generic classification (core classifier)',
   it('regression: Calibri stays sans, Times New Roman stays serif', () => {
     expect(cssFontStack('Calibri').endsWith('sans-serif')).toBe(true);
     expect(cssFontStack('Times New Roman').endsWith('serif')).toBe(true);
+  });
+});
+
+describe('buildFont — style encoded in a face name', () => {
+  it('preserves a Medium theme face when the browser falls back', () => {
+    const font = buildFont(false, false, 48, 'Franklin Gothic Medium', {
+      themeMajorFont: null,
+      themeMinorFont: null,
+      dpr: 1,
+    });
+    expect(font).toMatch(/^600 48px "Franklin Gothic Medium"/);
+    expect(font).toContain('"Libre Franklin"');
+  });
+
+  it('lets an explicit bold run override a named Medium face', () => {
+    const font = buildFont(true, false, 48, 'Franklin Gothic Medium', {
+      themeMajorFont: null,
+      themeMinorFont: null,
+      dpr: 1,
+    });
+    expect(font).toMatch(/^bold 48px "Franklin Gothic Medium"/);
   });
 });

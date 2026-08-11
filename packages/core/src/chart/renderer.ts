@@ -1676,7 +1676,10 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     // `<c:catAx><c:txPr>…<a:solidFill>` colors the category tick labels (e.g.
     // sample-2 slide-16's "2025年3月期" labels are `bg1 lumMod 75%` gray).
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
-    ctx.font = `${Math.max(8, Math.min(11, catGap * 0.5))}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    const drawnCatTickFontPx = chart.catAxisFontSizeHpt != null
+      ? catAxFontPx
+      : Math.max(8, Math.min(11, catGap * 0.5));
+    ctx.font = `${drawnCatTickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
     // Column: each label is centered in a category slot of width `catGap`, so
     // cap it just under that so neighbours don't collide. Horizontal bars: the
     // label sits right-aligned in the left gutter between the val-title/legend

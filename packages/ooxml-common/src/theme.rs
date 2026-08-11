@@ -3,9 +3,9 @@
 //!
 //! Every OOXML host embeds the same theme grammar (ECMA-376 §20.1.6 /
 //! §14.2.7 / §20.1.4.1): a `<a:clrScheme>` of twelve named color slots, a
-//! `<a:fontScheme>` with major/minor typefaces per script, and a
-//! `<a:fmtScheme><a:lnStyleLst>` of reference line widths. The three parsers had
-//! three partial, drifting copies — pptx resolved `<a:prstClr>` preset names
+//! `<a:fontScheme>` with major/minor typefaces per script, and the four style
+//! lists in `<a:fmtScheme>`. The three parsers had three partial, drifting
+//! copies — pptx resolved `<a:prstClr>` preset names
 //! while docx and xlsx silently dropped them; xlsx never read the font scheme;
 //! docx never read line styles. Consolidating the *parse* here fixes the prstClr
 //! gap uniformly (a preset color now resolves in all three formats) while each
@@ -20,7 +20,196 @@
 
 use crate::ns::is_a_ns;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
+
+/// One style-matrix entry retained for on-demand self-contained XML.
+///
+/// A theme entry may use namespace prefixes declared only on `<a:theme>`
+/// (including extension namespaces such as `a14`). Keeping only the source
+/// range of `<a:ln>`/`<a:solidFill>` therefore produces an invalid fragment.
+/// This descriptor keeps the entry bytes and only the namespace prefixes the
+/// fragment actually references; namespace URIs are shared across entries.
+/// Consumers can therefore build a valid temporary wrapper without multiplying
+/// every root namespace by every style-matrix entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StandaloneThemeStyleXml {
+    fragment: String,
+    namespaces: Vec<(Option<String>, Arc<str>)>,
+}
+
+impl StandaloneThemeStyleXml {
+    fn from_node(
+        node: roxmltree::Node<'_, '_>,
+        source: &str,
+        namespace_pool: &mut HashMap<String, Arc<str>>,
+    ) -> Self {
+        let fragment = source[node.range()].to_owned();
+        let mut prefixes = BTreeSet::new();
+        let bytes = fragment.as_bytes();
+        for colon in bytes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, byte)| (*byte == b':').then_some(index))
+        {
+            let mut start = colon;
+            while start > 0 && is_xml_name_byte(bytes[start - 1]) {
+                start -= 1;
+            }
+            if start < colon {
+                prefixes.insert(fragment[start..colon].to_owned());
+            }
+        }
+
+        let intern = |uri: &str, pool: &mut HashMap<String, Arc<str>>| {
+            pool.entry(uri.to_owned())
+                .or_insert_with(|| Arc::<str>::from(uri))
+                .clone()
+        };
+        let mut namespaces = Vec::with_capacity(prefixes.len() + 1);
+        if let Some(uri) = node.lookup_namespace_uri(None) {
+            namespaces.push((None, intern(uri, namespace_pool)));
+        }
+        for prefix in prefixes {
+            if prefix == "xml" {
+                continue;
+            }
+            if let Some(uri) = node.lookup_namespace_uri(Some(&prefix)) {
+                namespaces.push((Some(prefix), intern(uri, namespace_pool)));
+            }
+        }
+        Self {
+            fragment,
+            namespaces,
+        }
+    }
+
+    /// Build a self-contained wrapper on demand. Namespace URIs are interned
+    /// across all entries and only prefixes referenced by this fragment are
+    /// retained, so parsing a theme cannot expand O(namespaces × entries) in
+    /// memory. The temporary wrapper lives only for the caller's DOM parse.
+    pub fn to_xml(&self) -> String {
+        let mut xml = String::from("<themeStyleRoot");
+        for (prefix, uri) in &self.namespaces {
+            match prefix {
+                Some(prefix) => {
+                    xml.push_str(" xmlns:");
+                    xml.push_str(prefix);
+                }
+                None => xml.push_str(" xmlns"),
+            }
+            xml.push_str("=\"");
+            xml.push_str(&quick_xml::escape::escape(uri.as_ref()));
+            xml.push('"');
+        }
+        xml.push('>');
+        xml.push_str(&self.fragment);
+        xml.push_str("</themeStyleRoot>");
+        xml
+    }
+}
+
+fn is_xml_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+}
+
+/// Result of resolving a style-matrix index. `NoStyle` is an authored sentinel
+/// (`0`, and `1000` for fill references), while `Missing` means the index asked
+/// for a list entry that the theme does not contain. Keeping these distinct
+/// prevents a corrupt/missing recipe from being mistaken for explicit no-fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleMatrixLookup<'a> {
+    NoStyle,
+    Missing,
+    Entry(&'a StandaloneThemeStyleXml),
+}
+
+/// The four lists in DrawingML `CT_StyleMatrix` (`a:fmtScheme`).
+///
+/// Entries are stored as namespace-complete XML rather than partially decoded
+/// fields. That preserves extension markup and lets the shared fill/line/effect
+/// parsers evolve without reparsing or retaining the full theme document.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThemeFormatScheme {
+    fill_styles: Vec<StandaloneThemeStyleXml>,
+    line_styles: Vec<StandaloneThemeStyleXml>,
+    effect_styles: Vec<StandaloneThemeStyleXml>,
+    background_fill_styles: Vec<StandaloneThemeStyleXml>,
+}
+
+impl ThemeFormatScheme {
+    /// Parse `<a:fmtScheme>` from either Transitional or Strict DrawingML.
+    /// Malformed XML or a missing format scheme yields an empty value.
+    pub fn parse(xml: &str) -> Self {
+        let Ok(doc) = crate::depth::parse_guarded(xml) else {
+            return Self::default();
+        };
+        let Some(format_scheme) = doc.descendants().find(|node| {
+            node.is_element()
+                && node.tag_name().name() == "fmtScheme"
+                && is_a_ns(node.tag_name().namespace())
+        }) else {
+            return Self::default();
+        };
+
+        let mut namespace_pool = HashMap::new();
+        let mut collect = |list_name: &str| -> Vec<StandaloneThemeStyleXml> {
+            format_scheme
+                .children()
+                .find(|node| {
+                    node.is_element()
+                        && node.tag_name().name() == list_name
+                        && is_a_ns(node.tag_name().namespace())
+                })
+                .into_iter()
+                .flat_map(|list| list.children())
+                .filter(|node| node.is_element() && is_a_ns(node.tag_name().namespace()))
+                .map(|node| StandaloneThemeStyleXml::from_node(node, xml, &mut namespace_pool))
+                .collect()
+        };
+
+        Self {
+            fill_styles: collect("fillStyleLst"),
+            line_styles: collect("lnStyleLst"),
+            effect_styles: collect("effectStyleLst"),
+            background_fill_styles: collect("bgFillStyleLst"),
+        }
+    }
+
+    /// Resolve `CT_StyleMatrixReference@idx` for `fillRef`.
+    pub fn lookup_fill_ref(&self, index: usize) -> StyleMatrixLookup<'_> {
+        match index {
+            0 | 1000 => StyleMatrixLookup::NoStyle,
+            1..=999 => one_based_lookup(&self.fill_styles, index),
+            _ => one_based_lookup(&self.background_fill_styles, index - 1000),
+        }
+    }
+
+    /// Resolve `CT_StyleMatrixReference@idx` for `lnRef`.
+    pub fn lookup_line_ref(&self, index: usize) -> StyleMatrixLookup<'_> {
+        if index == 0 {
+            StyleMatrixLookup::NoStyle
+        } else {
+            one_based_lookup(&self.line_styles, index)
+        }
+    }
+
+    /// Resolve `CT_StyleMatrixReference@idx` for `effectRef`.
+    pub fn lookup_effect_ref(&self, index: usize) -> StyleMatrixLookup<'_> {
+        if index == 0 {
+            StyleMatrixLookup::NoStyle
+        } else {
+            one_based_lookup(&self.effect_styles, index)
+        }
+    }
+}
+
+fn one_based_lookup(entries: &[StandaloneThemeStyleXml], index: usize) -> StyleMatrixLookup<'_> {
+    entries
+        .get(index.saturating_sub(1))
+        .map(StyleMatrixLookup::Entry)
+        .unwrap_or(StyleMatrixLookup::Missing)
+}
 
 /// The twelve `<a:clrScheme>` slot names in ECMA-376 §20.1.6.2 declaration
 /// order: `dk1`, `lt1`, `dk2`, `lt2`, `accent1`..`accent6`, `hlink`,
@@ -177,32 +366,6 @@ fn parse_font_group(scheme: roxmltree::Node<'_, '_>, group_name: &str) -> ThemeF
         ea: read("ea"),
         cs: read("cs"),
     }
-}
-
-/// Parse `<a:fmtScheme><a:lnStyleLst>` line-reference widths (EMU), in
-/// declaration order. A drawing shape's `<a:style><a:lnRef idx="N">` resolves
-/// its outline width from entry N (1-based) of this list (ECMA-376 §20.1.4.2.19);
-/// an `<a:ln>` without an explicit `w` uses the CT_LineProperties default 9525
-/// EMU = 0.75 pt (§20.1.2.2.24). Missing scheme or malformed XML yields an empty
-/// list.
-pub fn parse_ln_style_widths(xml: &str) -> Vec<i64> {
-    let Ok(doc) = crate::depth::parse_guarded(xml) else {
-        return Vec::new();
-    };
-    for node in doc.descendants() {
-        if node.tag_name().name() == "lnStyleLst" && is_a_ns(node.tag_name().namespace()) {
-            return node
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "ln")
-                .map(|ln| {
-                    ln.attribute("w")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(9525)
-                })
-                .collect();
-        }
-    }
-    Vec::new()
 }
 
 /// Resolve a DrawingML `<a:prstClr>` preset color name (ECMA-376 §20.1.10.48
@@ -644,31 +807,89 @@ mod tests {
     }
 
     #[test]
-    fn ln_style_widths_reads_list_with_default() {
-        // Third <a:ln> has no w → CT_LineProperties default 9525.
-        assert_eq!(parse_ln_style_widths(THEME), vec![6350, 12700, 9525]);
-    }
-
-    /// Same fixture as [`ln_style_widths_reads_list_with_default`], but declared
-    /// under the ISO/IEC 29500 Strict `a:` URI
-    /// (`http://purl.oclc.org/ooxml/drawingml/main`) instead of the Transitional
-    /// one. `parse_ln_style_widths` must accept both — a document saved by
-    /// Office in Strict conformance still has a `<a:fmtScheme><a:lnStyleLst>` to
-    /// resolve `<a:lnRef idx="N">` line widths from.
-    #[test]
-    fn ln_style_widths_reads_list_with_default_strict_ns() {
-        const STRICT_THEME: &str = r#"<a:theme xmlns:a="http://purl.oclc.org/ooxml/drawingml/main">
+    fn format_scheme_preserves_in_scope_namespaces_and_lookup_semantics() {
+        const XML: &str = r#"<a:theme
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main">
           <a:themeElements>
             <a:fmtScheme name="Office">
+              <a:fillStyleLst><a:solidFill><a:srgbClr val="112233"/></a:solidFill></a:fillStyleLst>
               <a:lnStyleLst>
-                <a:ln w="6350"/>
-                <a:ln w="12700"/>
-                <a:ln/>
+                <a:ln w="12700"><a:solidFill><a:schemeClr val="accent1"/></a:solidFill><a:extLst><a:ext uri="x"><a14:hiddenEffects/></a:ext></a:extLst></a:ln>
               </a:lnStyleLst>
+              <a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>
+              <a:bgFillStyleLst><a:noFill/></a:bgFillStyleLst>
             </a:fmtScheme>
           </a:themeElements>
         </a:theme>"#;
-        assert_eq!(parse_ln_style_widths(STRICT_THEME), vec![6350, 12700, 9525]);
+
+        let scheme = ThemeFormatScheme::parse(XML);
+        assert_eq!(scheme.lookup_fill_ref(0), StyleMatrixLookup::NoStyle);
+        assert!(matches!(
+            scheme.lookup_fill_ref(1),
+            StyleMatrixLookup::Entry(_)
+        ));
+        assert_eq!(scheme.lookup_fill_ref(2), StyleMatrixLookup::Missing);
+        assert_eq!(scheme.lookup_fill_ref(1000), StyleMatrixLookup::NoStyle);
+        assert!(matches!(
+            scheme.lookup_fill_ref(1001),
+            StyleMatrixLookup::Entry(_)
+        ));
+        assert_eq!(scheme.lookup_line_ref(0), StyleMatrixLookup::NoStyle);
+        assert_eq!(scheme.lookup_line_ref(2), StyleMatrixLookup::Missing);
+
+        let StyleMatrixLookup::Entry(line) = scheme.lookup_line_ref(1) else {
+            panic!("line style 1 should exist");
+        };
+        let line_xml = line.to_xml();
+        let parsed =
+            roxmltree::Document::parse(&line_xml).expect("standalone line style must parse");
+        assert!(parsed
+            .descendants()
+            .any(|node| node.tag_name().name() == "hiddenEffects"
+                && node.tag_name().namespace()
+                    == Some("http://schemas.microsoft.com/office/drawing/2010/main")));
+    }
+
+    #[test]
+    fn format_scheme_accepts_strict_drawingml_namespace() {
+        const XML: &str = r#"<a:theme xmlns:a="http://purl.oclc.org/ooxml/drawingml/main">
+          <a:themeElements><a:fmtScheme name="Strict">
+            <a:lnStyleLst><a:ln w="25400"><a:noFill/></a:ln></a:lnStyleLst>
+          </a:fmtScheme></a:themeElements>
+        </a:theme>"#;
+        let scheme = ThemeFormatScheme::parse(XML);
+        let StyleMatrixLookup::Entry(line) = scheme.lookup_line_ref(1) else {
+            panic!("strict line style should exist");
+        };
+        assert!(line
+            .to_xml()
+            .contains("http://purl.oclc.org/ooxml/drawingml/main"));
+    }
+
+    #[test]
+    fn format_scheme_does_not_copy_unused_root_namespaces_into_every_entry() {
+        let unused = (0..128)
+            .map(|index| {
+                format!(
+                    r#" xmlns:u{index}="urn:unused:{index}:{}""#,
+                    "x".repeat(128)
+                )
+            })
+            .collect::<String>();
+        let xml = format!(
+            r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"{unused}><a:themeElements><a:fmtScheme name="bounded"><a:lnStyleLst><a:ln/><a:ln/></a:lnStyleLst></a:fmtScheme></a:themeElements></a:theme>"#
+        );
+        let scheme = ThemeFormatScheme::parse(&xml);
+        for index in [1, 2] {
+            let StyleMatrixLookup::Entry(entry) = scheme.lookup_line_ref(index) else {
+                panic!("line style should exist");
+            };
+            let standalone = entry.to_xml();
+            assert!(standalone.contains("xmlns:a="));
+            assert!(!standalone.contains("urn:unused"));
+            roxmltree::Document::parse(&standalone).expect("bounded wrapper parses");
+        }
     }
 
     #[test]
@@ -721,6 +942,6 @@ mod tests {
         assert!(ThemeColorScheme::parse("").is_empty());
         assert!(ThemeColorScheme::parse("<not xml").is_empty());
         assert_eq!(ThemeFonts::parse(""), ThemeFonts::default());
-        assert!(parse_ln_style_widths("").is_empty());
+        assert_eq!(ThemeFormatScheme::parse(""), ThemeFormatScheme::default());
     }
 }

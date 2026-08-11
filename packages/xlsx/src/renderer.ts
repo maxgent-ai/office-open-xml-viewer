@@ -5,8 +5,9 @@ import type {
   Run, GradientFillSpec, ShapeInfo, SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
+import type { Stroke } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -3762,7 +3763,7 @@ function drawShape(
             break;
         }
       }
-      fillAndStroke(ctx, shape);
+      fillAndStroke(ctx, shape, sw, sh);
     }
   } else if (shape.geom.type === 'preset') {
     // Drive the shape off the ECMA-376 §20.1.9 spec-driven preset engine
@@ -3771,15 +3772,20 @@ function drawShape(
     // renders with its true outline instead of the old rect fallback. The
     // engine returns false for presets it doesn't carry; only then do we fall
     // back to a plain rectangle.
-    const baseFill = shape.fillColor ?? null;
-    const applyAndStroke =
-      shape.strokeColor && shape.strokeWidth > 0
-        ? () => {
-            ctx.strokeStyle = shape.strokeColor as string;
-            ctx.lineWidth = Math.max(0.5, shape.strokeWidth / EMU_PER_PX);
-            ctx.stroke();
-          }
-        : null;
+    const baseFill = resolveFill(
+      shape.fill ?? (shape.fillColor
+        ? { fillType: 'solid' as const, color: shape.fillColor }
+        : null),
+      ctx,
+      0,
+      0,
+      sw,
+      sh,
+      shape.rot,
+    );
+    const applyAndStroke = shape.strokeColor && shape.strokeWidth > 0
+      ? () => strokeShapePath(ctx, shape, sw, sh)
+      : null;
     const drawn = renderPresetShape(
       ctx,
       shape.geom.name,
@@ -3797,7 +3803,7 @@ function drawShape(
     if (!drawn) {
       ctx.beginPath();
       ctx.rect(0, 0, sw, sh);
-      fillAndStroke(ctx, shape);
+      fillAndStroke(ctx, shape, sw, sh);
     }
   } else if (shape.geom.type === 'image') {
     // Image leaf inside a group (e.g. a sun-emoji clip-art nested in the
@@ -4306,16 +4312,55 @@ export function drawShapeText(
   }
 }
 
-function fillAndStroke(ctx: CanvasRenderingContext2D, shape: ShapeInfo): void {
-  if (shape.fillColor) {
-    ctx.fillStyle = shape.fillColor;
+function fillAndStroke(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeInfo,
+  width: number,
+  height: number,
+): void {
+  const fill = shape.fill ?? (shape.fillColor
+    ? { fillType: 'solid' as const, color: shape.fillColor }
+    : null);
+  const paint = resolveFill(fill, ctx, 0, 0, width, height, shape.rot);
+  if (paint) {
+    ctx.fillStyle = paint;
     ctx.fill();
   }
-  if (shape.strokeColor && shape.strokeWidth > 0) {
-    ctx.strokeStyle = shape.strokeColor;
-    ctx.lineWidth = Math.max(0.5, shape.strokeWidth / EMU_PER_PX);
-    ctx.stroke();
+  strokeShapePath(ctx, shape, width, height);
+}
+
+function shapeStroke(shape: ShapeInfo): Stroke | null {
+  if (!shape.strokeColor || shape.strokeWidth <= 0) return null;
+  return {
+    color: shape.strokeColor,
+    width: shape.strokeWidth,
+    ...(shape.strokeFill ? { fill: shape.strokeFill } : {}),
+    ...(shape.strokeDashStyle ? { dashStyle: shape.strokeDashStyle } : {}),
+    ...(shape.strokeCustomDash?.length ? { customDash: shape.strokeCustomDash } : {}),
+    ...(shape.strokeLineCap ? { lineCap: shape.strokeLineCap } : {}),
+    ...(shape.strokeLineJoin ? { lineJoin: shape.strokeLineJoin } : {}),
+    ...(shape.strokeMiterLimit !== undefined ? { miterLimit: shape.strokeMiterLimit } : {}),
+    ...(shape.strokeAlignment ? { alignment: shape.strokeAlignment } : {}),
+    ...(shape.strokeCmpd ? { cmpd: shape.strokeCmpd } : {}),
+    ...(shape.strokeHeadEnd ? { headEnd: shape.strokeHeadEnd } : {}),
+    ...(shape.strokeTailEnd ? { tailEnd: shape.strokeTailEnd } : {}),
+  };
+}
+
+function strokeShapePath(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeInfo,
+  width: number,
+  height: number,
+): void {
+  const stroke = shapeStroke(shape);
+  if (!stroke) return;
+  applyStroke(ctx, stroke, 1 / EMU_PER_PX);
+  if (stroke.fill) {
+    const paint = resolveFill(stroke.fill, ctx, 0, 0, width, height, shape.rot);
+    if (paint) ctx.strokeStyle = paint;
   }
+  ctx.stroke();
 }
 
 // ────────────────────────────────────────────────────────────────

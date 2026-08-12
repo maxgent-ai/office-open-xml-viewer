@@ -32,6 +32,21 @@
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 
+/// Resource ceiling for the expanded Chart Colors total set. Typical Office
+/// parts contain 6 base colors × at most 9 variations; this bound prevents an
+/// adversarial colors×variations product from amplifying a bounded XML tree.
+const MAX_CHART_COLOR_STYLE_ENTRIES: usize = 4096;
+/// Aggregate structured-fill components retained after expanding one Chart
+/// Style role across the linked Chart Colors palette. A gradient contributes
+/// one component per stop; solid and pattern fills contribute one. This bounds
+/// the otherwise multiplicative `palette entries × gradient stops` wire model.
+const MAX_CHART_STYLE_PAINT_COMPONENTS: usize = 1_048_576;
+/// Maximum cache width accepted from `<c:ptCount>` / `<cx:lvl ptCount>`.
+/// Chart data originates in worksheet ranges, whose largest single dimension
+/// is 1,048,576 rows. Rejecting wider sparse caches prevents an XML attribute
+/// or point index from requesting an unbounded WASM allocation.
+const MAX_CHART_CACHE_POINTS: usize = 1_048_576;
+
 // ============================================================================
 // Shared chart data model
 // ============================================================================
@@ -55,6 +70,83 @@ use serde::{Deserialize, Serialize};
 // All field references are ECMA-376 / ISO-29500 part 1 §21.2 (DrawingML Charts)
 // as documented on the TS side; see that file for the per-field spec citations.
 
+/// Effective paint for one role in an Office 2013+ Chart Style part.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartExElementStyle {
+    /// Per-color-style-index DrawingML fill recipes after `phClr`
+    /// substitution. Solid fills remain duplicated in `fill_colors` for wire
+    /// compatibility; gradient and pattern fills are retained only here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_paints: Option<Vec<Option<ChartStyleFill>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_colors: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_colors: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_dash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_cap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_join: Option<String>,
+    /// Fixed zero-based CT_ColorStyle index from `<cs:styleClr val>`. `None`
+    /// means `auto`, so the renderer uses the relative object index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_color_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_color_index: Option<usize>,
+}
+
+/// DrawingML fill recipe retained from a Chart Style role. Chart Style parts
+/// use the same CT_GradientFillProperties and CT_PatternFillProperties grammar
+/// as shapes, so this wire shape intentionally mirrors core's shared `Fill`
+/// discriminated union instead of introducing chart-specific paint semantics.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ChartStyleFill {
+    #[serde(rename = "solid")]
+    Solid { color: String },
+    #[serde(rename = "gradient")]
+    Gradient {
+        stops: Vec<crate::fill::GradStop>,
+        angle: f64,
+        #[serde(rename = "gradType")]
+        grad_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scaled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(
+            rename = "fillToRect",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        fill_to_rect: Option<crate::fill::FillRect>,
+        #[serde(rename = "tileRect", default, skip_serializing_if = "Option::is_none")]
+        tile_rect: Option<crate::fill::FillRect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flip: Option<String>,
+        #[serde(
+            rename = "rotWithShape",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        rot_with_shape: Option<bool>,
+    },
+    #[serde(rename = "pattern")]
+    Pattern {
+        fg: String,
+        bg: String,
+        preset: String,
+    },
+}
+
 /// Mirror of TS `ChartModel`. Built by each parser and emitted as the single
 /// `chart` object consumed by the core chart renderer.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -63,6 +155,10 @@ pub struct ChartModel {
     // ── Required (always serialized) ────────────────────────────────────────
     pub chart_type: String,
     pub title: Option<String>,
+    /// A direct `<c:title>` / `<cx:title>` exists even when its text is empty.
+    /// Empty title placeholders still reserve their authored layout band.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_present: bool,
     pub categories: Vec<String>,
     pub series: Vec<ChartSeries>,
     pub show_data_labels: bool,
@@ -111,6 +207,8 @@ pub struct ChartModel {
     pub data_label_font_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_label_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,10 +259,28 @@ pub struct ChartModel {
     pub plot_area_manual_layout: Option<ChartManualLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scatter_style: Option<String>,
+    /// `<c:bubbleChart><c:bubbleScale val>` (§21.2.2.21) — bubble diameter
+    /// scale as a percentage of the renderer's default bubble size (0–300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_scale: Option<u32>,
+    /// `<c:bubbleChart><c:sizeRepresents val>` (§21.2.2.193,
+    /// ST_SizeRepresents §21.2.3.43). Absent means the schema default `area`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_size_represents: Option<String>,
+    /// `<c:bubbleChart><c:showNegBubbles val>` (§21.2.2.179). Absent defaults
+    /// to false; a bare CT_Boolean element implies true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_negative_bubbles: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radar_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
+    /// Numeric horizontal axis referenced by a scatter/bubble group overlaid
+    /// on a non-scatter primary chart. OOXML represents both scatter axes as
+    /// `<c:valAx>`; this keeps the second horizontal axis distinct from the
+    /// primary bar/column value axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_cat_axis: Option<SecondaryValueAxis>,
     // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
     /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82, `ST_HoleSizePercent`
     /// §21.2.3.55) — hole diameter as 1–90% of the outer diameter. `None` when
@@ -281,6 +397,12 @@ pub struct ChartModel {
     /// `"low"` | `"high"` | `"none"` (labels hidden). `None` = nextTo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_tick_label_pos: Option<String>,
+    /// `<c:catAx><c:tickLblSkip val>` (§21.2.2.205), 1-based interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_label_skip: Option<u32>,
+    /// `<c:catAx><c:tickMarkSkip val>` (§21.2.2.206), 1-based interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_tick_mark_skip: Option<u32>,
     /// `<c:valAx><c:tickLblPos val>` (§21.2.2.207).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_tick_label_pos: Option<String>,
@@ -305,7 +427,7 @@ pub struct ChartModel {
     /// does NOT yet draw them (tracked as a follow-up). `None` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stock_up_down_bars: Option<bool>,
-    // ── chartEx box-and-whisker / sunburst (CH15, MS 2014 chartex ext) ────────
+    // ── chartEx structured layouts (CH15, MS 2014 chartex ext) ───────────────
     /// Structured box-and-whisker data (`chart_type == "boxWhisker"`). `None`
     /// for every other chart type — the field is populated ONLY by
     /// `parse_chartex_part` when the series `layoutId` is `boxWhisker`, so the
@@ -317,12 +439,28 @@ pub struct ChartModel {
     /// otherwise (byte-stable for the flat-model chartEx charts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chartex_sunburst: Option<ChartexSunburst>,
+    /// Structured treemap hierarchy (`chart_type == "treemap"`) and its
+    /// parent-label layout. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_treemap: Option<ChartexTreemap>,
     /// Theme accent palette (`accent1..6` resolved to hex, no `#`) for chartEx
-    /// charts that color by branch/series index (boxWhisker series, sunburst
-    /// branches). `None` when the resolver supplies no default palette (pptx);
+    /// charts that color by branch/series index (boxWhisker series and
+    /// sunburst/treemap branches). `None` when the resolver supplies no default palette (pptx);
     /// the renderer then falls back to its own `CHART_PALETTE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chartex_accents: Option<Vec<String>>,
+    /// Total color set from the linked Chart Colors part: contained colors
+    /// repeated for every authored variation (MS-ODRAWXML §2.8.3.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_color_palette: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_color_style_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_data_point_style: Option<ChartExElementStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_data_point_line_style: Option<ChartExElementStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chartex_data_point_marker_style: Option<ChartExElementStyle>,
     /// §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column
     /// chart: color each data point (bar) from the theme/palette sequence and
     /// list one legend entry per point (like a pie). `Some(true)` only for that
@@ -331,6 +469,63 @@ pub struct ChartModel {
     /// stays `None` here (byte-stable wire for every existing chart).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vary_colors: Option<bool>,
+    /// Text boxes stored in the chart drawing reached through
+    /// `<c:userShapes r:id>` (ECMA-376 chartDrawing `CT_Drawing`). Coordinates
+    /// are fractions of the chart space from `<cdr:relSizeAnchor>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_text_boxes: Option<Vec<ChartTextBox>>,
+}
+
+/// One formatted run in a chart-drawing text box.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartTextRun {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_hpt: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_face: Option<String>,
+}
+
+/// One DrawingML paragraph in a chart-drawing text box.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartTextParagraph {
+    pub runs: Vec<ChartTextRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+}
+
+/// A text shape anchored relative to the chart space.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartTextBox {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub paragraphs: Vec<ChartTextParagraph>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_anchor: Option<String>,
+    /// `<a:bodyPr wrap>` (`ST_TextWrappingType`). `None` retains DrawingML's
+    /// application-default square wrapping; only the explicit `none` value
+    /// disables wrapping in the renderer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<String>,
+}
+
+/// Pattern-only chart-series fill descriptor matching TS `PatternFill`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartPatternFill {
+    pub fill_type: String,
+    pub fg: String,
+    pub bg: String,
+    pub preset: String,
 }
 
 /// Mirror of TS `ChartSeries`.
@@ -339,6 +534,12 @@ pub struct ChartModel {
 pub struct ChartSeries {
     pub name: String,
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_pattern: Option<ChartPatternFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
     pub values: Vec<Option<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_point_colors: Option<Vec<Option<String>>>,
@@ -356,6 +557,14 @@ pub struct ChartSeries {
     pub show_marker: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_format_code: Option<String>,
+    /// Number format of the series category/X source (`<c:cat|xVal>` cache).
+    /// Scatter data labels with `showCatName` use this for the displayed X
+    /// value (for example `0.15` authored as `15%`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_format_code: Option<String>,
+    /// Per-point category/X number formats from `<c:pt@formatCode>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_format_codes: Option<Vec<Option<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,6 +740,10 @@ pub struct ChartSeriesDataLabels {
     pub font_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// `<c:dLbls><c:separator>` (§21.2.2.170) inserted between enabled label
+    /// components. Office commonly stores a line break here for pie labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -621,11 +834,17 @@ pub struct SecondaryValueAxis {
 pub struct ChartexBoxSeries {
     /// Series display name (`<cx:tx><cx:txData><cx:v>`), e.g. "Series1".
     pub name: String,
-    /// Series fill (hex, no `#`) — the theme accent cycled by series index
-    /// (`accent[(idx % 6) + 1]`). `None` when the resolver supplies no default
-    /// palette (pptx); the renderer then falls back to its own palette.
+    /// Explicit `<cx:series><cx:spPr>` fill (hex, no `#`). Absent authoring is
+    /// kept as `None` so the shared renderer can apply Chart Style / linked
+    /// Chart Colors before falling back to theme accents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Explicit `<cx:series><cx:spPr><a:ln>` outline color (hex, no `#`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_color: Option<String>,
+    /// Explicit series outline width from `<a:ln@w>` (EMU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
     /// Raw sample values grouped by category, parallel to
     /// `ChartexBoxWhisker::categories`. Outer index = category, inner = the
     /// sample points that fell in that category (source order preserved).
@@ -637,10 +856,7 @@ pub struct ChartexBoxSeries {
     /// `<cx:layoutPr><cx:visibility outliers>` — draw outlier points.
     pub show_outliers: bool,
     /// `<cx:layoutPr><cx:visibility nonoutliers>` — draw the non-outlier
-    /// (interior) points as dots in addition to the box. Flag parsed;
-    /// interior-dot rendering is pending a fixture that enables it (every
-    /// sample-24 series ships `nonoutliers="0"`, so there is nothing to verify
-    /// the overlay against yet).
+    /// (interior) points as dots in addition to the box.
     pub show_nonoutliers: bool,
     /// `<cx:layoutPr><cx:statistics quartileMethod>` — `"exclusive"` (Excel
     /// default, median excluded when splitting halves) or `"inclusive"`.
@@ -685,12 +901,27 @@ pub struct ChartexSunburst {
     pub rows: Vec<ChartexSunburstRow>,
 }
 
+/// A chartEx treemap: hierarchy rows plus the requested parent-label layout.
+/// The row encoding is identical to sunburst because both layouts consume the
+/// same deepest→root `<cx:strDim type="cat">` levels and numeric size values.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartexTreemap {
+    pub rows: Vec<ChartexSunburstRow>,
+    /// `<cx:layoutPr><cx:parentLabelLayout val>` (`banner`, `overlapping`, or
+    /// `none`). Absent stays `None`; the renderer uses its neutral default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_label_layout: Option<String>,
+}
+
 /// Mirror of TS `ChartManualLayout`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartManualLayout {
     pub x_mode: String,
     pub y_mode: String,
+    pub w_mode: String,
+    pub h_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_target: Option<String>,
     pub x: f64,
@@ -707,6 +938,8 @@ pub struct ChartManualLayout {
 pub struct LegendManualLayout {
     pub x_mode: String,
     pub y_mode: String,
+    pub w_mode: String,
+    pub h_mode: String,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -858,6 +1091,13 @@ pub trait ColorResolver {
         None
     }
 
+    /// DrawingML `a:fmtScheme` used by ChartEx chart-style `fillRef`/`lnRef`.
+    /// The shared parser owns reference inheritance; hosts only expose the
+    /// already-parsed theme sidecar.
+    fn theme_format_scheme(&self) -> Option<&crate::theme::ThemeFormatScheme> {
+        None
+    }
+
     /// Chart-area background to use when the `<c:chartSpace>` carries **no**
     /// `<c:spPr>` at all. Excel relies on its default opaque-white chart area in
     /// that case, so the xlsx resolver returns `Some("FFFFFF")`; PowerPoint
@@ -908,6 +1148,14 @@ struct ChartMappedColorResolver<'a> {
     mapping: ChartColorMapping,
 }
 
+struct ColorResolverThemeAdapter<'a>(&'a dyn ColorResolver);
+
+impl crate::color::ThemeResolver for ColorResolverThemeAdapter<'_> {
+    fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+        self.0.resolve_scheme_color(name)
+    }
+}
+
 impl crate::color::ThemeResolver for ChartMappedColorResolver<'_> {
     fn resolve_scheme_color(&self, logical: &str) -> Option<String> {
         let mapped = self.mapping.map(logical);
@@ -953,8 +1201,152 @@ impl ColorResolver for ChartMappedColorResolver<'_> {
             .or_else(|| self.base.resolve_series_accent(idx))
     }
 
+    fn theme_format_scheme(&self) -> Option<&crate::theme::ThemeFormatScheme> {
+        self.base.theme_format_scheme()
+    }
+
     fn default_chart_bg(&self) -> Option<String> {
         self.base.default_chart_bg()
+    }
+}
+
+fn chart_text_bool_attr(node: Node, name: &str) -> Option<bool> {
+    node.attribute(name)
+        .map(|value| matches!(value, "1" | "true" | "on"))
+}
+
+fn chart_text_run_from_node(
+    run: Node,
+    paragraph_default: Option<Node>,
+    resolver: &dyn ColorResolver,
+) -> Option<ChartTextRun> {
+    let text = child(run, "t")?.text().unwrap_or_default().to_string();
+    let run_props = child(run, "rPr");
+    let prop = |name: &str| {
+        run_props
+            .and_then(|node| node.attribute(name))
+            .or_else(|| paragraph_default.and_then(|node| node.attribute(name)))
+    };
+    let color = run_props
+        .and_then(|node| child(node, "solidFill"))
+        .and_then(|fill| resolver.resolve_solid_fill(fill))
+        .or_else(|| {
+            paragraph_default
+                .and_then(|node| child(node, "solidFill"))
+                .and_then(|fill| resolver.resolve_solid_fill(fill))
+        });
+    let font_face = run_props
+        .and_then(|node| child(node, "latin"))
+        .and_then(|latin| latin.attribute("typeface"))
+        .or_else(|| {
+            paragraph_default
+                .and_then(|node| child(node, "latin"))
+                .and_then(|latin| latin.attribute("typeface"))
+        })
+        .map(str::to_string)
+        .filter(|face| !face.is_empty());
+
+    Some(ChartTextRun {
+        text,
+        font_size_hpt: prop("sz").and_then(|value| value.parse::<i32>().ok()),
+        bold: run_props
+            .and_then(|node| chart_text_bool_attr(node, "b"))
+            .or_else(|| paragraph_default.and_then(|node| chart_text_bool_attr(node, "b"))),
+        color,
+        font_face,
+    })
+}
+
+/// Parse the Chart Drawing part referenced by `<c:userShapes r:id>`.
+///
+/// ECMA-376 `dml-chartDrawing.xsd` defines each `cdr:relSizeAnchor` as `from`
+/// and `to` markers in the inclusive 0..1 chart-space coordinate system,
+/// followed by a DrawingML object. This first shared implementation retains
+/// text shapes (`cdr:sp/cdr:txBody`) losslessly enough for chart titles,
+/// subtitles, notes and source footers. Other object choices remain available
+/// for later model extensions instead of being guessed into canvas primitives.
+pub fn parse_chart_user_shapes(root: Node, resolver: &dyn ColorResolver) -> Vec<ChartTextBox> {
+    root.children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "relSizeAnchor")
+        .filter_map(|anchor| {
+            let from = child(anchor, "from")?;
+            let to = child(anchor, "to")?;
+            let marker = |node: Node, axis: &str| {
+                child(node, axis)
+                    .and_then(|value| value.text())
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            };
+            let x = marker(from, "x")?;
+            let y = marker(from, "y")?;
+            let x2 = marker(to, "x")?;
+            let y2 = marker(to, "y")?;
+            if x2 < x || y2 < y {
+                return None;
+            }
+
+            let shape = child(anchor, "sp")?;
+            let text_body = child(shape, "txBody")?;
+            let body_pr = child(text_body, "bodyPr");
+            let vertical_anchor = body_pr
+                .and_then(|body| body.attribute("anchor"))
+                .map(str::to_string);
+            let wrap = body_pr
+                .and_then(|body| body.attribute("wrap"))
+                .map(str::to_string);
+            let paragraphs = text_body
+                .children()
+                .filter(|node| node.is_element() && node.tag_name().name() == "p")
+                .map(|paragraph| {
+                    let p_pr = child(paragraph, "pPr");
+                    let paragraph_default = p_pr.and_then(|props| child(props, "defRPr"));
+                    let align = p_pr
+                        .and_then(|props| props.attribute("algn"))
+                        .map(str::to_string);
+                    let runs = paragraph
+                        .children()
+                        .filter(|node| {
+                            node.is_element() && matches!(node.tag_name().name(), "r" | "fld")
+                        })
+                        .filter_map(|run| {
+                            chart_text_run_from_node(run, paragraph_default, resolver)
+                        })
+                        .collect();
+                    ChartTextParagraph { runs, align }
+                })
+                .collect::<Vec<_>>();
+            if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
+                return None;
+            }
+
+            Some(ChartTextBox {
+                x,
+                y,
+                w: x2 - x,
+                h: y2 - y,
+                paragraphs,
+                vertical_anchor,
+                wrap,
+            })
+        })
+        .collect()
+}
+
+/// Parse chart user-shape text with the owning chart's optional color-map
+/// override applied to DrawingML scheme colors.
+pub fn parse_chart_user_shapes_for_chart(
+    chart_root: Node,
+    user_shapes_root: Node,
+    resolver: &dyn ColorResolver,
+) -> Vec<ChartTextBox> {
+    if let Some(mapping) = ChartColorMapping::from_chart_space(chart_root) {
+        let mapped = ChartMappedColorResolver {
+            base: resolver,
+            mapping,
+        };
+        parse_chart_user_shapes(user_shapes_root, &mapped)
+    } else {
+        parse_chart_user_shapes(user_shapes_root, resolver)
     }
 }
 
@@ -994,11 +1386,17 @@ pub fn extract_bar_gap_overlap(root: Node) -> (Option<i32>, Option<i32>) {
     (gap, ov)
 }
 
-/// First `<c:dLbls><c:dLblPos val>` found anywhere in the chart (chart-level
-/// or per-series). ECMA-376 §21.2.2.49.
+/// First chart-group-level `<c:dLbls><c:dLblPos val>` in the chart.
+/// Series-level positions are retained on `ChartSeriesDataLabels` and must not
+/// leak into sibling series as a chart-wide fallback. ECMA-376 §21.2.2.49.
 pub fn extract_data_label_position(root: Node) -> Option<String> {
     root.descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .filter(|n| {
+            n.parent()
+                .map(|parent| parent.tag_name().name() != "ser")
+                .unwrap_or(true)
+        })
         .find_map(|dlbls| {
             child(dlbls, "dLblPos")
                 .and_then(|n| n.attribute("val"))
@@ -1070,13 +1468,18 @@ pub fn extract_radar_style(root: Node) -> Option<String> {
 
 /// Parse a `<c:layout><c:manualLayout>` node into a [`ChartManualLayout`]
 /// (ECMA-376 §21.2.2.88). `layout_node` is the `<c:layout>` element; returns
-/// `None` when it carries no `<c:manualLayout>` child. `xMode`/`yMode` default
-/// to `"edge"`; `x`/`y` default to 0; `w`/`h` stay `None` when absent.
+/// `None` when it carries no `<c:manualLayout>` child. `layoutTarget` defaults
+/// to `"outer"` per CT_LayoutTarget; `x`/`y` default to 0; `w`/`h` stay `None`
+/// when absent.
 pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
     let manual = child(layout_node, "manualLayout")?;
-    let mut x_mode = "edge".to_string();
-    let mut y_mode = "edge".to_string();
-    let mut layout_target: Option<String> = None;
+    // CT_LayoutMode@val defaults to factor in both Strict and Transitional
+    // dml-chart.xsd. The element may also be present with no val attribute.
+    let mut x_mode = "factor".to_string();
+    let mut y_mode = "factor".to_string();
+    let mut w_mode = "factor".to_string();
+    let mut h_mode = "factor".to_string();
+    let mut layout_target = Some("outer".to_string());
     let mut x = 0.0_f64;
     let mut y = 0.0_f64;
     let mut w: Option<f64> = None;
@@ -1092,6 +1495,16 @@ pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
             "yMode" => {
                 if let Some(v) = val_str {
                     y_mode = v;
+                }
+            }
+            "wMode" => {
+                if let Some(v) = val_str {
+                    w_mode = v;
+                }
+            }
+            "hMode" => {
+                if let Some(v) = val_str {
+                    h_mode = v;
                 }
             }
             "layoutTarget" => {
@@ -1119,6 +1532,8 @@ pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
     Some(ChartManualLayout {
         x_mode,
         y_mode,
+        w_mode,
+        h_mode,
         layout_target,
         x,
         y,
@@ -1133,22 +1548,16 @@ pub fn extract_manual_layout(layout_node: Node) -> Option<ChartManualLayout> {
 /// `legend_node` is the `<c:legend>` element. `None` when it has no manual layout.
 pub fn extract_legend_manual_layout(legend_node: Node) -> Option<LegendManualLayout> {
     let layout = child(legend_node, "layout")?;
-    let manual = child(layout, "manualLayout")?;
-    let val = |tag: &str| {
-        child(manual, tag).and_then(|n| n.attribute("val").and_then(|v| v.parse::<f64>().ok()))
-    };
-    let mode = |tag: &str| {
-        child(manual, tag)
-            .and_then(|n| n.attribute("val").map(|v| v.to_string()))
-            .unwrap_or_else(|| "edge".to_string())
-    };
+    let manual = extract_manual_layout(layout)?;
     Some(LegendManualLayout {
-        x_mode: mode("xMode"),
-        y_mode: mode("yMode"),
-        x: val("x").unwrap_or(0.0),
-        y: val("y").unwrap_or(0.0),
-        w: val("w").unwrap_or(0.0),
-        h: val("h").unwrap_or(0.0),
+        x_mode: manual.x_mode,
+        y_mode: manual.y_mode,
+        w_mode: manual.w_mode,
+        h_mode: manual.h_mode,
+        x: manual.x,
+        y: manual.y,
+        w: manual.w.unwrap_or(0.0),
+        h: manual.h.unwrap_or(0.0),
     })
 }
 
@@ -1281,6 +1690,8 @@ fn extract_chartex_title_size(root: Node) -> Option<i32> {
 /// Transitional and Strict namespace prefixes resolve. Shared by the pptx /
 /// xlsx / docx callers so they resolve the same relationship the same way.
 pub const CHART_STYLE_REL_TYPE_SUFFIX: &str = "office/2011/relationships/chartStyle";
+/// Accepts both Office's 2011 and 2012 relationship namespace revisions.
+pub const CHART_COLOR_STYLE_REL_TYPE_SUFFIX: &str = "relationships/chartColorStyle";
 
 /// Title font size (hundredths of a point) declared by the chart's associated
 /// chartStyle part (`<cs:chartStyle><cs:title><cs:defRPr@sz>`).
@@ -1293,7 +1704,7 @@ pub const CHART_STYLE_REL_TYPE_SUFFIX: &str = "office/2011/relationships/chartSt
 /// guess that is visibly too large. `None` when `style_xml` is absent, malformed,
 /// or declares no `<cs:title>` size.
 pub fn extract_chartex_style_title_size(style_xml: &str) -> Option<i32> {
-    let doc = roxmltree::Document::parse(style_xml).ok()?;
+    let doc = crate::depth::parse_guarded(style_xml).ok()?;
     let title = doc
         .root_element()
         .descendants()
@@ -1528,6 +1939,12 @@ pub fn extract_legend_font_color(root: Node, resolver: &dyn ColorResolver) -> Op
 // Pie / doughnut geometry (CH8)
 // ============================================================================
 
+/** Parse the OOXML percentage unions that accept either an unsigned integer
+ * or the Strict/Transitional percentage lexical form (`"100%"`). */
+fn parse_unsigned_percent(value: &str) -> Option<u32> {
+    value.strip_suffix('%').unwrap_or(value).parse::<u32>().ok()
+}
+
 /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.82) — hole diameter percentage
 /// (1–90). Clamped to the ECMA range. `None` when absent. `root` is the chart
 /// space (or `<c:chart>`); the search is scoped to a `<c:doughnutChart>` so a
@@ -1538,7 +1955,7 @@ pub fn extract_hole_size(root: Node) -> Option<u32> {
         .find(|n| n.is_element() && n.tag_name().name() == "doughnutChart")?;
     child(doughnut, "holeSize")
         .and_then(|n| n.attribute("val"))
-        .and_then(|v| v.trim_end_matches('%').parse::<u32>().ok())
+        .and_then(parse_unsigned_percent)
         .map(|v| v.clamp(1, 90))
 }
 
@@ -1731,6 +2148,22 @@ pub fn extract_data_label_font_size(root: Node) -> Option<i32> {
         })
 }
 
+/// First explicit data-label bold flag from `<c:dLbls><c:txPr>`.
+pub fn extract_data_label_font_bold(root: Node) -> Option<bool> {
+    root.descendants()
+        .filter(|n| n.is_element() && matches!(n.tag_name().name(), "dLbls" | "dataLabels"))
+        .find_map(|labels| {
+            child(labels, "txPr").and_then(|tx| {
+                tx.descendants().find_map(|node| {
+                    if !node.is_element() || !matches!(node.tag_name().name(), "defRPr" | "rPr") {
+                        return None;
+                    }
+                    chart_text_bool_attr(node, "b")
+                })
+            })
+        })
+}
+
 /// First `<c:dLbls><c:txPr>...<a:solidFill>` resolved to a hex color.
 ///
 /// Walks each `<c:dLbls>` (chart-level + per-series) in document order,
@@ -1833,6 +2266,486 @@ fn extract_sp_pr_ln_style(
     // strength rather than its untransformed base color.
     let color = resolver.resolve_shape_fill(ln);
     (color, width, no_fill)
+}
+
+/// Resolve a color inside a chart-style recipe. `phClr` is the branch/series
+/// accent supplied by the style reference; fixed scheme colors keep resolving
+/// through the host theme. DrawingML color transforms remain on the authored
+/// color node and are therefore applied by the shared resolver.
+fn resolve_chart_style_color(
+    color_container: Node,
+    resolver: &dyn ColorResolver,
+    placeholder: Option<&str>,
+) -> Option<String> {
+    let adapter = ColorResolverThemeAdapter(resolver);
+    let style_resolver = crate::color::StyleMatrixColorResolver::new(&adapter, placeholder);
+    crate::color::parse_color_node(color_container, &style_resolver, resolver.tint_mode())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ChartStylePaint {
+    NoFill,
+    Fill(Option<ChartStyleFill>),
+}
+
+fn chart_style_reference_color(
+    reference: Node,
+    resolver: &dyn ColorResolver,
+    accent: Option<&str>,
+    palette: Option<&[Option<String>]>,
+    color_style_method: Option<&str>,
+) -> Result<Option<String>, ()> {
+    const DRAWINGML_COLORS: &[&str] = &[
+        "scrgbClr",
+        "srgbClr",
+        "hslClr",
+        "sysClr",
+        "schemeClr",
+        "prstClr",
+    ];
+    // CT_StyleReference accepts a normal DrawingML color choice as an
+    // alternative to CT_StyleColor. It is a fixed reference color, independent
+    // of the linked Chart Colors part.
+    if reference
+        .children()
+        .any(|node| node.is_element() && DRAWINGML_COLORS.contains(&node.tag_name().name()))
+    {
+        return resolve_chart_style_color(reference, resolver, None)
+            .map(Some)
+            .ok_or(());
+    }
+    let Some(style_color) = child(reference, "styleClr") else {
+        return Ok(None);
+    };
+    let value = style_color.attribute("val").unwrap_or("auto");
+    // MS-ODRAWXML §2.8.4.6 ST_StyleColorVal: unsigned integers are fixed
+    // zero-based indexes, `auto` is the relative object index, and every other
+    // string maps to index zero. It is not an RGB or theme-scheme value.
+    let selected = if value == "auto" {
+        accent.map(str::to_owned)
+    } else {
+        let index = value.parse::<usize>().unwrap_or(0);
+        palette
+            .and_then(|colors| {
+                chart_color_style_base_index(color_style_method, index, colors.len())
+                    .and_then(|mapped| colors.get(mapped))
+            })
+            .and_then(Clone::clone)
+    }
+    .ok_or(())?;
+    // CT_StyleColor is itself a DrawingML color-transform container.
+    let ignore_transforms = reference.attribute("mods").is_some_and(|mods| {
+        mods.split_ascii_whitespace()
+            .any(|modifier| modifier == "ignoreCSTransforms")
+    });
+    Ok(Some(if ignore_transforms {
+        selected
+    } else {
+        crate::color::apply_color_transforms(&selected, style_color, resolver.tint_mode())
+    }))
+}
+
+fn chart_style_placeholder(
+    reference: Option<Node>,
+    resolver: &dyn ColorResolver,
+    accent: Option<&str>,
+    palette: Option<&[Option<String>]>,
+    color_style_method: Option<&str>,
+) -> Option<String> {
+    match reference.map(|reference| {
+        chart_style_reference_color(reference, resolver, accent, palette, color_style_method)
+    }) {
+        Some(Ok(Some(color))) => Some(color),
+        Some(Err(())) => None,
+        Some(Ok(None)) | None => accent.map(str::to_owned),
+    }
+}
+
+/// MS-ODRAWXML §2.8.4.2 base-color selection. The linear brightness operation
+/// is intentionally not performed because the specification does not define
+/// its color space/range; this function only applies the normative index map
+/// before CT_StyleColor and style-matrix transforms.
+fn chart_color_style_base_index(
+    method: Option<&str>,
+    index: usize,
+    color_count: usize,
+) -> Option<usize> {
+    if color_count == 0 {
+        return None;
+    }
+    match method {
+        Some("withinLinear" | "withinLinearReversed") => Some(0),
+        _ => Some(index % color_count),
+    }
+}
+
+fn chart_style_reference_index(reference: Option<Node>) -> Option<usize> {
+    let style_color = reference.and_then(|reference| child(reference, "styleClr"))?;
+    match style_color.attribute("val").unwrap_or("auto") {
+        "auto" => None,
+        value => Some(value.parse::<usize>().unwrap_or(0)),
+    }
+}
+
+fn parse_chart_style_paint(
+    container: Node,
+    resolver: &dyn ColorResolver,
+    placeholder: Option<&str>,
+) -> Option<ChartStylePaint> {
+    let adapter = ColorResolverThemeAdapter(resolver);
+    let style_resolver = crate::color::StyleMatrixColorResolver::new(&adapter, placeholder);
+    if child(container, "noFill").is_some() {
+        return Some(ChartStylePaint::NoFill);
+    }
+    if let Some(fill) = child(container, "solidFill") {
+        return Some(ChartStylePaint::Fill(
+            resolve_chart_style_color(fill, resolver, placeholder)
+                .map(|color| ChartStyleFill::Solid { color }),
+        ));
+    }
+    if let Some(fill) = child(container, "gradFill") {
+        return Some(ChartStylePaint::Fill(
+            crate::fill::parse_grad_fill(fill, &style_resolver, resolver.tint_mode()).map(
+                |gradient| ChartStyleFill::Gradient {
+                    stops: gradient.stops,
+                    angle: gradient.angle,
+                    grad_type: gradient.grad_type,
+                    scaled: gradient.scaled,
+                    path: gradient.path,
+                    fill_to_rect: gradient.fill_to_rect,
+                    tile_rect: gradient.tile_rect,
+                    flip: gradient.flip,
+                    rot_with_shape: gradient.rot_with_shape,
+                },
+            ),
+        ));
+    }
+    child(container, "pattFill").map(|fill| {
+        let pattern = crate::fill::parse_patt_fill(fill, &style_resolver, resolver.tint_mode());
+        ChartStylePaint::Fill(Some(ChartStyleFill::Pattern {
+            fg: pattern.fg,
+            bg: pattern.bg,
+            preset: pattern.preset,
+        }))
+    })
+}
+
+/// Returns the structured-fill component count without resolving colors or
+/// sorting gradient stops. Chart Style expands one authored recipe over every
+/// Chart Colors entry, so this preflight must run before the palette loop.
+fn chart_style_paint_component_count(container: Node) -> Option<usize> {
+    if child(container, "noFill").is_some() {
+        return Some(0);
+    }
+    if child(container, "solidFill").is_some() || child(container, "pattFill").is_some() {
+        return Some(1);
+    }
+    child(container, "gradFill").map(|gradient| {
+        child(gradient, "gsLst")
+            .map(|list| {
+                list.children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "gs")
+                    .count()
+            })
+            .unwrap_or(0)
+    })
+}
+
+fn chart_style_paint_entry_limit(
+    component_count: Option<usize>,
+    palette_entries: usize,
+    component_budget: usize,
+) -> usize {
+    let palette_entries = palette_entries.min(MAX_CHART_COLOR_STYLE_ENTRIES);
+    match component_count {
+        Some(components) if components > 0 => palette_entries.min(component_budget / components),
+        _ => palette_entries,
+    }
+}
+
+fn chart_style_fill_ref_xml(
+    fill_ref: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<Result<String, ()>> {
+    use crate::theme::StyleMatrixLookup;
+
+    let index = fill_ref
+        .attribute("idx")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let Some(format_scheme) = resolver.theme_format_scheme() else {
+        return (index == 0).then_some(Err(()));
+    };
+    let entry = match format_scheme.lookup_fill_ref(index) {
+        StyleMatrixLookup::NoStyle => return Some(Err(())),
+        StyleMatrixLookup::Missing => return None,
+        StyleMatrixLookup::Entry(entry) => entry,
+    };
+    Some(Ok(entry.to_xml()))
+}
+
+fn parse_chart_style_line(
+    line: Node,
+    resolver: &dyn ColorResolver,
+    placeholder: Option<&str>,
+) -> crate::line::LineProperties {
+    let adapter = ColorResolverThemeAdapter(resolver);
+    let style_resolver = crate::color::StyleMatrixColorResolver::new(&adapter, placeholder);
+    crate::line::parse_line_properties(line, &style_resolver, resolver.tint_mode())
+}
+
+fn chart_style_line_ref_xml(
+    line_ref: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<Result<String, ()>> {
+    use crate::theme::StyleMatrixLookup;
+
+    let index = line_ref
+        .attribute("idx")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let Some(format_scheme) = resolver.theme_format_scheme() else {
+        return (index == 0).then_some(Err(()));
+    };
+    let entry = match format_scheme.lookup_line_ref(index) {
+        StyleMatrixLookup::NoStyle => return Some(Err(())),
+        StyleMatrixLookup::Missing => return None,
+        StyleMatrixLookup::Entry(entry) => entry,
+    };
+    Some(Ok(entry.to_xml()))
+}
+
+fn parse_chartex_element_style(
+    style_node: Node,
+    resolver: &dyn ColorResolver,
+    accents: Option<&[Option<String>]>,
+    color_style_method: Option<&str>,
+) -> ChartExElementStyle {
+    use crate::line::{LineDash, LineJoin, LinePaint, LineProperties};
+
+    let placeholders: Vec<Option<&str>> = accents
+        .map(|values| {
+            (0..values.len())
+                .map(|index| {
+                    chart_color_style_base_index(color_style_method, index, values.len())
+                        .and_then(|mapped| values.get(mapped))
+                        .and_then(Option::as_deref)
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![None]);
+    let fill_ref = child(style_node, "fillRef");
+    let line_ref = child(style_node, "lnRef");
+    // Serialize and parse each referenced theme recipe once per style role.
+    // Placeholder substitution and color transforms are then the only work in
+    // the palette loop (rather than reparsing a DOM for every palette entry).
+    let fill_recipe = fill_ref.and_then(|reference| chart_style_fill_ref_xml(reference, resolver));
+    let fill_recipe_xml = fill_recipe.as_ref().and_then(|recipe| recipe.as_ref().ok());
+    let fill_recipe_doc = fill_recipe_xml.and_then(|xml| roxmltree::Document::parse(xml).ok());
+    let line_recipe = line_ref.and_then(|reference| chart_style_line_ref_xml(reference, resolver));
+    let line_recipe_xml = line_recipe.as_ref().and_then(|recipe| recipe.as_ref().ok());
+    let line_recipe_doc = line_recipe_xml.and_then(|xml| roxmltree::Document::parse(xml).ok());
+    let local_sp_pr = child(style_node, "spPr");
+    let fill_component_count = local_sp_pr
+        .and_then(chart_style_paint_component_count)
+        .or_else(|| match fill_recipe.as_ref() {
+            Some(Err(())) => Some(0),
+            Some(Ok(_)) => fill_recipe_doc
+                .as_ref()
+                .and_then(|document| chart_style_paint_component_count(document.root_element())),
+            None => None,
+        });
+    let fill_entry_count = placeholders.len().min(MAX_CHART_COLOR_STYLE_ENTRIES);
+    let parsed_fill_entries = chart_style_paint_entry_limit(
+        fill_component_count,
+        fill_entry_count,
+        MAX_CHART_STYLE_PAINT_COMPONENTS,
+    );
+    let mut fills = Vec::with_capacity(fill_entry_count);
+    for (index, accent) in placeholders
+        .iter()
+        .take(MAX_CHART_COLOR_STYLE_ENTRIES)
+        .enumerate()
+    {
+        if index >= parsed_fill_entries {
+            fills.push(None);
+            continue;
+        }
+        let placeholder =
+            chart_style_placeholder(fill_ref, resolver, *accent, accents, color_style_method);
+        let paint = local_sp_pr
+            .and_then(|sp_pr| parse_chart_style_paint(sp_pr, resolver, placeholder.as_deref()))
+            .or_else(|| match fill_recipe.as_ref() {
+                Some(Err(())) => Some(ChartStylePaint::NoFill),
+                Some(Ok(_)) => fill_recipe_doc.as_ref().and_then(|document| {
+                    parse_chart_style_paint(
+                        document.root_element(),
+                        resolver,
+                        placeholder.as_deref(),
+                    )
+                }),
+                None => None,
+            });
+        fills.push(paint);
+    }
+    let fill_hidden = fills
+        .iter()
+        .all(|paint| matches!(paint, Some(ChartStylePaint::NoFill)))
+        .then_some(true);
+    let fill_paints = (!fill_hidden.unwrap_or(false))
+        .then(|| {
+            fills
+                .iter()
+                .map(|paint| match paint {
+                    Some(ChartStylePaint::Fill(fill)) => fill.clone(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|paints| paints.iter().any(Option::is_some));
+    let fill_colors = (!fill_hidden.unwrap_or(false))
+        .then(|| {
+            fills
+                .iter()
+                .map(|paint| match paint {
+                    Some(ChartStylePaint::Fill(Some(ChartStyleFill::Solid { color }))) => {
+                        Some(color.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|colors| colors.iter().any(Option::is_some));
+
+    let lines = placeholders
+        .iter()
+        .map(|accent| {
+            let placeholder =
+                chart_style_placeholder(line_ref, resolver, *accent, accents, color_style_method);
+            let inherited = match line_recipe.as_ref() {
+                Some(Err(())) => Some(LineProperties {
+                    paint: Some(LinePaint::NoFill),
+                    ..LineProperties::default()
+                }),
+                Some(Ok(_)) => line_recipe_doc.as_ref().and_then(|document| {
+                    child(document.root_element(), "ln")
+                        .map(|line| parse_chart_style_line(line, resolver, placeholder.as_deref()))
+                }),
+                None => None,
+            };
+            let local = local_sp_pr
+                .and_then(|sp_pr| child(sp_pr, "ln"))
+                .map(|line| parse_chart_style_line(line, resolver, placeholder.as_deref()));
+            match (local, inherited) {
+                (Some(local), Some(inherited)) => Some(local.with_fallback(&inherited)),
+                (Some(local), None) => Some(local),
+                (None, inherited) => inherited,
+            }
+        })
+        .take(MAX_CHART_COLOR_STYLE_ENTRIES)
+        .collect::<Vec<_>>();
+    let line_hidden = lines
+        .iter()
+        .all(|line| {
+            matches!(
+                line.as_ref().and_then(|line| line.paint.as_ref()),
+                Some(LinePaint::NoFill)
+            )
+        })
+        .then_some(true);
+    let line_colors = (!line_hidden.unwrap_or(false))
+        .then(|| {
+            lines
+                .iter()
+                .map(
+                    |line| match line.as_ref().and_then(|line| line.paint.as_ref()) {
+                        Some(LinePaint::Solid { color }) => color.clone(),
+                        _ => None,
+                    },
+                )
+                .collect::<Vec<_>>()
+        })
+        .filter(|colors| colors.iter().any(Option::is_some));
+    let first_line = lines.iter().flatten().next();
+    let line_width_emu = first_line
+        .and_then(|line| line.width)
+        .and_then(|width| u32::try_from(width).ok());
+    let line_dash = first_line.and_then(|line| match line.dash.as_ref() {
+        Some(LineDash::Preset(value)) => value.clone(),
+        _ => None,
+    });
+    let line_join = first_line.and_then(|line| match line.join.as_ref() {
+        Some(LineJoin::Round) => Some("round".to_owned()),
+        Some(LineJoin::Bevel) => Some("bevel".to_owned()),
+        Some(LineJoin::Miter { .. }) => Some("miter".to_owned()),
+        None => None,
+    });
+
+    ChartExElementStyle {
+        fill_paints,
+        fill_colors,
+        fill_hidden,
+        line_colors,
+        line_width_emu,
+        line_hidden,
+        line_dash,
+        line_cap: first_line.and_then(|line| line.cap.clone()),
+        line_join,
+        fill_color_index: chart_style_reference_index(fill_ref),
+        line_color_index: chart_style_reference_index(line_ref),
+    }
+}
+
+/// Resolve the total color set defined by a linked Chart Colors part. Per
+/// MS-ODRAWXML §2.8.3.2, every contained color is repeated for every
+/// `<cs:variation>`, with the variation transforms appended to the base color.
+fn parse_chart_color_style(
+    xml: &str,
+    resolver: &dyn ColorResolver,
+) -> Option<(String, Vec<Option<String>>)> {
+    let document = crate::depth::parse_guarded(xml).ok()?;
+    let root = document.root_element();
+    let method = root.attribute("meth").unwrap_or("cycle").to_owned();
+    let adapter = ColorResolverThemeAdapter(resolver);
+    let colors = root
+        .children()
+        .filter(|node| {
+            node.is_element()
+                && matches!(
+                    node.tag_name().name(),
+                    "srgbClr" | "schemeClr" | "sysClr" | "prstClr" | "scrgbClr" | "hslClr"
+                )
+        })
+        .map(|node| {
+            crate::color::color_source_from_element(node).and_then(|source| {
+                crate::color::resolve_color_source(source, &adapter, resolver.tint_mode())
+            })
+        })
+        .take(MAX_CHART_COLOR_STYLE_ENTRIES)
+        .collect::<Vec<_>>();
+    if colors.is_empty() || colors.iter().all(Option::is_none) {
+        return None;
+    }
+    let variations = root
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "variation")
+        .take(MAX_CHART_COLOR_STYLE_ENTRIES)
+        .collect::<Vec<_>>();
+    if variations.is_empty() {
+        return Some((method, colors));
+    }
+    let palette = variations
+        .iter()
+        .flat_map(|variation| {
+            colors.iter().map(move |color| {
+                color.as_deref().map(|color| {
+                    crate::color::apply_color_transforms(color, *variation, resolver.tint_mode())
+                })
+            })
+        })
+        .take(MAX_CHART_COLOR_STYLE_ENTRIES)
+        .collect::<Vec<_>>();
+    Some((method, palette))
 }
 
 // ============================================================================
@@ -1999,19 +2912,48 @@ pub fn extract_chartex_axis_hidden(root: Node) -> (bool, bool) {
     (cat_hidden, val_hidden)
 }
 
+/// ChartEx `<cx:axis><cx:majorTickMarks|minorTickMarks type>`
+/// (MS-ODRAWXML §2.24.3.89 CT_TickMarks). Unlike the classic chart axis,
+/// ChartEx has no schema default that creates tick marks: an omitted element
+/// or omitted `type` therefore resolves to `none`.
+pub fn extract_chartex_axis_tick_mark(axis: Option<Node>, name: &str) -> String {
+    axis.and_then(|axis| child(axis, name))
+        .and_then(|tick_marks| tick_marks.attribute("type"))
+        .unwrap_or("none")
+        .to_string()
+}
+
+/// Text saved by chartEx in either DrawingML-rich or compact `txData/v` form.
+fn chartex_text(container: Node) -> Option<String> {
+    if let Some(rich) = container
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "rich")
+    {
+        let text = flatten_rich_text(rich, None);
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    container
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "txData")
+        .and_then(|tx_data| child(tx_data, "v"))
+        .and_then(|value| value.text())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 /// Parse a modern chartEx part (`<cx:chartSpace>`, MS 2014 chartex namespace)
 /// into the shared [`ChartModel`] — waterfall / treemap / etc.
 ///
 /// This is the chartEx counterpart to [`parse_chart_part`]: the caller passes
 /// the `<cx:chartSpace>` root and a [`ColorResolver`], and receives a bare
 /// [`ChartModel`] (no graphic-frame geometry — the caller wraps it in its own
-/// container). It was lifted verbatim from the pptx `parse_chartex` body; the
-/// only behavioural change is that colour resolution routes through
-/// `resolver.resolve_solid_fill` (instead of pptx's local `parse_color_node`)
-/// and the theme fallback faces come from `resolver.theme_major_font_latin` /
-/// `theme_minor_font_latin` (instead of a direct `theme.get("+mj-lt")` read).
-/// A pptx `PptxColorResolver` returns identical values for both, so the emitted
-/// JSON is byte-identical to the previous per-crate parse.
+/// container). The structure follows MS-ODRAWXML CT_ChartSpace (2.24.3.11),
+/// CT_ChartData (2.24.3.10), CT_Data (2.24.3.15), and CT_Series (2.24.3.77).
+/// Colour and theme-font resolution route through the shared [`ColorResolver`]
+/// so XLSX, PPTX, and DOCX retain the same chart model contract.
 ///
 /// The chart type is the series `layoutId` string as-is (`"waterfall"`,
 /// `"treemap"`, `"sunburst"`, `"boxWhisker"`, `"funnel"`, `"histogram"`, …);
@@ -2024,7 +2966,115 @@ pub fn parse_chartex_part(
     resolver: &dyn ColorResolver,
     style_xml: Option<&str>,
 ) -> Option<ChartModel> {
+    parse_chartex_part_with_style_parts(chartspace_root, resolver, style_xml, None)
+}
+
+pub fn parse_chartex_part_with_style_parts(
+    chartspace_root: Node,
+    resolver: &dyn ColorResolver,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+) -> Option<ChartModel> {
+    let mut references = EmptyChartReferenceResolver;
+    parse_chartex_part_with_references_and_style_parts(
+        chartspace_root,
+        resolver,
+        style_xml,
+        color_style_xml,
+        &mut references,
+    )
+}
+
+fn extract_chartex_style_text_props(
+    style_node: Option<Node>,
+    resolver: &dyn ColorResolver,
+) -> (Option<i32>, Option<bool>, Option<String>, Option<String>) {
+    let Some(style_node) = style_node else {
+        return (None, None, None, None);
+    };
+    let def_r_pr = child(style_node, "defRPr");
+    let font_ref = child(style_node, "fontRef");
+    let size = def_r_pr
+        .and_then(|props| props.attribute("sz"))
+        .and_then(|value| value.parse::<i32>().ok());
+    let bold = def_r_pr.and_then(|props| chart_text_bool_attr(props, "b"));
+    let color = def_r_pr
+        .and_then(|props| child(props, "solidFill"))
+        .and_then(|fill| resolver.resolve_solid_fill(fill))
+        .or_else(|| {
+            font_ref.and_then(|font| {
+                font.children()
+                    .find(|node| {
+                        node.is_element()
+                            && matches!(
+                                node.tag_name().name(),
+                                "srgbClr"
+                                    | "schemeClr"
+                                    | "sysClr"
+                                    | "prstClr"
+                                    | "scrgbClr"
+                                    | "hslClr"
+                            )
+                    })
+                    .and_then(|color_node| {
+                        crate::color::color_source_from_element(color_node).and_then(|source| {
+                            crate::color::resolve_color_source(
+                                source,
+                                &ColorResolverThemeAdapter(resolver),
+                                resolver.tint_mode(),
+                            )
+                        })
+                    })
+            })
+        });
+    let face = def_r_pr.and_then(first_latin_typeface).or_else(|| {
+        match font_ref.and_then(|font| font.attribute("idx")) {
+            Some("major") => resolver.theme_major_font_latin(),
+            Some("minor") => resolver.theme_minor_font_latin(),
+            _ => None,
+        }
+    });
+    (size, bold, color, face)
+}
+
+/// Parse chartEx with a package-supplied resolver for formula-only dimensions.
+/// Excel frequently omits `<cx:lvl>` caches in XLSX and points `<cx:f>` at a
+/// hidden workbook defined name instead; authored levels still take priority.
+pub fn parse_chartex_part_with_references(
+    chartspace_root: Node,
+    resolver: &dyn ColorResolver,
+    style_xml: Option<&str>,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<ChartModel> {
+    parse_chartex_part_with_references_and_style_parts(
+        chartspace_root,
+        resolver,
+        style_xml,
+        None,
+        references,
+    )
+}
+
+pub fn parse_chartex_part_with_references_and_style_parts(
+    chartspace_root: Node,
+    resolver: &dyn ColorResolver,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<ChartModel> {
     let root = chartspace_root;
+    let chart_node = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "chart")?;
+    let style_doc = style_xml.and_then(|xml| crate::depth::parse_guarded(xml).ok());
+    let color_style = color_style_xml.and_then(|xml| parse_chart_color_style(xml, resolver));
+    let style_element = |name: &str| {
+        style_doc.as_ref().and_then(|doc| {
+            doc.root_element()
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == name)
+        })
+    };
 
     // Chart type from series layoutId attribute.
     let series_node = root
@@ -2034,24 +3084,10 @@ pub fn parse_chartex_part(
     let chart_type = layout_id; // "waterfall", "treemap", etc.
 
     // ── chartEx title (MS 2014 chartex ext) ──────────────────────────────────
-    // `<cx:chart><cx:title><cx:tx><cx:rich>` mirrors the DrawingML rich-text of a
-    // legacy `<c:title>`; `flatten_rich_text` walks its `<a:p>/<a:r>/<a:t>`
-    // identically. Only populated for the layouts CH15 renders (boxWhisker /
-    // sunburst) so waterfall/treemap wire output stays byte-stable. `None`
-    // otherwise.
-    let renders_chartex = chart_type == "boxWhisker" || chart_type == "sunburst";
-    let chartex_title = if renders_chartex {
-        root.descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "title")
-            .and_then(|t| {
-                t.descendants()
-                    .find(|n| n.is_element() && n.tag_name().name() == "rich")
-            })
-            .map(|rich| flatten_rich_text(rich, None))
-            .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
+    // Office may save either DrawingML rich text or the compact
+    // `<cx:txData><cx:v>` form used by Excel-authored XLSX chartEx parts.
+    let chartex_title = child(chart_node, "title").and_then(chartex_text);
+    let chartex_title_present = child(chart_node, "title").is_some();
 
     // ── chartEx title font size (MS 2014 chartex ext) ────────────────────────
     // Precedence: an explicit `sz` on the chartEx part's own `<cx:title>` rich
@@ -2059,98 +3095,124 @@ pub fn parse_chartex_part(
     // `<cs:title><cs:defRPr@sz>` (Word's default modern style = 1400 = 14pt).
     // Without the style part a chartEx title would be sized by the renderer's
     // area-proportional guess (≈21pt on sample-24), 1.5× too large. Only
-    // populated for the rendered layouts so waterfall/treemap stay byte-stable.
-    let chartex_title_font_size_hpt = if renders_chartex {
-        extract_chartex_title_size(root)
-            .or_else(|| style_xml.and_then(extract_chartex_style_title_size))
-    } else {
-        None
-    };
+    let chartex_title_font_size_hpt = extract_chartex_title_size(root)
+        .or_else(|| style_xml.and_then(extract_chartex_style_title_size));
+    let chartex_title_font_bold = extract_chart_title_bold(chart_node);
+    let chartex_title_font_color = extract_chart_title_color(chart_node, resolver);
+    let chartex_title_font_face = child(chart_node, "title").and_then(first_latin_typeface);
 
     // ── chartEx theme accent palette ─────────────────────────────────────────
-    // boxWhisker series and sunburst branches color by index off the theme
+    // boxWhisker series and sunburst/treemap branches color by index off the theme
     // accents (`accent[(idx % 6) + 1]`, the same cycle Office draws). Resolve
     // accent1..6 once here; `None` when the resolver owns no default palette
     // (pptx), letting the renderer fall back to its own `CHART_PALETTE`.
-    let chartex_accents: Option<Vec<String>> =
-        if chart_type == "boxWhisker" || chart_type == "sunburst" {
-            let accents: Vec<String> = (0..6)
-                .filter_map(|i| resolver.resolve_series_accent(i))
-                .collect();
-            if accents.len() == 6 {
-                Some(accents)
-            } else {
-                None
-            }
+    let theme_accents: Option<Vec<String>> = if matches!(
+        chart_type.as_str(),
+        "waterfall" | "boxWhisker" | "sunburst" | "treemap"
+    ) {
+        let accents: Vec<String> = (0..6)
+            .filter_map(|i| resolver.resolve_series_accent(i))
+            .collect();
+        if accents.len() == 6 {
+            Some(accents)
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
+    let chartex_color_style_method = color_style.as_ref().map(|(method, _)| method.clone());
+    let chartex_color_palette = color_style.as_ref().map(|(_, palette)| palette.clone());
+    let theme_style_palette = theme_accents
+        .as_ref()
+        .map(|colors| colors.iter().cloned().map(Some).collect::<Vec<_>>());
+    let style_palette = chartex_color_palette
+        .as_deref()
+        .or(theme_style_palette.as_deref());
+    let chartex_data_point_style = style_element("dataPoint").map(|node| {
+        parse_chartex_element_style(
+            node,
+            resolver,
+            style_palette,
+            chartex_color_style_method.as_deref(),
+        )
+    });
+    let chartex_data_point_line_style = style_element("dataPointLine").map(|node| {
+        parse_chartex_element_style(
+            node,
+            resolver,
+            style_palette,
+            chartex_color_style_method.as_deref(),
+        )
+    });
+    let chartex_data_point_marker_style = style_element("dataPointMarker").map(|node| {
+        parse_chartex_element_style(
+            node,
+            resolver,
+            style_palette,
+            chartex_color_style_method.as_deref(),
+        )
+    });
+    // Keep the raw theme palette separate from effective style-role paint.
+    let chartex_accents = theme_accents;
 
     // ── chartEx box-and-whisker structured parse ─────────────────────────────
     let chartex_box = if chart_type == "boxWhisker" {
-        parse_chartex_boxwhisker(root, resolver)
+        parse_chartex_boxwhisker(root, resolver, references)
     } else {
         None
     };
 
     // ── chartEx sunburst structured parse ────────────────────────────────────
     let chartex_sunburst = if chart_type == "sunburst" {
-        parse_chartex_sunburst(root)
+        parse_chartex_sunburst(root, references)
     } else {
         None
     };
 
-    // Categories from chartData > data > strDim[@type="cat"] > lvl > pt
-    let categories: Vec<String> = root
-        .descendants()
-        .find(|n| {
-            n.is_element()
-                && n.tag_name().name() == "strDim"
-                && attr(n, "type").as_deref() == Some("cat")
-        })
-        .and_then(|dim| {
-            dim.descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
-        })
-        .map(|lvl| {
-            lvl.children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                .filter_map(|pt| pt.text().map(|t| t.replace('\n', " ")))
+    // ── chartEx treemap structured parse ────────────────────────────────────
+    let chartex_treemap = if chart_type == "treemap" {
+        parse_chartex_treemap(root, references)
+    } else {
+        None
+    };
+
+    // The flat compatibility fields use the deepest hierarchy labels/sizes.
+    // Formula-only chartEx dimensions are resolved through the package host.
+    let hierarchy_rows = chartex_treemap
+        .as_ref()
+        .map(|data| data.rows.as_slice())
+        .or_else(|| chartex_sunburst.as_ref().map(|data| data.rows.as_slice()));
+    let categories: Vec<String> = hierarchy_rows
+        .map(|rows| {
+            rows.iter()
+                .map(|row| row.path.last().cloned().unwrap_or_default())
                 .collect()
+        })
+        .or_else(|| chartex_box.as_ref().map(|data| data.categories.clone()))
+        .or_else(|| {
+            chartex_string_levels(root, references).and_then(|levels| levels.into_iter().next())
         })
         .unwrap_or_default();
 
     let pt_count = categories.len().max(1);
 
-    // Values from chartData > data > numDim[@type="val"] > lvl > pt
-    let raw_values: Vec<Option<f64>> = root
-        .descendants()
-        .find(|n| {
-            n.is_element()
-                && n.tag_name().name() == "numDim"
-                && attr(n, "type").as_deref() == Some("val")
-        })
-        .and_then(|dim| {
-            dim.descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
-        })
-        .map(|lvl| {
-            let mut vals: Vec<Option<f64>> = vec![None; pt_count];
-            for (i, pt) in lvl
-                .children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                .enumerate()
-            {
-                if i < vals.len() {
-                    vals[i] = pt.text().and_then(|t| t.parse().ok());
-                }
+    let raw_values: Vec<Option<f64>> = hierarchy_rows
+        .map(|rows| rows.iter().map(|row| Some(row.size)).collect())
+        .or_else(|| {
+            if chartex_box.is_some() {
+                None
+            } else {
+                chartex_number_values(root, &["val"], references)
             }
-            vals
         })
         .unwrap_or_else(|| vec![None; pt_count]);
+    let source_number_format = chartex_number_format(root, &["size", "val"], references);
 
-    // Subtotal indices (idx=0 is always implicit; add from cx:subtotals)
-    let mut subtotal_indices: Vec<u32> = vec![0];
+    // `<cx:subtotals><cx:idx val>` identifies only points explicitly marked as
+    // totals. The first waterfall point starts at zero geometrically, but it is
+    // still an ordinary increase/decrease point unless index 0 is present.
+    let mut subtotal_indices: Vec<u32> = Vec::new();
     if let Some(subtotals_node) = series_node
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "subtotals")
@@ -2160,7 +3222,7 @@ pub fn parse_chartex_part(
             .filter(|n| n.is_element() && n.tag_name().name() == "idx")
         {
             if let Some(v) = attr(&idx_node, "val").and_then(|v| v.parse::<u32>().ok()) {
-                if v != 0 {
+                if !subtotal_indices.contains(&v) {
                     subtotal_indices.push(v);
                 }
             }
@@ -2184,6 +3246,7 @@ pub fn parse_chartex_part(
     // positive-bar labels stay tx1 (black).
     let mut data_label_colors_vec: Vec<Option<String>> = vec![None; raw_values.len().max(1)];
     let mut has_per_label_color = false;
+    let mut data_label_overrides = Vec::new();
     for dl in series_node
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "dataLabel")
@@ -2192,32 +3255,60 @@ pub fn parse_chartex_part(
             continue;
         };
         if idx >= data_label_colors_vec.len() {
-            continue;
+            data_label_colors_vec.resize(idx + 1, None);
         }
         // First `<a:solidFill>` inside the per-idx <cx:txPr>.
-        let txpr = match dl
+        let txpr = dl
             .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "txPr")
+            .find(|n| n.is_element() && n.tag_name().name() == "txPr");
+        let font_color = txpr.and_then(|txpr| {
+            txpr.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                .find_map(|fill| resolver.resolve_solid_fill(fill))
+        });
+        if let Some(color) = font_color.clone() {
+            data_label_colors_vec[idx] = Some(color);
+            has_per_label_color = true;
+        }
+        let text = txpr
+            .map(|txpr| flatten_rich_text(txpr, None))
+            .unwrap_or_default();
+        let font_size_hpt = extract_axis_tick_label_size(dl);
+        let font_bold = extract_axis_tick_label_bold(dl);
+        let position = attr(&dl, "pos");
+        if !text.is_empty()
+            || font_color.is_some()
+            || font_size_hpt.is_some()
+            || font_bold.is_some()
+            || position.is_some()
         {
-            Some(n) => n,
-            None => continue,
-        };
-        for desc in txpr.descendants().filter(|n| n.is_element()) {
-            if desc.tag_name().name() != "solidFill" {
-                continue;
-            }
-            if let Some(c) = resolver.resolve_solid_fill(desc) {
-                data_label_colors_vec[idx] = Some(c);
-                has_per_label_color = true;
-                break;
-            }
+            data_label_overrides.push(ChartDataLabelOverride {
+                idx: idx as u32,
+                text,
+                position,
+                font_color,
+                font_size_hpt,
+                font_bold,
+                label_box: None,
+                show_val: None,
+                show_cat_name: None,
+                show_ser_name: None,
+                show_percent: None,
+                deleted: None,
+            });
         }
     }
+    if !has_per_label_color {
+        data_label_colors_vec.clear();
+    }
 
-    let series = vec![ChartSeries {
+    let mut series = vec![ChartSeries {
         name: String::new(),
         values: raw_values,
         color,
+        fill_pattern: None,
+        line_color: None,
+        line_width_emu: None,
         data_point_colors: None,
         data_label_colors: if has_per_label_color {
             Some(data_label_colors_vec)
@@ -2226,7 +3317,9 @@ pub fn parse_chartex_part(
         },
         categories: None,
         bubble_sizes: None,
-        val_format_code: None,
+        val_format_code: source_number_format,
+        cat_format_code: None,
+        cat_format_codes: None,
         label_color: None,
         series_type: None,
         use_secondary_axis: None,
@@ -2236,7 +3329,11 @@ pub fn parse_chartex_part(
         marker_fill: None,
         marker_line: None,
         data_point_overrides: None,
-        data_label_overrides: None,
+        data_label_overrides: if data_label_overrides.is_empty() {
+            None
+        } else {
+            Some(data_label_overrides)
+        },
         series_data_labels: None,
         err_bars: None,
         // chartEx (waterfall) has no `<c:smooth>` concept.
@@ -2251,6 +3348,176 @@ pub fn parse_chartex_part(
     // with its `<cx:catScaling>` / `<cx:valScaling>` child to disambiguate cat
     // vs. val (chartEx doesn't declare axis kind via the `id` attribute).
     let (cat_axis_hidden, val_axis_hidden) = extract_chartex_axis_hidden(root);
+    let cat_axis = root.descendants().find(|axis| {
+        axis.is_element()
+            && axis.tag_name().name() == "axis"
+            && axis
+                .children()
+                .any(|child| child.is_element() && child.tag_name().name() == "catScaling")
+    });
+    let val_axis = root.descendants().find(|axis| {
+        axis.is_element()
+            && axis.tag_name().name() == "axis"
+            && axis
+                .children()
+                .any(|child| child.is_element() && child.tag_name().name() == "valScaling")
+    });
+    let cat_axis_major_tick_mark = extract_chartex_axis_tick_mark(cat_axis, "majorTickMarks");
+    let val_axis_major_tick_mark = extract_chartex_axis_tick_mark(val_axis, "majorTickMarks");
+    let val_scaling = val_axis.and_then(|axis| child(axis, "valScaling"));
+    let val_min = val_scaling
+        .and_then(|scaling| attr(&scaling, "min"))
+        .and_then(|value| value.parse::<f64>().ok());
+    let val_max = val_scaling
+        .and_then(|scaling| attr(&scaling, "max"))
+        .and_then(|value| value.parse::<f64>().ok());
+    // MS-ODRAWXML §2.24.3.90 CT_ValueAxisScaling stores the ChartEx major
+    // interval as an attribute on `<cx:valScaling>` (unlike the classic
+    // `<c:valAx><c:majorUnit val>` child). `auto` and an omitted attribute both
+    // remain `None`; a positive finite number is an authored override.
+    let val_axis_major_unit = val_scaling
+        .and_then(|scaling| attr(&scaling, "majorUnit"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let cat_axis_title = cat_axis
+        .and_then(|axis| child(axis, "title"))
+        .and_then(chartex_text);
+    let val_axis_title = val_axis
+        .and_then(|axis| child(axis, "title"))
+        .and_then(chartex_text);
+    let cat_axis_title_font_size_hpt = cat_axis.and_then(extract_chart_title_size);
+    let cat_axis_title_font_bold = cat_axis.and_then(extract_chart_title_bold);
+    let cat_axis_title_font_color =
+        cat_axis.and_then(|axis| extract_chart_title_color(axis, resolver));
+    let cat_axis_title_font_face = cat_axis.and_then(extract_axis_title_face);
+    let val_axis_title_font_size_hpt = val_axis.and_then(extract_chart_title_size);
+    let val_axis_title_font_bold = val_axis.and_then(extract_chart_title_bold);
+    let val_axis_title_font_color =
+        val_axis.and_then(|axis| extract_chart_title_color(axis, resolver));
+    let val_axis_title_font_face = val_axis.and_then(extract_axis_title_face);
+    let (style_cat_size, style_cat_bold, style_cat_color, style_cat_face) =
+        extract_chartex_style_text_props(style_element("categoryAxis"), resolver);
+    let (style_val_size, style_val_bold, style_val_color, style_val_face) =
+        extract_chartex_style_text_props(style_element("valueAxis"), resolver);
+    // MS-ODRAWXML 2.8.1.1 defines the associated chartStyle part as the
+    // default formatting for every chart element. Excel applies the matching
+    // categoryAxis/valueAxis entry to ChartEx tick labels; use the axis-local
+    // CT_Axis/txPr only when that style entry leaves a property unspecified.
+    // CT_TickLabels itself has no text-property child (2.24.3.88).
+    let cat_axis_font_size_hpt =
+        style_cat_size.or_else(|| cat_axis.and_then(extract_axis_tick_label_size));
+    let cat_axis_font_bold =
+        style_cat_bold.or_else(|| cat_axis.and_then(extract_axis_tick_label_bold));
+    let cat_axis_font_color = style_cat_color
+        .or_else(|| cat_axis.and_then(|axis| extract_axis_tick_label_color(axis, resolver)));
+    let cat_axis_font_face =
+        style_cat_face.or_else(|| cat_axis.and_then(extract_axis_tick_label_face));
+    let val_axis_font_size_hpt =
+        style_val_size.or_else(|| val_axis.and_then(extract_axis_tick_label_size));
+    let val_axis_font_bold =
+        style_val_bold.or_else(|| val_axis.and_then(extract_axis_tick_label_bold));
+    let val_axis_font_color = style_val_color
+        .or_else(|| val_axis.and_then(|axis| extract_axis_tick_label_color(axis, resolver)));
+    let val_axis_font_face =
+        style_val_face.or_else(|| val_axis.and_then(extract_axis_tick_label_face));
+    let data_labels = child(series_node, "dataLabels");
+    let (
+        style_data_label_size,
+        style_data_label_bold,
+        style_data_label_color,
+        style_data_label_face,
+    ) = extract_chartex_style_text_props(style_element("dataLabel"), resolver);
+    let data_label_font_size_hpt = data_labels
+        .and_then(extract_axis_tick_label_size)
+        .or(style_data_label_size);
+    let data_label_font_bold = data_labels
+        .and_then(extract_axis_tick_label_bold)
+        .or(style_data_label_bold);
+    let data_label_font_color = data_labels
+        .and_then(|labels| extract_axis_tick_label_color(labels, resolver))
+        .or(style_data_label_color);
+    let data_label_font_face = data_labels
+        .and_then(extract_axis_tick_label_face)
+        .or(style_data_label_face);
+    let data_label_position = data_labels.and_then(|labels| attr(&labels, "pos"));
+    if let Some(labels) = data_labels {
+        let visibility = child(labels, "visibility");
+        let visible_attr = |name: &str| -> bool {
+            visibility
+                .and_then(|node| attr(&node, name))
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        };
+        series[0].series_data_labels = Some(ChartSeriesDataLabels {
+            show_val: visible_attr("value"),
+            show_cat_name: visible_attr("categoryName"),
+            show_ser_name: visible_attr("seriesName"),
+            show_percent: false,
+            position: data_label_position.clone(),
+            font_color: data_label_font_color.clone(),
+            format_code: child(labels, "numFmt").and_then(|format| attr(&format, "formatCode")),
+            separator: child(labels, "separator")
+                .and_then(|separator| separator.text())
+                .map(|value| value.to_string()),
+            font_bold: data_label_font_bold,
+            font_size_hpt: data_label_font_size_hpt,
+            label_box: None,
+            show_leader_lines: false,
+            leader_line_color: None,
+            leader_line_width_emu: None,
+        });
+    }
+    let (cat_axis_line_color, cat_axis_line_width_emu, cat_axis_line_hidden) = cat_axis
+        .map(|axis| extract_axis_line_style(axis, resolver))
+        .unwrap_or((None, None, false));
+    let (mut val_axis_line_color, mut val_axis_line_width_emu, mut val_axis_line_hidden) = val_axis
+        .map(|axis| extract_axis_line_style(axis, resolver))
+        .unwrap_or((None, None, false));
+    if val_axis_line_color.is_none() && val_axis_line_width_emu.is_none() && !val_axis_line_hidden {
+        if let Some(style_axis) = style_element("valueAxis") {
+            (
+                val_axis_line_color,
+                val_axis_line_width_emu,
+                val_axis_line_hidden,
+            ) = extract_sp_pr_ln_style(style_axis, resolver);
+        }
+    }
+    let val_axis_major_gridlines = val_axis.map(axis_major_gridlines_visible);
+    let (mut val_axis_gridline_color, mut val_axis_gridline_width_emu) = val_axis
+        .map(|axis| extract_gridline_style(axis, resolver))
+        .unwrap_or((None, None));
+    if val_axis_gridline_color.is_none() && val_axis_gridline_width_emu.is_none() {
+        if let Some(style_gridline) = style_element("gridlineMajor") {
+            (val_axis_gridline_color, val_axis_gridline_width_emu, _) =
+                extract_sp_pr_ln_style(style_gridline, resolver);
+        }
+    }
+    let val_axis_format_code = val_axis
+        .and_then(|axis| child(axis, "numFmt"))
+        .and_then(|format| attr(&format, "formatCode"));
+    let legend = root
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "legend");
+    let show_legend = legend.is_some();
+    let legend_pos = legend.and_then(|node| attr(&node, "pos"));
+    let (legend_font_face, legend_font_size_hpt, legend_font_bold) =
+        extract_legend_text_props(root);
+    let legend_font_color = extract_legend_font_color(root, resolver);
+    let (chart_border_color, chart_border_width_emu) = child(root, "spPr")
+        .and_then(|shape| child(shape, "ln"))
+        .map(|line| {
+            if child(line, "noFill").is_some() {
+                (
+                    None,
+                    attr(&line, "w").and_then(|value| value.parse::<u32>().ok()),
+                )
+            } else {
+                (
+                    resolver.resolve_shape_fill(line),
+                    attr(&line, "w").and_then(|value| value.parse::<u32>().ok()),
+                )
+            }
+        })
+        .unwrap_or((None, None));
 
     // `<cx:catScaling gapWidth>` (chartEx) — same semantics as legacy
     // `<c:gapWidth>` but stored as a *fraction* (e.g. 0.8 ≡ 80%) instead of
@@ -2268,77 +3535,96 @@ pub fn parse_chartex_part(
     Some(ChartModel {
         chart_type,
         title: chartex_title,
+        title_present: chartex_title_present,
         categories,
         series,
         // chartEx layouts color by branch/series index, not §21.2.2.227
         // varyColors (a `<c:>` chart-group element that chartEx has no analog
         // of), so the flag never applies here.
         vary_colors: None,
-        val_max: None,
-        val_min: None,
+        chart_text_boxes: None,
+        val_max,
+        val_min,
         subtotal_indices,
         show_data_labels: false,
         cat_axis_hidden,
         val_axis_hidden,
         plot_area_bg: None,
-        chart_bg: None,
-        show_legend: false,
+        chart_bg: {
+            let sp_pr = root
+                .children()
+                .find(|node| node.is_element() && node.tag_name().name() == "spPr");
+            match sp_pr {
+                Some(shape) if child(shape, "noFill").is_some() => None,
+                Some(shape) => match child(shape, "solidFill") {
+                    Some(fill) => resolver.resolve_solid_fill(fill),
+                    None => resolver.default_chart_bg(),
+                },
+                None => resolver.default_chart_bg(),
+            }
+        },
+        show_legend,
         cat_axis_cross_between: "between".to_string(),
-        val_axis_major_tick_mark: "cross".to_string(),
-        cat_axis_major_tick_mark: "cross".to_string(),
+        val_axis_major_tick_mark,
+        cat_axis_major_tick_mark,
         title_font_size_hpt: chartex_title_font_size_hpt,
-        title_font_color: None,
-        title_font_face: None,
-        cat_axis_font_size_hpt: None,
-        val_axis_font_size_hpt: None,
-        cat_axis_font_color: None,
-        val_axis_font_color: None,
-        cat_axis_line_color: None,
-        cat_axis_line_width_emu: None,
-        cat_axis_line_hidden: false,
-        val_axis_line_color: None,
-        val_axis_line_width_emu: None,
-        val_axis_line_hidden: false,
-        data_label_font_size_hpt: None,
-        legend_pos: None,
+        title_font_color: chartex_title_font_color,
+        title_font_face: chartex_title_font_face,
+        cat_axis_font_size_hpt,
+        val_axis_font_size_hpt,
+        cat_axis_font_color,
+        val_axis_font_color,
+        cat_axis_line_color,
+        cat_axis_line_width_emu,
+        cat_axis_line_hidden,
+        val_axis_line_color,
+        val_axis_line_width_emu,
+        val_axis_line_hidden,
+        data_label_font_size_hpt,
+        legend_pos,
         bar_gap_width,
         bar_overlap: None,
-        data_label_position: None,
-        data_label_font_color: None,
+        data_label_position,
+        data_label_font_color,
         data_label_format_code: None,
-        val_axis_format_code: None,
+        data_label_font_bold,
+        val_axis_format_code,
         plot_area_manual_layout: None,
         scatter_style: None,
+        bubble_scale: None,
+        bubble_size_represents: None,
+        show_negative_bubbles: None,
         // chartEx (waterfall/treemap/etc.) has its own axis model and is not
         // wired for axis titles or an explicit chartSpace border yet.
-        cat_axis_title: None,
-        val_axis_title: None,
-        cat_axis_title_font_size_hpt: None,
-        cat_axis_title_font_bold: None,
-        cat_axis_title_font_color: None,
-        val_axis_title_font_size_hpt: None,
-        val_axis_title_font_bold: None,
-        val_axis_title_font_color: None,
-        title_font_bold: None,
-        cat_axis_font_bold: None,
-        val_axis_font_bold: None,
-        chart_border_color: None,
-        chart_border_width_emu: None,
+        cat_axis_title,
+        val_axis_title,
+        cat_axis_title_font_size_hpt,
+        cat_axis_title_font_bold,
+        cat_axis_title_font_color,
+        val_axis_title_font_size_hpt,
+        val_axis_title_font_bold,
+        val_axis_title_font_color,
+        title_font_bold: chartex_title_font_bold,
+        cat_axis_font_bold,
+        val_axis_font_bold,
+        chart_border_color,
+        chart_border_width_emu,
         secondary_val_axis: None,
+        secondary_cat_axis: None,
         // chartEx charts (waterfall/treemap/etc.) are not pie/doughnut and
         // don't carry `<c:txPr>` axis/legend faces; only the theme fallback
         // fonts are threaded so their data labels can pick up the body font.
         hole_size: None,
         first_slice_angle: None,
-        cat_axis_font_face: None,
-        val_axis_font_face: None,
-        cat_axis_title_font_face: None,
-        val_axis_title_font_face: None,
-        data_label_font_face: None,
-        legend_font_face: None,
-        legend_font_color: None,
-        legend_font_size_hpt: None,
-        legend_font_bold: None,
+        cat_axis_font_face,
+        val_axis_font_face,
+        cat_axis_title_font_face,
+        val_axis_title_font_face,
+        data_label_font_face,
+        legend_font_face,
+        legend_font_color,
+        legend_font_size_hpt,
+        legend_font_bold,
         theme_major_font_latin: resolver.theme_major_font_latin(),
         theme_minor_font_latin: resolver.theme_minor_font_latin(),
         val_axis_minor_tick_mark: None,
@@ -2359,22 +3645,24 @@ pub fn parse_chartex_part(
         date1904: false,
         // chartEx waterfall has no line/area blanks to display.
         disp_blanks_as: None,
-        // chartEx (cx:) has its own axis model (`<cx:axis>`); the classic
-        // `<c:catAx>`/`<c:valAx>` scale properties don't apply, so leave the
-        // CH6 fields unset — the renderer keeps its defaults (byte-stable).
-        val_axis_major_gridlines: None,
+        // chartEx (cx:) has its own axis model (`<cx:axis>`). Shared fields are
+        // populated only where CT_ValueAxisScaling has the same semantics as
+        // the classic value-axis contract.
+        val_axis_major_gridlines,
         cat_axis_major_gridlines: None,
-        val_axis_gridline_color: None,
-        val_axis_gridline_width_emu: None,
+        val_axis_gridline_color,
+        val_axis_gridline_width_emu,
         cat_axis_gridline_color: None,
         cat_axis_gridline_width_emu: None,
         val_axis_minor_gridlines: None,
-        val_axis_major_unit: None,
+        val_axis_major_unit,
         val_axis_minor_unit: None,
         val_axis_log_base: None,
         val_axis_orientation: None,
         cat_axis_orientation: None,
         cat_axis_tick_label_pos: None,
+        cat_axis_tick_label_skip: None,
+        cat_axis_tick_mark_skip: None,
         val_axis_tick_label_pos: None,
         cat_axis_label_rotation: None,
         stock_hi_low_lines: None,
@@ -2382,7 +3670,13 @@ pub fn parse_chartex_part(
         stock_up_down_bars: None,
         chartex_box,
         chartex_sunburst,
+        chartex_treemap,
         chartex_accents,
+        chartex_color_palette,
+        chartex_color_style_method,
+        chartex_data_point_style,
+        chartex_data_point_line_style,
+        chartex_data_point_marker_style,
     })
 }
 
@@ -2396,7 +3690,11 @@ pub fn parse_chartex_part(
 /// the first series' data) and threads the `<cx:layoutPr>` visibility /
 /// statistics flags. Quartiles / mean / whiskers / outliers are the renderer's
 /// job. Returns `None` when there is no plottable series.
-fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<ChartexBoxWhisker> {
+fn parse_chartex_boxwhisker(
+    root: Node,
+    resolver: &dyn ColorResolver,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<ChartexBoxWhisker> {
     // Build id -> <cx:data> lookup.
     let data_by_id: std::collections::HashMap<String, Node> = root
         .descendants()
@@ -2415,7 +3713,7 @@ fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<
 
     // Per-series raw (category-label, value) points, resolving each series' own
     // <cx:dataId> -> <cx:data>.
-    let per_series_points: Vec<Vec<(String, f64)>> = series_nodes
+    let per_series_points: Vec<Vec<(Option<String>, f64)>> = series_nodes
         .iter()
         .map(|s| {
             let data_id = s
@@ -2424,9 +3722,25 @@ fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<
                 .and_then(|n| attr(&n, "val"));
             let data = data_id.as_ref().and_then(|id| data_by_id.get(id).copied());
             match data {
-                Some(d) => chartex_data_cat_val_points(d),
+                Some(d) => chartex_data_cat_val_points(d, references),
                 None => Vec::new(),
             }
+        })
+        .collect();
+
+    let series_names: Vec<String> = series_nodes
+        .iter()
+        .enumerate()
+        .map(|(index, series)| {
+            series
+                .descendants()
+                .find(|node| node.is_element() && node.tag_name().name() == "txData")
+                .and_then(|tx_data| child(tx_data, "v"))
+                .and_then(|value| value.text())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("Series {}", index + 1))
         })
         .collect();
 
@@ -2435,13 +3749,22 @@ fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<
     let mut categories: Vec<String> = Vec::new();
     for pts in &per_series_points {
         for (cat, _) in pts {
-            if !categories.iter().any(|c| c == cat) {
-                categories.push(cat.clone());
+            if let Some(cat) = cat {
+                if !categories.iter().any(|existing| existing == cat) {
+                    categories.push(cat.clone());
+                }
             }
         }
     }
-    if categories.is_empty() {
+    if per_series_points.iter().all(Vec::is_empty) {
         return None;
+    }
+    // Excel's common XLSX form stores one formula-only numeric dimension per
+    // named series and no category dimension. Each series is then one box; use
+    // the series names as category labels and place its values on the diagonal.
+    let one_box_per_series = categories.is_empty();
+    if one_box_per_series {
+        categories.clone_from(&series_names);
     }
     let cat_index: std::collections::HashMap<&str, usize> = categories
         .iter()
@@ -2453,23 +3776,22 @@ fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<
         .iter()
         .enumerate()
         .map(|(si, s)| {
-            let name = s
-                .descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "txData")
-                .and_then(|tx| tx.children().find(|n| n.tag_name().name() == "v"))
-                .and_then(|v| v.text().map(|t| t.to_string()))
-                .unwrap_or_default();
+            let name = series_names[si].clone();
 
             // Bin this series' raw points into the shared category order.
             let mut values_by_category: Vec<Vec<f64>> = vec![Vec::new(); categories.len()];
             for (cat, v) in &per_series_points[si] {
-                if let Some(&ci) = cat_index.get(cat.as_str()) {
-                    values_by_category[ci].push(*v);
+                if one_box_per_series {
+                    values_by_category[si].push(*v);
+                } else if let Some(cat) = cat {
+                    if let Some(&ci) = cat_index.get(cat.as_str()) {
+                        values_by_category[ci].push(*v);
+                    }
                 }
             }
 
             // `<cx:layoutPr><cx:visibility …>` flags; Office defaults when omitted:
-            // meanMarker on, meanLine off, outliers on, nonoutliers off.
+            // meanMarker on, meanLine off, outliers and nonoutliers on.
             let vis = s
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "visibility");
@@ -2486,12 +3808,14 @@ fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<
 
             ChartexBoxSeries {
                 name,
-                color: resolver.resolve_series_accent(si),
+                color: child(*s, "spPr").and_then(|shape| resolver.resolve_shape_fill(shape)),
+                line_color: extract_sp_pr_ln_style(*s, resolver).0,
+                line_width_emu: extract_sp_pr_ln_style(*s, resolver).1,
                 values_by_category,
                 mean_marker: bool_attr("meanMarker", true),
                 mean_line: bool_attr("meanLine", false),
                 show_outliers: bool_attr("outliers", true),
-                show_nonoutliers: bool_attr("nonoutliers", false),
+                show_nonoutliers: bool_attr("nonoutliers", true),
                 quartile_method,
             }
         })
@@ -2500,56 +3824,29 @@ fn parse_chartex_boxwhisker(root: Node, resolver: &dyn ColorResolver) -> Option<
     Some(ChartexBoxWhisker { categories, series })
 }
 
-/// Collect a chartEx `<cx:data>`'s (category-label, value) sample points: the
-/// `<cx:strDim type="cat">` first `<cx:lvl>` supplies per-point labels, the
-/// `<cx:numDim type="val">` first `<cx:lvl>` the values. Points align by their
-/// `idx` attribute; a point with no numeric value is dropped.
-fn chartex_data_cat_val_points(data: Node) -> Vec<(String, f64)> {
-    let cat_lvl = data
-        .descendants()
-        .find(|n| {
-            n.is_element()
-                && n.tag_name().name() == "strDim"
-                && attr(n, "type").as_deref() == Some("cat")
-        })
-        .and_then(|dim| {
-            dim.descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
-        });
-    let val_lvl = data
-        .descendants()
-        .find(|n| {
-            n.is_element()
-                && n.tag_name().name() == "numDim"
-                && matches!(attr(n, "type").as_deref(), Some("val") | Some("size"))
-        })
-        .and_then(|dim| {
-            dim.descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
-        });
-    let (Some(cat_lvl), Some(val_lvl)) = (cat_lvl, val_lvl) else {
-        return Vec::new();
-    };
-
-    // Index the category labels by their `idx`.
-    let cats: std::collections::HashMap<usize, String> = cat_lvl
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-        .filter_map(|pt| {
-            let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
-            let label = pt.text().unwrap_or("").to_string();
-            Some((idx, label))
-        })
-        .collect();
-
-    val_lvl
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-        .filter_map(|pt| {
-            let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
-            let v = pt.text().and_then(|t| t.parse::<f64>().ok())?;
-            let cat = cats.get(&idx).cloned().unwrap_or_default();
-            Some((cat, v))
+/// Collect a chartEx data part's aligned category/value samples. Authored
+/// `<cx:lvl>` caches win; formula-only dimensions use the package resolver.
+/// A missing category dimension is preserved as `None` because Excel uses that
+/// form for one-box-per-series charts.
+fn chartex_data_cat_val_points(
+    data: Node,
+    references: &mut dyn ChartReferenceResolver,
+) -> Vec<(Option<String>, f64)> {
+    let categories =
+        chartex_string_levels(data, references).and_then(|levels| levels.into_iter().next());
+    let values = chartex_number_values(data, &["val", "size"], references).unwrap_or_default();
+    values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let value = value?;
+            let category = categories
+                .as_ref()
+                .and_then(|items| items.get(index))
+                .map(|item| item.trim())
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned);
+            Some((category, value))
         })
         .collect()
 }
@@ -2563,7 +3860,30 @@ fn chartex_data_cat_val_points(data: Node) -> Vec<(String, f64)> {
 /// segments trimmed — a node that is itself a leaf terminates before the
 /// deepest level — and the `size` value at that `idx`. Returns `None` when
 /// there is no size dimension or no rows.
-fn parse_chartex_sunburst(root: Node) -> Option<ChartexSunburst> {
+fn bounded_chartex_point_count(level: Node) -> Option<usize> {
+    if let Some(declared) = attr(&level, "ptCount") {
+        let count = declared.parse::<usize>().ok()?;
+        return (count <= MAX_CHART_CACHE_POINTS).then_some(count);
+    }
+    let mut count = 0usize;
+    for point in level
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+    {
+        let index = attr(&point, "idx")?.parse::<usize>().ok()?;
+        let required = index.checked_add(1)?;
+        if required > MAX_CHART_CACHE_POINTS {
+            return None;
+        }
+        count = count.max(required);
+    }
+    Some(count)
+}
+
+fn chartex_string_levels(
+    root: Node,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<Vec<Vec<String>>> {
     let cat_dim = root.descendants().find(|n| {
         n.is_element()
             && n.tag_name().name() == "strDim"
@@ -2573,68 +3893,138 @@ fn parse_chartex_sunburst(root: Node) -> Option<ChartexSunburst> {
     let levels: Vec<Node> = cat_dim
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "lvl")
+        // Hierarchy levels are siblings in XML but become recursive nodes in
+        // Sunburst/Treemap layout. Reuse the shared OOXML depth ceiling so a
+        // wide sequence of `<cx:lvl>` cannot bypass the parser's stack bound.
+        .take(crate::depth::MAX_XML_DEPTH as usize)
         .collect();
-    if levels.is_empty() {
-        return None;
-    }
-
-    // size dimension (chartEx sunburst uses type="size").
-    let size_lvl = root
-        .descendants()
-        .find(|n| {
-            n.is_element()
-                && n.tag_name().name() == "numDim"
-                && matches!(attr(n, "type").as_deref(), Some("size") | Some("val"))
-        })
-        .and_then(|dim| {
-            dim.descendants()
-                .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+    if !levels.is_empty() {
+        // Preflight the aggregate slot budget before allocating any level.
+        // A per-level cap alone still permits MAX_XML_DEPTH full-width levels.
+        let level_counts = levels
+            .iter()
+            .map(|level| bounded_chartex_point_count(*level))
+            .collect::<Option<Vec<_>>>()?;
+        let total_slots = level_counts.iter().try_fold(0usize, |total, count| {
+            total
+                .checked_add(*count)
+                .filter(|sum| *sum <= MAX_CHART_CACHE_POINTS)
         })?;
-    let sizes: std::collections::HashMap<usize, f64> = size_lvl
-        .children()
-        .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-        .filter_map(|pt| {
-            let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
-            let v = pt.text().and_then(|t| t.parse::<f64>().ok())?;
-            Some((idx, v))
-        })
-        .collect();
-
-    // Per-level idx -> label maps.
-    let level_maps: Vec<std::collections::HashMap<usize, String>> = levels
-        .iter()
-        .map(|lvl| {
-            lvl.children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                .filter_map(|pt| {
-                    let idx = attr(&pt, "idx").and_then(|v| v.parse::<usize>().ok())?;
-                    let label = pt.text().unwrap_or("").to_string();
-                    Some((idx, label))
+        debug_assert!(total_slots <= MAX_CHART_CACHE_POINTS);
+        return Some(
+            levels
+                .into_iter()
+                .zip(level_counts)
+                .map(|(level, point_count)| {
+                    let mut values = vec![String::new(); point_count];
+                    for point in level
+                        .children()
+                        .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                    {
+                        let Some(index) =
+                            attr(&point, "idx").and_then(|value| value.parse::<usize>().ok())
+                        else {
+                            continue;
+                        };
+                        if index < values.len() {
+                            values[index] = point.text().unwrap_or("").replace('\n', " ");
+                        }
+                    }
+                    values
                 })
-                .collect()
-        })
-        .collect();
+                .collect(),
+        );
+    }
+    let formula = cat_dim
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "f")
+        .and_then(|node| node.text())
+        .map(str::trim)
+        .filter(|formula| !formula.is_empty())?;
+    references.resolve_string_levels(formula).map(|mut levels| {
+        levels.truncate(crate::depth::MAX_XML_DEPTH as usize);
+        levels
+    })
+}
 
-    // Row count = the max ptCount / max idx across levels + sizes.
+fn chartex_number_values(
+    root: Node,
+    dimension_types: &[&str],
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<Vec<Option<f64>>> {
+    let dimension = root.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "numDim"
+            && attr(n, "type").is_some_and(|kind| dimension_types.contains(&kind.as_str()))
+    })?;
+    if let Some(level) = dimension
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "lvl")
+    {
+        let point_count = bounded_chartex_point_count(level)?;
+        let mut values = vec![None; point_count];
+        for point in level
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+        {
+            let Some(index) = attr(&point, "idx").and_then(|value| value.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if index < values.len() {
+                values[index] = point.text().and_then(|text| text.parse::<f64>().ok());
+            }
+        }
+        return Some(values);
+    }
+    let formula = dimension
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "f")
+        .and_then(|node| node.text())
+        .map(str::trim)
+        .filter(|formula| !formula.is_empty())?;
+    references.resolve_numbers(formula)
+}
+
+fn chartex_number_format(
+    root: Node,
+    dimension_types: &[&str],
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<String> {
+    let dimension = root.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "numDim"
+            && attr(n, "type").is_some_and(|kind| dimension_types.contains(&kind.as_str()))
+    })?;
+    let formula = dimension
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "f")
+        .and_then(|node| node.text())
+        .map(str::trim)
+        .filter(|formula| !formula.is_empty())?;
+    references.resolve_number_format(formula)
+}
+
+fn parse_chartex_hierarchy_rows(
+    root: Node,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<Vec<ChartexSunburstRow>> {
+    let levels = chartex_string_levels(root, references)?;
+    let sizes = chartex_number_values(root, &["size", "val"], references)?;
     let n = sizes
-        .keys()
-        .chain(level_maps.iter().flat_map(|m| m.keys()))
-        .copied()
-        .max()
-        .map(|m| m + 1)
-        .unwrap_or(0);
+        .len()
+        .max(levels.iter().map(Vec::len).max().unwrap_or(0));
 
     let mut rows: Vec<ChartexSunburstRow> = Vec::new();
     for idx in 0..n {
-        let size = *sizes.get(&idx).unwrap_or(&0.0);
+        let size = sizes.get(idx).copied().flatten().unwrap_or(0.0);
         // Build path root→leaf: iterate levels from LAST (Branch/root) to FIRST
         // (Leaf/deepest). Trailing empty leaf cells are trimmed so a node that is
         // itself a leaf terminates early.
         let mut path: Vec<String> = Vec::new();
-        for lvl in level_maps.iter().rev() {
-            let label = lvl.get(&idx).cloned().unwrap_or_default();
+        for level in levels.iter().rev() {
+            let label = level.get(idx).cloned().unwrap_or_default();
             if label.is_empty() {
-                // Empty deeper cell terminates the path (no further descent).
                 break;
             }
             path.push(label);
@@ -2647,7 +4037,37 @@ fn parse_chartex_sunburst(root: Node) -> Option<ChartexSunburst> {
     if rows.is_empty() {
         return None;
     }
-    Some(ChartexSunburst { rows })
+    Some(rows)
+}
+
+fn parse_chartex_sunburst(
+    root: Node,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<ChartexSunburst> {
+    parse_chartex_hierarchy_rows(root, references).map(|rows| ChartexSunburst { rows })
+}
+
+/// Parse a chartEx treemap. Its category and size dimensions use the same
+/// hierarchy representation as sunburst; `parentLabelLayout` only affects how
+/// parent captions are painted.
+fn parse_chartex_treemap(
+    root: Node,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<ChartexTreemap> {
+    let rows = parse_chartex_hierarchy_rows(root, references)?;
+    let parent_label_layout = root.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "series"
+            && attr(n, "layoutId").as_deref() == Some("treemap")
+    })?;
+    let parent_label_layout = parent_label_layout
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "parentLabelLayout")
+        .and_then(|layout| attr(&layout, "val"));
+    Some(ChartexTreemap {
+        rows,
+        parent_label_layout,
+    })
 }
 
 // ============================================================================
@@ -2677,11 +4097,35 @@ pub fn parse_marker_block(
         .and_then(|v| v.parse::<u32>().ok())
         .map(|v| v as f64);
     let sp_pr = child(mk, "spPr");
-    let fill = sp_pr.and_then(|p| resolver.resolve_shape_fill(p));
+    let fill = sp_pr.and_then(|p| {
+        if child(p, "noFill").is_some() {
+            // The renderer accepts 8-digit RRGGBBAA, so preserve an explicit
+            // marker noFill as a transparent paint instead of collapsing it
+            // into the same None used for an unspecified, inherited fill.
+            Some("00000000".to_string())
+        } else {
+            resolver.resolve_shape_fill(p)
+        }
+    });
     let line = sp_pr
         .and_then(|p| child(p, "ln"))
         .and_then(|ln| resolver.resolve_shape_fill(ln));
     (symbol, size, fill, line)
+}
+
+fn parse_series_pattern_fill(
+    ser_node: Node,
+    resolver: &dyn ColorResolver,
+) -> Option<ChartPatternFill> {
+    let patt_fill = child(ser_node, "spPr").and_then(|shape| child(shape, "pattFill"))?;
+    let adapter = ColorResolverThemeAdapter(resolver);
+    let pattern = crate::fill::parse_patt_fill(patt_fill, &adapter, resolver.tint_mode());
+    Some(ChartPatternFill {
+        fill_type: "pattern".to_string(),
+        fg: pattern.fg,
+        bg: pattern.bg,
+        preset: pattern.preset,
+    })
 }
 
 /// Walk every `<c:dPt>` direct child of the series and collect per-point
@@ -2876,6 +4320,9 @@ pub fn parse_series_data_labels(
     let format_code = child(d_lbls, "numFmt")
         .and_then(|n| n.attribute("formatCode"))
         .map(|s| s.to_string());
+    let separator = child(d_lbls, "separator")
+        .and_then(|n| n.text())
+        .map(|s| s.to_string());
     // defRPr fill / bold / size come from the dLbls-level `<c:txPr>`.
     let txpr = child(d_lbls, "txPr");
     let font_color = txpr.and_then(|tx| {
@@ -2921,6 +4368,7 @@ pub fn parse_series_data_labels(
         position: position.clone(),
         font_color: font_color.clone(),
         format_code,
+        separator,
         font_bold: font_bold_default,
         font_size_hpt: font_size_default,
         label_box,
@@ -2953,22 +4401,30 @@ pub fn parse_series_data_labels(
                 None => cache_for_idx.unwrap_or("").to_string(),
             }
         };
-        let font_color = child(dl, "txPr").and_then(|tx| {
+        // A custom rich-text label carries its direct formatting on
+        // `<c:tx><c:rich><a:p><a:r><a:rPr>`. Those run properties override the
+        // label's `<c:txPr><a:defRPr>` defaults (DrawingML text-property
+        // inheritance). Preserve the first text run's effective style in the
+        // current single-style label model; falling back to txPr keeps labels
+        // without explicit rich-run formatting unchanged.
+        let rich_run_props = child(dl, "tx").and_then(|tx| {
+            tx.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "rPr")
+        });
+        let default_run_props = child(dl, "txPr").and_then(|tx| {
             tx.descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
-                .and_then(|def| resolver.resolve_shape_fill(def))
         });
-        let font_size_hpt = dl
-            .descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
-            .and_then(|def| def.attribute("sz"))
+        let font_color = rich_run_props
+            .and_then(|run| resolver.resolve_shape_fill(run))
+            .or_else(|| default_run_props.and_then(|run| resolver.resolve_shape_fill(run)));
+        let font_size_hpt = rich_run_props
+            .and_then(|run| run.attribute("sz"))
+            .or_else(|| default_run_props.and_then(|run| run.attribute("sz")))
             .and_then(|v| v.parse::<i32>().ok());
-        let font_bold = dl
-            .descendants()
-            .find(|n| {
-                n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr")
-            })
-            .and_then(|def| def.attribute("b"))
+        let font_bold = rich_run_props
+            .and_then(|run| run.attribute("b"))
+            .or_else(|| default_run_props.and_then(|run| run.attribute("b")))
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         // Per-point callout box (`<c:dLbl>` §21.2.2.47 `<c:spPr>` §21.2.2.197):
         // direct child spPr overrides the series-default box for this one point.
@@ -3325,6 +4781,20 @@ pub trait ChartReferenceResolver {
     /// empty or all-gap vector is a successfully resolved empty range.
     fn resolve_strings(&mut self, formula: &str) -> Option<Vec<String>>;
     fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>>;
+
+    /// Resolve the source-linked number format of a numeric reference. ChartEx
+    /// dimensions frequently omit caches and `<cx:numFmt>` while data labels
+    /// remain linked to the first source cell's worksheet number format.
+    fn resolve_number_format(&mut self, _formula: &str) -> Option<String> {
+        None
+    }
+
+    /// Resolve a rectangular hierarchy source into chartEx level vectors in
+    /// document order (deepest level first, root level last). Legacy callers
+    /// and one-column sources naturally fall back to a single level.
+    fn resolve_string_levels(&mut self, formula: &str) -> Option<Vec<Vec<String>>> {
+        self.resolve_strings(formula).map(|values| vec![values])
+    }
 }
 
 struct EmptyChartReferenceResolver;
@@ -3485,6 +4955,13 @@ pub fn parse_chart_part_with_references(
             .and_then(|n| attr(&n, "val"))
             .unwrap_or_else(|| "col".into());
         canonical_chart_type("bar", &bar_dir, &grouping)
+    } else if let Some(ac) = find_chart("areaChart").or_else(|| find_chart("area3DChart")) {
+        // An area+line combination must dispatch through the area renderer so
+        // the fill-bearing group is stacked before the line overlay. Selecting
+        // line merely because a `<c:lineChart>` is also present discards every
+        // authored area fill. Per-series `series_type` keeps both groups.
+        let grouping = read_grouping(&ac, "standard");
+        canonical_chart_type("area", "col", &grouping)
     } else if let Some(lc) = find_chart("lineChart").or_else(|| find_chart("line3DChart")) {
         let grouping = read_grouping(&lc, "standard");
         canonical_chart_type("line", "col", &grouping)
@@ -3508,9 +4985,6 @@ pub fn parse_chart_part_with_references(
         "pie".to_string()
     } else if find_chart("doughnutChart").is_some() {
         "doughnut".to_string()
-    } else if let Some(ac) = find_chart("areaChart").or_else(|| find_chart("area3DChart")) {
-        let grouping = read_grouping(&ac, "standard");
-        canonical_chart_type("area", "col", &grouping)
     } else if find_chart("scatterChart").is_some() {
         "scatter".to_string()
     } else if find_chart("bubbleChart").is_some() {
@@ -3563,18 +5037,12 @@ pub fn parse_chart_part_with_references(
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "chart");
     let title_node_opt = chart_node.and_then(|c| child(c, "title"));
-    let mut title = title_node_opt.and_then(|title_node| {
-        let texts: Vec<String> = title_node
-            .descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == "t")
-            .filter_map(|n| n.text().map(|t| t.to_string()))
-            .collect();
-        if texts.is_empty() {
-            None
-        } else {
-            Some(texts.join(""))
-        }
-    });
+    // CT_Tx allows either DrawingML rich text (`<a:t>`) or a string-reference
+    // cache (`<c:strRef><c:strCache><c:v>`). Reuse the scoped title helper so
+    // both legal forms are honored; looking only for `<a:t>` incorrectly made
+    // a cached authored title disappear and triggered the series-name auto
+    // title below.
+    let mut title = chart_node.and_then(extract_chart_title_text);
     // Title font size in hundredths of a point — taken from the first
     // defRPr@sz or rPr@sz we find inside the title. ECMA-376 uses hpt for size.
     let title_font_size_hpt = title_node_opt.and_then(|t| {
@@ -3660,14 +5128,44 @@ pub fn parse_chart_part_with_references(
             .or_else(|| val_ax_nodes.first())
             .copied()
     };
-    let secondary_val_ax = if !is_scatter_axes && val_ax_nodes.len() >= 2 {
-        val_ax_nodes
-            .iter()
-            .find(|n| ax_pos(n).as_deref() == Some("r"))
-            .copied()
+    // A scatter/bubble group overlaid on a bar/line/area chart references two
+    // additional numeric axes. The group's first `axId` is its horizontal X
+    // axis and the second is its vertical Y axis (CT_ScatterChart sequence).
+    // Resolve by ID instead of by `axPos`: both the primary bar value axis and
+    // the scatter X axis commonly sit at `b`, so position alone is ambiguous.
+    let combo_scatter_axis_ids = if !is_scatter_axes {
+        find_chart("scatterChart")
+            .or_else(|| find_chart("bubbleChart"))
+            .map(|group| {
+                group
+                    .children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "axId")
+                    .filter_map(|node| attr(&node, "val"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     } else {
-        None
+        Vec::new()
     };
+    let axis_by_id = |id: Option<&String>| {
+        id.and_then(|wanted| {
+            val_ax_nodes
+                .iter()
+                .find(|node| ax_id_of(node).as_ref() == Some(wanted))
+                .copied()
+        })
+    };
+    let secondary_cat_ax = axis_by_id(combo_scatter_axis_ids.first());
+    let secondary_val_ax = axis_by_id(combo_scatter_axis_ids.get(1)).or_else(|| {
+        if !is_scatter_axes && val_ax_nodes.len() >= 2 {
+            val_ax_nodes
+                .iter()
+                .find(|n| ax_pos(n).as_deref() == Some("r"))
+                .copied()
+        } else {
+            None
+        }
+    });
     let secondary_ax_id = secondary_val_ax.as_ref().and_then(ax_id_of);
     let (val_min, val_max) = val_ax.map(extract_axis_min_max).unwrap_or((None, None));
     let val_axis_hidden = val_ax.map(axis_is_deleted).unwrap_or(false);
@@ -3711,8 +5209,6 @@ pub fn parse_chart_part_with_references(
     let categories: Vec<String> =
         collect_string_source(ser_nodes[0], category_tag, references).unwrap_or_default();
 
-    let is_scatter_like = chart_type == "scatter" || chart_type == "bubble";
-
     // Map a chart-group element name to the per-series `seriesType` string the
     // renderer dispatches on (mixed bar+line charts key line vs. non-line off
     // this field). Mirrors the xlsx `type_map`; `bubbleChart` folds to
@@ -3755,6 +5251,12 @@ pub fn parse_chart_part_with_references(
             let series_type = group
                 .map(|p| p.tag_name().name())
                 .and_then(group_series_type);
+            let series_is_scatter_like = matches!(series_type.as_deref(), Some("scatter"));
+            let own_category_tag = if series_is_scatter_like {
+                "xVal"
+            } else {
+                "cat"
+            };
             let use_secondary_axis = match (group, secondary_ax_id.as_deref()) {
                 (Some(g), Some(sec)) => g
                     .children()
@@ -3794,22 +5296,23 @@ pub fn parse_chart_part_with_references(
             // back to `ChartModel.categories` (the shared TS contract). Authored
             // caches/literals and genuinely distinct formulas remain per-series.
             let series_categories: Option<Vec<String>> = {
-                let own_formula = external_reference_formula(*ser, category_tag);
-                let shares_chart_categories = series_position == 0
-                    || (own_formula.is_some()
-                        && own_formula.as_deref() == shared_category_formula.as_deref());
+                let own_formula = external_reference_formula(*ser, own_category_tag);
+                let shares_chart_categories = own_category_tag == category_tag
+                    && (series_position == 0
+                        || (own_formula.is_some()
+                            && own_formula.as_deref() == shared_category_formula.as_deref()));
                 if shares_chart_categories {
                     None
                 } else {
-                    let has_own_source = ser
-                        .children()
-                        .any(|node| node.is_element() && node.tag_name().name() == category_tag);
-                    match collect_string_source(*ser, category_tag, references) {
-                        Some(own) if is_scatter_like || !own.is_empty() => Some(own),
+                    let has_own_source = ser.children().any(|node| {
+                        node.is_element() && node.tag_name().name() == own_category_tag
+                    });
+                    match collect_string_source(*ser, own_category_tag, references) {
+                        Some(own) if series_is_scatter_like || !own.is_empty() => Some(own),
                         // A distinct scatter/bubble X source that cannot be
                         // resolved must not inherit the first series' X values.
                         // `Some([])` explicitly suppresses that fallback.
-                        None if is_scatter_like && has_own_source => Some(Vec::new()),
+                        None if series_is_scatter_like && has_own_source => Some(Vec::new()),
                         _ => None,
                     }
                 }
@@ -3821,7 +5324,11 @@ pub fn parse_chart_part_with_references(
             // rides on the category count, so a value series with more points
             // than there are cat labels (cat-less line, sparse radar) keeps all
             // of its data.
-            let val_tag = if is_scatter_like { "yVal" } else { "val" };
+            let val_tag = if series_is_scatter_like {
+                "yVal"
+            } else {
+                "val"
+            };
             let values: Vec<Option<f64>> =
                 collect_number_source(*ser, val_tag, references).unwrap_or_default();
             let series_pt_count = values.len().max(1);
@@ -3839,7 +5346,10 @@ pub fn parse_chart_part_with_references(
 
             // Bubble per-point sizes (ECMA-376 §21.2.2.4 `<c:bubbleSize>`).
             // Only meaningful for bubble charts; scatter / others ignore.
-            let bubble_sizes: Option<Vec<Option<f64>>> = if chart_type == "bubble" {
+            let bubble_sizes: Option<Vec<Option<f64>>> = if group
+                .map(|node| node.tag_name().name() == "bubbleChart")
+                .unwrap_or(false)
+            {
                 collect_number_source(*ser, "bubbleSize", references).map(|mut sizes| {
                     sizes.resize(sizes.len().max(series_pt_count), None);
                     sizes
@@ -3861,6 +5371,17 @@ pub fn parse_chart_part_with_references(
                 .and_then(|sp| {
                     if sp
                         .children()
+                        .any(|n| n.is_element() && n.tag_name().name() == "noFill")
+                    {
+                        // An explicit shape-level `<a:noFill/>` suppresses the
+                        // series fill but does not remove the series from the
+                        // data model (notably, an invisible first series can be
+                        // the baseline of a stacked area chart). CSS accepts
+                        // 8-digit hex, so preserve that authored transparency
+                        // without conflating it with `None` (theme fallback).
+                        Some("00000000".to_string())
+                    } else if sp
+                        .children()
                         .any(|n| n.is_element() && n.tag_name().name() == "solidFill")
                     {
                         color_resolver.resolve_shape_fill(sp)
@@ -3879,7 +5400,8 @@ pub fn parse_chart_part_with_references(
             // though `<c:scatterStyle val="lineMarker">` sets the group default to
             // connect points. Only the noFill flag matters here (color/width ride
             // on `color` above), so discard the other two tuple fields.
-            let (_, _, line_no_fill) = extract_sp_pr_ln_style(*ser, color_resolver);
+            let (line_color, line_width_emu, line_no_fill) =
+                extract_sp_pr_ln_style(*ser, color_resolver);
 
             // Per-data-point colors from <c:dPt> (§21.2.2.52; important for
             // pie charts). The point index is the CHILD element `<c:idx val>`
@@ -3985,6 +5507,57 @@ pub fn parse_chart_part_with_references(
                         .and_then(|fc| fc.text().map(|t| t.to_string()))
                 })
                 .filter(|s| !s.is_empty() && s != "General");
+            let cat_format_code = ser
+                .children()
+                .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+                .and_then(|source| {
+                    source.descendants().find(|node| {
+                        node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
+                    })
+                })
+                .and_then(|cache| child(cache, "formatCode"))
+                .and_then(|format| format.text().map(str::to_string))
+                .filter(|format| !format.is_empty() && format != "General");
+            let cat_format_codes = ser
+                .children()
+                .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+                .and_then(|source| {
+                    source.descendants().find(|node| {
+                        node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
+                    })
+                })
+                .and_then(|cache| {
+                    let point_count = child(cache, "ptCount")
+                        .and_then(|count| attr(&count, "val"))
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .unwrap_or_else(|| {
+                            cache
+                                .children()
+                                .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                                .filter_map(|point| attr(&point, "idx"))
+                                .filter_map(|idx| idx.parse::<usize>().ok())
+                                .max()
+                                .map(|idx| idx + 1)
+                                .unwrap_or(0)
+                        });
+                    let mut formats = vec![None; point_count];
+                    for point in cache
+                        .children()
+                        .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                    {
+                        let Some(idx) =
+                            attr(&point, "idx").and_then(|idx| idx.parse::<usize>().ok())
+                        else {
+                            continue;
+                        };
+                        if idx >= formats.len() {
+                            formats.resize(idx + 1, None);
+                        }
+                        formats[idx] = attr(&point, "formatCode")
+                            .filter(|format| !format.is_empty() && format != "General");
+                    }
+                    formats.iter().any(Option::is_some).then_some(formats)
+                });
 
             // Series-level data-label text colour from `<c:dLbls><c:txPr>…solidFill`.
             // Scoped to this `<c:ser>` (not chart-root) so stacked-bar segments keep
@@ -4015,7 +5588,7 @@ pub fn parse_chart_part_with_references(
             let marker_node = child(*ser, "marker");
             let (marker_symbol, marker_size, marker_fill, marker_line) =
                 parse_marker_block(marker_node, color_resolver);
-            let show_marker = match (&marker_symbol, is_scatter_like) {
+            let show_marker = match (&marker_symbol, series_is_scatter_like) {
                 (Some(sym), _) => sym != "none",
                 (None, true) => true,
                 _ => chart_marker_default,
@@ -4032,6 +5605,9 @@ pub fn parse_chart_part_with_references(
                 name,
                 values,
                 color,
+                fill_pattern: parse_series_pattern_fill(*ser, color_resolver),
+                line_color,
+                line_width_emu,
                 data_point_colors: if has_dpt_colors {
                     Some(data_point_colors)
                 } else {
@@ -4044,6 +5620,8 @@ pub fn parse_chart_part_with_references(
                 categories: series_categories,
                 bubble_sizes,
                 val_format_code,
+                cat_format_code,
+                cat_format_codes,
                 label_color,
                 series_type,
                 // Shared `ChartSeries.use_secondary_axis` is `Option<bool>`; the
@@ -4151,10 +5729,15 @@ pub fn parse_chart_part_with_references(
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "spPr");
     let chart_bg = match chart_sp_pr {
-        Some(sp) => sp
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")
-            .and_then(|fill| color_resolver.resolve_solid_fill(fill)),
+        Some(sp) if child(sp, "noFill").is_some() => None,
+        Some(sp) => match child(sp, "solidFill") {
+            Some(fill) => color_resolver.resolve_solid_fill(fill),
+            // `CT_ShapeProperties` carries a fill *choice*. Merely authoring
+            // another property (commonly `<a:ln><a:noFill/></a:ln>`) does not
+            // mean that the chart-area fill itself is `noFill`; retain the
+            // host application's default until a fill choice overrides it.
+            None => color_resolver.default_chart_bg(),
+        },
         None => color_resolver.default_chart_bg(),
     };
 
@@ -4201,6 +5784,7 @@ pub fn parse_chart_part_with_references(
 
     // Data-label font size — first `<c:dLbls><c:txPr>` defRPr/rPr@sz we find.
     let data_label_font_size_hpt = extract_data_label_font_size(root);
+    let data_label_font_bold = extract_data_label_font_bold(root);
 
     // Bar gap / overlap, dLblPos and numFmt — all shared helpers so any new
     // chart property added to the xlsx side stays applied to pptx without
@@ -4260,7 +5844,7 @@ pub fn parse_chart_part_with_references(
     // Secondary value axis (combo charts) — parse the right-hand `<c:valAx>`
     // into a self-contained spec using the same shared helpers as the primary
     // axis. None for the common single value-axis case.
-    let secondary_val_axis = secondary_val_ax.map(|ax| {
+    let parse_auxiliary_value_axis = |ax| {
         let (min, max) = extract_axis_min_max(ax);
         let (t, title_size, title_bold, title_color) =
             extract_axis_title_with_props_resolved(ax, color_resolver);
@@ -4283,74 +5867,16 @@ pub fn parse_chart_part_with_references(
             title_font_bold: title_bold,
             title_font_color: title_color,
         }
-    });
+    };
+    let secondary_val_axis = secondary_val_ax.map(&parse_auxiliary_value_axis);
+    let secondary_cat_axis = secondary_cat_ax.map(parse_auxiliary_value_axis);
 
-    // `<c:plotArea><c:layout><c:manualLayout>` — explicit plot-area rectangle
-    // (fractions of chart space). ECMA-376 §21.2.2.32. Sample-2 slide-16 uses
-    // this to keep its horizontal bar chart from spilling into the side
-    // annotation column. We parse the same shape xlsx already exposes
-    // (xMode, yMode, layoutTarget, x, y, w?, h?).
+    // `<c:plotArea><c:layout><c:manualLayout>` — use the shared parser so
+    // schema defaults and all four layout modes cannot diverge by host format.
     let plot_area_manual_layout = plot_area
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "layout")
-        .and_then(|layout| {
-            layout
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "manualLayout")
-        })
-        .map(|ml| {
-            let mut x_mode = "edge".to_string();
-            let mut y_mode = "edge".to_string();
-            let mut layout_target: Option<String> = None;
-            let mut x = 0.0_f64;
-            let mut y = 0.0_f64;
-            let mut w: Option<f64> = None;
-            let mut h: Option<f64> = None;
-            for ch in ml.children().filter(|n| n.is_element()) {
-                let val_str = attr(&ch, "val");
-                match ch.tag_name().name() {
-                    "xMode" => {
-                        if let Some(v) = val_str {
-                            x_mode = v;
-                        }
-                    }
-                    "yMode" => {
-                        if let Some(v) = val_str {
-                            y_mode = v;
-                        }
-                    }
-                    "layoutTarget" => {
-                        layout_target = val_str;
-                    }
-                    "x" => {
-                        if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
-                            x = v;
-                        }
-                    }
-                    "y" => {
-                        if let Some(v) = val_str.and_then(|s| s.parse::<f64>().ok()) {
-                            y = v;
-                        }
-                    }
-                    "w" => {
-                        w = val_str.and_then(|s| s.parse::<f64>().ok());
-                    }
-                    "h" => {
-                        h = val_str.and_then(|s| s.parse::<f64>().ok());
-                    }
-                    _ => {}
-                }
-            }
-            ChartManualLayout {
-                x_mode,
-                y_mode,
-                layout_target,
-                x,
-                y,
-                w,
-                h,
-            }
-        });
+        .and_then(extract_manual_layout);
 
     // `<c:scatterChart><c:scatterStyle val>` — ECMA-376 §21.2.2.42. Lives
     // directly under scatterChart, so a plot_area descendant walk is enough.
@@ -4359,6 +5885,34 @@ pub fn parse_chart_part_with_references(
             .descendants()
             .find(|n| n.is_element() && n.tag_name().name() == "scatterStyle")
             .and_then(|n| attr(&n, "val"))
+    } else {
+        None
+    };
+    let bubble_scale = if chart_type == "bubble" {
+        plot_area
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "bubbleScale")
+            .and_then(|n| attr(&n, "val"))
+            .and_then(|value| parse_unsigned_percent(&value))
+            .filter(|value| *value <= 300)
+    } else {
+        None
+    };
+    let bubble_size_represents = if chart_type == "bubble" {
+        plot_area
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "bubbleChart")
+            .and_then(|group| child(group, "sizeRepresents"))
+            .and_then(|n| attr(&n, "val"))
+            .filter(|value| value == "area" || value == "w")
+    } else {
+        None
+    };
+    let show_negative_bubbles = if chart_type == "bubble" {
+        plot_area
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "bubbleChart")
+            .and_then(|group| bool_child(group, "showNegBubbles"))
     } else {
         None
     };
@@ -4435,12 +5989,17 @@ pub fn parse_chart_part_with_references(
         .and_then(extract_chart_title_bold);
 
     // Explicit chartSpace border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
-    // §21.2.2.5 / DrawingML §20.1.2.2.24). Shared with the xlsx parser via
-    // `extract_chart_space_border` so the locked policy
-    // (border only on an explicit paintable line; `<a:noFill/>` → color None;
-    // srgb inside solidFill → hex; `@w` captured as u32; schemeClr unresolved)
-    // stays in lockstep. `root` is the `<c:chartSpace>` element here.
-    let (chart_border_color, chart_border_width_emu) = extract_chart_space_border(root);
+    // §21.2.2.5 / DrawingML §20.1.2.2.24). Resolve the complete DrawingML line
+    // color grammar through the package theme: chart borders commonly use
+    // `<a:schemeClr val="tx1">` (often with luminance transforms), not only a
+    // literal srgb color. `<a:noFill/>` remains an explicit invisible border.
+    let (resolved_border_color, chart_border_width_emu, border_no_fill) =
+        extract_sp_pr_ln_style(root, color_resolver);
+    let chart_border_color = if border_no_fill {
+        None
+    } else {
+        resolved_border_color
+    };
 
     // `<c:date1904>` (ECMA-376 §21.2.2.38) — direct child of `<c:chartSpace>`
     // (`root`). Shared with the xlsx parser via ooxml-common so both honor the
@@ -4509,6 +6068,16 @@ pub fn parse_chart_part_with_references(
     let val_axis_log_base = val_ax.and_then(extract_axis_log_base);
     let val_axis_orientation = val_ax.and_then(extract_axis_orientation);
     let cat_axis_orientation = cat_ax.and_then(extract_axis_orientation);
+    let cat_axis_tick_label_skip = cat_ax
+        .and_then(|axis| child(axis, "tickLblSkip"))
+        .and_then(|skip| attr(&skip, "val"))
+        .and_then(|skip| skip.parse::<u32>().ok())
+        .filter(|skip| *skip > 0);
+    let cat_axis_tick_mark_skip = cat_ax
+        .and_then(|axis| child(axis, "tickMarkSkip"))
+        .and_then(|skip| attr(&skip, "val"))
+        .and_then(|skip| skip.parse::<u32>().ok())
+        .filter(|skip| *skip > 0);
     let cat_axis_tick_label_pos = cat_ax.and_then(extract_axis_tick_label_pos);
     let val_axis_tick_label_pos = val_ax.and_then(extract_axis_tick_label_pos);
     let cat_axis_label_rotation = cat_ax.and_then(extract_axis_tick_label_rotation);
@@ -4574,12 +6143,15 @@ pub fn parse_chart_part_with_references(
         }
     };
 
+    let title_present = title_node_opt.is_some() || title.is_some();
     Some(ChartModel {
         chart_type,
         title,
+        title_present,
         categories,
         series,
         vary_colors,
+        chart_text_boxes: None,
         val_max,
         val_min,
         subtotal_indices: vec![],
@@ -4612,9 +6184,13 @@ pub fn parse_chart_part_with_references(
         data_label_position,
         data_label_font_color,
         data_label_format_code,
+        data_label_font_bold,
         val_axis_format_code,
         plot_area_manual_layout,
         scatter_style,
+        bubble_scale,
+        bubble_size_represents,
+        show_negative_bubbles,
         cat_axis_title,
         val_axis_title,
         // TS `ChartElement` renamed the axis-title run-prop fields to the
@@ -4632,6 +6208,7 @@ pub fn parse_chart_part_with_references(
         chart_border_color,
         chart_border_width_emu,
         secondary_val_axis,
+        secondary_cat_axis,
         // Pie/doughnut geometry (CH8) + chart text font faces (CH10).
         hole_size,
         first_slice_angle,
@@ -4677,15 +6254,23 @@ pub fn parse_chart_part_with_references(
         val_axis_orientation,
         cat_axis_orientation,
         cat_axis_tick_label_pos,
+        cat_axis_tick_label_skip,
+        cat_axis_tick_mark_skip,
         val_axis_tick_label_pos,
         cat_axis_label_rotation,
         stock_hi_low_lines,
         stock_hi_low_line_color,
         stock_up_down_bars,
-        // Legacy `c:` charts never carry the chartEx boxWhisker/sunburst model.
+        // Legacy `c:` charts never carry the chartEx structured models.
         chartex_box: None,
         chartex_sunburst: None,
+        chartex_treemap: None,
         chartex_accents: None,
+        chartex_color_palette: None,
+        chartex_color_style_method: None,
+        chartex_data_point_style: None,
+        chartex_data_point_line_style: None,
+        chartex_data_point_marker_style: None,
     })
 }
 
@@ -4763,10 +6348,14 @@ mod tests {
         let m = ChartModel {
             chart_type: "clusteredBar".to_string(),
             title: None,
+            title_present: false,
             categories: vec!["A".to_string(), "B".to_string()],
             series: vec![ChartSeries {
                 name: "S1".to_string(),
                 color: Some("FF0000".to_string()),
+                fill_pattern: None,
+                line_color: None,
+                line_width_emu: None,
                 values: vec![Some(1.0), None, Some(3.0)],
                 data_point_colors: None,
                 data_label_colors: None,
@@ -4776,6 +6365,8 @@ mod tests {
                 categories: None,
                 show_marker: None,
                 val_format_code: None,
+                cat_format_code: None,
+                cat_format_codes: None,
                 marker_symbol: None,
                 marker_size: None,
                 marker_fill: None,
@@ -4790,6 +6381,7 @@ mod tests {
                 line_hidden: None,
             }],
             vary_colors: None,
+            chart_text_boxes: None,
             show_data_labels: false,
             val_min: None,
             val_max: None,
@@ -4824,6 +6416,7 @@ mod tests {
             data_label_position: None,
             data_label_font_color: None,
             data_label_format_code: None,
+            data_label_font_bold: None,
             title_font_bold: None,
             cat_axis_font_bold: None,
             val_axis_font_bold: None,
@@ -4849,8 +6442,12 @@ mod tests {
             title_manual_layout: None,
             plot_area_manual_layout: None,
             scatter_style: None,
+            bubble_scale: None,
+            bubble_size_represents: None,
+            show_negative_bubbles: None,
             radar_style: None,
             secondary_val_axis: None,
+            secondary_cat_axis: None,
             hole_size: None,
             first_slice_angle: None,
             cat_axis_font_face: None,
@@ -4879,6 +6476,8 @@ mod tests {
             val_axis_orientation: None,
             cat_axis_orientation: None,
             cat_axis_tick_label_pos: None,
+            cat_axis_tick_label_skip: None,
+            cat_axis_tick_mark_skip: None,
             val_axis_tick_label_pos: None,
             cat_axis_label_rotation: None,
             stock_hi_low_lines: None,
@@ -4886,7 +6485,13 @@ mod tests {
             stock_up_down_bars: None,
             chartex_box: None,
             chartex_sunburst: None,
+            chartex_treemap: None,
             chartex_accents: None,
+            chartex_color_palette: None,
+            chartex_color_style_method: None,
+            chartex_data_point_style: None,
+            chartex_data_point_line_style: None,
+            chartex_data_point_marker_style: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         let obj = v.as_object().unwrap();
@@ -4967,6 +6572,17 @@ mod tests {
         assert_eq!(
             extract_data_label_position(d.root_element()).as_deref(),
             Some("ctr")
+        );
+
+        let series_only = root_of(
+            r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+              <c:plotArea><c:scatterChart><c:ser><c:dLbls><c:dLblPos val="l"/></c:dLbls></c:ser></c:scatterChart></c:plotArea>
+            </c:chart>"#,
+        );
+        assert_eq!(
+            extract_data_label_position(series_only.root_element()),
+            None,
+            "a series position must not become the sibling-series fallback",
         );
     }
 
@@ -5093,6 +6709,56 @@ mod tests {
             }
             None
         }
+    }
+
+    #[test]
+    fn parse_chart_user_shapes_preserves_relative_text_boxes_and_run_formatting() {
+        let doc = roxmltree::Document::parse(
+            r#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                 xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing"
+                 xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <cdr:relSizeAnchor>
+                <cdr:from><cdr:x>0</cdr:x><cdr:y>0.05</cdr:y></cdr:from>
+                <cdr:to><cdr:x>0.8</cdr:x><cdr:y>0.16</cdr:y></cdr:to>
+                <cdr:sp>
+                  <cdr:nvSpPr><cdr:cNvPr id="1" name="TitleBox"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr>
+                  <cdr:spPr/>
+                  <cdr:txBody>
+                    <a:bodyPr anchor="b" wrap="square"/><a:lstStyle/>
+                    <a:p>
+                      <a:pPr algn="ctr"><a:defRPr sz="1200"><a:latin typeface="Lato"/></a:defRPr></a:pPr>
+                      <a:r><a:rPr sz="2000" b="1"><a:solidFill><a:srgbClr val="1696d2"/></a:solidFill></a:rPr><a:t>Authored </a:t></a:r>
+                      <a:r><a:t>title</a:t></a:r>
+                    </a:p>
+                  </cdr:txBody>
+                </cdr:sp>
+              </cdr:relSizeAnchor>
+            </c:userShapes>"#,
+        )
+        .unwrap();
+
+        let boxes = parse_chart_user_shapes(doc.root_element(), &StubResolver);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].x, 0.0);
+        assert_eq!(boxes[0].y, 0.05);
+        assert_eq!(boxes[0].w, 0.8);
+        assert_eq!(boxes[0].h, 0.11);
+        assert_eq!(boxes[0].vertical_anchor.as_deref(), Some("b"));
+        assert_eq!(boxes[0].wrap.as_deref(), Some("square"));
+        assert_eq!(boxes[0].paragraphs[0].align.as_deref(), Some("ctr"));
+        assert_eq!(boxes[0].paragraphs[0].runs[0].text, "Authored ");
+        assert_eq!(boxes[0].paragraphs[0].runs[0].font_size_hpt, Some(2000));
+        assert_eq!(boxes[0].paragraphs[0].runs[0].bold, Some(true));
+        assert_eq!(
+            boxes[0].paragraphs[0].runs[0].color.as_deref(),
+            Some("1696D2")
+        );
+        assert_eq!(boxes[0].paragraphs[0].runs[1].text, "title");
+        assert_eq!(boxes[0].paragraphs[0].runs[1].font_size_hpt, Some(1200));
+        assert_eq!(
+            boxes[0].paragraphs[0].runs[1].font_face.as_deref(),
+            Some("Lato")
+        );
     }
 
     #[test]
@@ -5250,6 +6916,31 @@ mod tests {
         </cx:chartSpace>"#;
         let d = root_of(xml);
         assert_eq!(extract_chartex_axis_hidden(d.root_element()), (false, true));
+    }
+
+    #[test]
+    fn chartex_axis_tick_marks_require_an_authored_type() {
+        let xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
+            <cx:axis id="0"><cx:catScaling/><cx:majorTickMarks type="out"/></cx:axis>
+            <cx:axis id="1"><cx:valScaling/></cx:axis>
+        </cx:chartSpace>"#;
+        let d = root_of(xml);
+        let cat_axis = d
+            .root_element()
+            .descendants()
+            .find(|node| node.is_element() && child(*node, "catScaling").is_some());
+        let val_axis = d
+            .root_element()
+            .descendants()
+            .find(|node| node.is_element() && child(*node, "valScaling").is_some());
+        assert_eq!(
+            extract_chartex_axis_tick_mark(cat_axis, "majorTickMarks"),
+            "out"
+        );
+        assert_eq!(
+            extract_chartex_axis_tick_mark(val_axis, "majorTickMarks"),
+            "none"
+        );
     }
 
     #[test]
@@ -5809,6 +7500,52 @@ mod tests {
         }
     }
 
+    struct WhiteChartFixtureResolver;
+
+    impl ColorResolver for WhiteChartFixtureResolver {
+        fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+            FixtureResolver.resolve_solid_fill(node)
+        }
+
+        fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+            FixtureResolver.resolve_scheme_color(name)
+        }
+
+        fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+            FixtureResolver.resolve_series_accent(idx)
+        }
+
+        fn default_chart_bg(&self) -> Option<String> {
+            Some("FFFFFF".to_string())
+        }
+    }
+
+    struct FormatSchemeFixtureResolver {
+        format_scheme: crate::theme::ThemeFormatScheme,
+    }
+
+    impl ColorResolver for FormatSchemeFixtureResolver {
+        fn resolve_solid_fill(&self, node: Node) -> Option<String> {
+            FixtureResolver.resolve_solid_fill(node)
+        }
+
+        fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+            FixtureResolver.resolve_scheme_color(name)
+        }
+
+        fn resolve_series_accent(&self, idx: usize) -> Option<String> {
+            FixtureResolver.resolve_series_accent(idx)
+        }
+
+        fn theme_format_scheme(&self) -> Option<&crate::theme::ThemeFormatScheme> {
+            Some(&self.format_scheme)
+        }
+
+        fn default_chart_bg(&self) -> Option<String> {
+            Some("FFFFFF".to_string())
+        }
+    }
+
     fn chart_space_of(xml: &str) -> Document<'_> {
         Document::parse(xml).expect("parse chartSpace fixture")
     }
@@ -5844,6 +7581,73 @@ mod tests {
 
         assert_eq!(chart.series[0].color.as_deref(), Some("ED7D31"));
         assert_eq!(chart.series[1].color.as_deref(), Some("ED7D31"));
+    }
+
+    #[test]
+    fn area_series_no_fill_stays_transparent_but_remains_in_the_stack() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea><c:areaChart>
+                <c:grouping val="stacked"/>
+                <c:ser><c:idx val="0"/><c:order val="0"/>
+                  <c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>80</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:areaChart>
+              <c:lineChart><c:grouping val="standard"/>
+                <c:ser><c:idx val="1"/><c:order val="1"/>
+                  <c:spPr><a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></c:spPr>
+                  <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                  <c:val><c:numLit><c:pt idx="0"><c:v>85</c:v></c:pt></c:numLit></c:val>
+                </c:ser>
+              </c:lineChart></c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let chart = parse_chart_part(doc.root_element(), &FixtureResolver).expect("chart parses");
+
+        assert_eq!(chart.chart_type, "stackedArea");
+        assert_eq!(chart.series[0].series_type.as_deref(), Some("area"));
+        assert_eq!(chart.series[0].color.as_deref(), Some("00000000"));
+        assert_eq!(chart.series[0].line_hidden, Some(true));
+        assert_eq!(chart.series[0].values, vec![Some(80.0)]);
+        assert_eq!(chart.series[1].series_type.as_deref(), Some("line"));
+        assert_eq!(chart.series[1].line_color.as_deref(), Some("000000"));
+    }
+
+    #[test]
+    fn chart_space_shape_properties_without_a_fill_keep_the_host_default() {
+        let chart_xml = |shape_properties: &str| {
+            format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                  <c:chart><c:plotArea><c:barChart>
+                    <c:barDir val="col"/><c:grouping val="clustered"/>
+                    <c:ser><c:idx val="0"/><c:order val="0"/>
+                      <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                      <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                    </c:ser>
+                  </c:barChart></c:plotArea></c:chart>
+                  {shape_properties}
+                </c:chartSpace>"#
+            )
+        };
+
+        // `spPr` is often present only to suppress the chart border. Since it
+        // carries no fill choice, it must not also make the chart area
+        // transparent.
+        let line_only = chart_xml("<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>");
+        let doc = chart_space_of(&line_only);
+        let parsed = parse_chart_part(doc.root_element(), &WhiteChartFixtureResolver)
+            .expect("line-only chart parses");
+        assert_eq!(parsed.chart_bg.as_deref(), Some("FFFFFF"));
+
+        // An explicit fill choice remains authoritative.
+        let no_fill = chart_xml("<c:spPr><a:noFill/></c:spPr>");
+        let doc = chart_space_of(&no_fill);
+        let parsed = parse_chart_part(doc.root_element(), &WhiteChartFixtureResolver)
+            .expect("noFill chart parses");
+        assert_eq!(parsed.chart_bg, None);
     }
 
     #[test]
@@ -5947,7 +7751,7 @@ mod tests {
                     <c:ser>
                       <c:idx val="0"/>
                       <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx>
-                      <c:spPr><a:solidFill><a:srgbClr val="2d6a4f"/></a:solidFill></c:spPr>
+                      <c:spPr><a:solidFill><a:srgbClr val="2d6a4f"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="595959"/></a:solidFill></a:ln></c:spPr>
                       <c:cat><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt></c:strCache></c:cat>
                       <c:val><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:val>
                     </c:ser>
@@ -5968,7 +7772,7 @@ mod tests {
                 </c:plotArea>
                 <c:legend><c:legendPos val="b"/></c:legend>
               </c:chart>
-              <c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="1b4332"/></a:solidFill></a:ln></c:spPr>
+              <c:spPr><a:ln w="19050"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></c:spPr>
             </c:chartSpace>"#
         );
         let doc = chart_space_of(&xml);
@@ -5991,6 +7795,8 @@ mod tests {
         assert_eq!(m.series[0].name, "Revenue");
         assert_eq!(m.series[0].values, vec![Some(10.0), Some(20.0)]);
         assert_eq!(m.series[0].color.as_deref(), Some("2D6A4F"));
+        assert_eq!(m.series[0].line_color.as_deref(), Some("595959"));
+        assert_eq!(m.series[0].line_width_emu, Some(12700));
         assert!(m.show_legend);
         assert_eq!(m.legend_pos.as_deref(), Some("b"));
         assert_eq!(m.bar_gap_width, Some(80));
@@ -6007,13 +7813,39 @@ mod tests {
         assert_eq!(m.cat_axis_gridline_color, None);
         assert_eq!(m.cat_axis_gridline_width_emu, None);
         assert_eq!(m.cat_axis_line_color.as_deref(), Some("808080"));
-        // `extract_chart_space_border` reads `<a:srgbClr@val>` directly (not
-        // through the resolver, unlike series/title colors), so the case is
-        // whatever the XML wrote — lowercase here — not uppercased.
-        assert_eq!(m.chart_border_color.as_deref(), Some("1b4332"));
+        // The chartSpace border is theme-aware: scheme tx1 resolves through
+        // the same color resolver as other DrawingML lines.
+        assert_eq!(m.chart_border_color.as_deref(), Some("000000"));
         assert_eq!(m.chart_border_width_emu, Some(19050));
         assert!(!m.cat_axis_hidden);
         assert!(!m.val_axis_hidden);
+    }
+
+    /// A chart title may be a string reference cache rather than DrawingML
+    /// rich text (§21.2.2.6 CT_Title → §21.2.2.198 CT_Tx). The cached `<c:v>`
+    /// is the authored title and must win over the single-series auto title.
+    #[test]
+    fn parse_chart_part_uses_strref_cache_for_title() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart>
+                <c:title><c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache>
+                  <c:ptCount val="1"/><c:pt idx="0"><c:v>Authored cached title</c:v></c:pt>
+                </c:strCache></c:strRef></c:tx></c:title>
+                <c:autoTitleDeleted val="0"/>
+                <c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>
+                  <c:ser><c:idx val="0"/>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Series fallback</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+                    <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+                  </c:ser>
+                </c:barChart></c:plotArea>
+              </c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(doc.root_element(), &FixtureResolver).expect("chart parses");
+        assert_eq!(model.title.as_deref(), Some("Authored cached title"));
     }
 
     /// A chart without `<c:style>` is valid (`CT_ChartSpace.style` is optional).
@@ -6146,6 +7978,60 @@ mod tests {
         assert_eq!(sec.major_unit, Some(0.25));
         // The primary value axis declared no majorUnit → stays None.
         assert_eq!(m.val_axis_major_unit, None);
+    }
+
+    #[test]
+    fn parse_chart_part_bar_scatter_combo_keeps_xy_sources_and_both_numeric_axes() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:chart><c:plotArea>
+                <c:barChart><c:barDir val="bar"/><c:grouping val="clustered"/>
+                  <c:ser><c:idx val="0"/>
+                    <c:cat><c:strLit><c:pt idx="0"><c:v>Top</c:v></c:pt><c:pt idx="1"><c:v>Bottom</c:v></c:pt></c:strLit></c:cat>
+                    <c:val><c:numLit><c:pt idx="0"><c:v>0</c:v></c:pt><c:pt idx="1"><c:v>0</c:v></c:pt></c:numLit></c:val>
+                  </c:ser><c:axId val="1"/><c:axId val="2"/>
+                </c:barChart>
+                <c:scatterChart><c:scatterStyle val="marker"/>
+                  <c:ser><c:idx val="1"/>
+                    <c:marker><c:symbol val="circle"/></c:marker>
+                    <c:xVal><c:numLit><c:formatCode>0%</c:formatCode><c:pt idx="0" formatCode="0%"><c:v>0.15</c:v></c:pt><c:pt idx="1" formatCode="0.0%"><c:v>0.83</c:v></c:pt></c:numLit></c:xVal>
+                    <c:yVal><c:numLit><c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>1</c:v></c:pt></c:numLit></c:yVal>
+                  </c:ser><c:axId val="3"/><c:axId val="4"/>
+                </c:scatterChart>
+                <c:catAx><c:axId val="1"/><c:axPos val="l"/><c:tickLblSkip val="2"/><c:tickMarkSkip val="3"/></c:catAx>
+                <c:valAx><c:axId val="2"/><c:axPos val="b"/><c:scaling><c:max val="1.4"/></c:scaling></c:valAx>
+                <c:valAx><c:axId val="3"/><c:axPos val="b"/><c:delete val="1"/></c:valAx>
+                <c:valAx><c:axId val="4"/><c:axPos val="r"/><c:delete val="1"/><c:scaling><c:min val="0"/><c:max val="2"/></c:scaling></c:valAx>
+              </c:plotArea></c:chart>
+            </c:chartSpace>"#
+        );
+        let doc = chart_space_of(&xml);
+        let model = parse_chart_part(doc.root_element(), &FixtureResolver)
+            .expect("bar/scatter combo parses");
+
+        assert_eq!(model.chart_type, "clusteredBarH");
+        assert_eq!(model.cat_axis_tick_label_skip, Some(2));
+        assert_eq!(model.cat_axis_tick_mark_skip, Some(3));
+        let scatter = &model.series[1];
+        assert_eq!(scatter.series_type.as_deref(), Some("scatter"));
+        assert_eq!(
+            scatter.categories.as_deref(),
+            Some(&["0.15".into(), "0.83".into()][..])
+        );
+        assert_eq!(scatter.values, vec![Some(2.0), Some(1.0)]);
+        assert_eq!(scatter.use_secondary_axis, Some(true));
+        assert_eq!(scatter.show_marker, Some(true));
+        assert_eq!(scatter.cat_format_code.as_deref(), Some("0%"));
+        assert_eq!(
+            scatter.cat_format_codes.as_deref(),
+            Some(&[Some("0%".into()), Some("0.0%".into())][..])
+        );
+        assert_eq!(
+            model.secondary_cat_axis.as_ref().and_then(|axis| axis.max),
+            None
+        );
+        let y_axis = model.secondary_val_axis.expect("scatter Y axis parsed");
+        assert_eq!((y_axis.min, y_axis.max), (Some(0.0), Some(2.0)));
     }
 
     /// (c) Doughnut chart with per-point `<c:dPt>` colors, `showPercent`, and
@@ -6471,6 +8357,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_marker_block_preserves_explicit_no_fill() {
+        let xml = format!(
+            r#"<c:marker xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:symbol val="circle"/>
+              <c:spPr><a:noFill/><a:ln><a:solidFill><a:srgbClr val="777777"/></a:solidFill></a:ln></c:spPr>
+            </c:marker>"#
+        );
+        let d = root_of(&xml);
+        let (_, _, fill, line) = parse_marker_block(Some(d.root_element()), &FixtureResolver);
+        assert_eq!(fill.as_deref(), Some("00000000"));
+        assert_eq!(line.as_deref(), Some("777777"));
+    }
+
+    #[test]
+    fn parse_series_pattern_fill_preserves_preset_and_colors() {
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}"><c:spPr>
+              <a:pattFill prst="pct30">
+                <a:fgClr><a:schemeClr val="accent3"/></a:fgClr>
+                <a:bgClr><a:schemeClr val="bg1"/></a:bgClr>
+              </a:pattFill>
+            </c:spPr></c:ser>"#
+        );
+        let d = root_of(&xml);
+        let fill = parse_series_pattern_fill(d.root_element(), &FixtureResolver)
+            .expect("pattern fill parses");
+        assert_eq!(fill.fill_type, "pattern");
+        assert_eq!(fill.preset, "pct30");
+        assert_eq!(fill.fg, "A5A5A5");
+        assert_eq!(fill.bg, "FFFFFF");
+    }
+
+    #[test]
     fn parse_error_bars_fixed_val_both_directions() {
         let xml = format!(
             r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
@@ -6537,6 +8456,7 @@ mod tests {
             r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
               <c:dLbls>
                 <c:numFmt formatCode="0.0%"/>
+                <c:separator>&#10;</c:separator>
                 <c:dLbl>
                   <c:idx val="1"/>
                   <c:tx><c:rich><a:p><a:r><a:t>Custom</a:t></a:r></a:p></c:rich></c:tx>
@@ -6560,12 +8480,39 @@ mod tests {
         assert!(defaults.show_percent);
         assert_eq!(defaults.position.as_deref(), Some("ctr"));
         assert_eq!(defaults.format_code.as_deref(), Some("0.0%"));
+        assert_eq!(defaults.separator.as_deref(), Some("\n"));
 
         assert_eq!(overrides.len(), 1);
         let o = &overrides[0];
         assert_eq!(o.idx, 1);
         assert_eq!(o.text, "Custom");
         assert_eq!(o.position.as_deref(), Some("outEnd"));
+    }
+
+    #[test]
+    fn parse_series_data_labels_rich_run_style_overrides_txpr_defaults() {
+        let cache = std::collections::HashMap::new();
+        let xml = format!(
+            r#"<c:ser xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+              <c:dLbls>
+                <c:dLbl>
+                  <c:idx val="13"/>
+                  <c:tx><c:rich><a:p><a:r>
+                    <a:rPr sz="1100" b="1"><a:solidFill><a:srgbClr val="EC008B"/></a:solidFill></a:rPr>
+                    <a:t>Idaho</a:t>
+                  </a:r></a:p></c:rich></c:tx>
+                  <c:txPr><a:p><a:pPr><a:defRPr sz="900"><a:solidFill><a:srgbClr val="333333"/></a:solidFill></a:defRPr></a:pPr></a:p></c:txPr>
+                </c:dLbl>
+              </c:dLbls>
+            </c:ser>"#
+        );
+        let d = root_of(&xml);
+        let (_, overrides) = parse_series_data_labels(d.root_element(), &FixtureResolver, &cache);
+        let label = &overrides[0];
+        assert_eq!(label.text, "Idaho");
+        assert_eq!(label.font_color.as_deref(), Some("EC008B"));
+        assert_eq!(label.font_size_hpt, Some(1100));
+        assert_eq!(label.font_bold, Some(true));
     }
 
     // ── CT_Boolean bare-element defaults (issue #806) ───────────────────────
@@ -6915,11 +8862,38 @@ mod tests {
         let layout = extract_manual_layout(d.root_element()).expect("manualLayout present");
         assert_eq!(layout.x_mode, "edge");
         assert_eq!(layout.y_mode, "edge");
+        assert_eq!(layout.w_mode, "factor");
+        assert_eq!(layout.h_mode, "factor");
         assert_eq!(layout.layout_target.as_deref(), Some("inner"));
         assert_eq!(layout.x, 0.1);
         assert_eq!(layout.y, 0.2);
         assert_eq!(layout.w, Some(0.5));
         assert_eq!(layout.h, Some(0.6));
+
+        let omitted_target_xml = format!(
+            r#"<c:layout xmlns:c="{C_NS}"><c:manualLayout>
+              <c:xMode val="edge"/><c:yMode val="edge"/>
+              <c:x val="0.1"/><c:y val="0.2"/><c:w val="0.5"/><c:h val="0.6"/>
+            </c:manualLayout></c:layout>"#
+        );
+        let omitted_target_doc = root_of(&omitted_target_xml);
+        let omitted_target =
+            extract_manual_layout(omitted_target_doc.root_element()).expect("manualLayout present");
+        assert_eq!(omitted_target.layout_target.as_deref(), Some("outer"));
+
+        let all_modes_xml = format!(
+            r#"<c:layout xmlns:c="{C_NS}"><c:manualLayout>
+              <c:wMode val="edge"/><c:hMode val="edge"/>
+              <c:x val="0.1"/><c:y val="0.2"/><c:w val="0.5"/><c:h val="0.6"/>
+            </c:manualLayout></c:layout>"#
+        );
+        let all_modes_doc = root_of(&all_modes_xml);
+        let all_modes =
+            extract_manual_layout(all_modes_doc.root_element()).expect("manualLayout present");
+        assert_eq!(all_modes.x_mode, "factor");
+        assert_eq!(all_modes.y_mode, "factor");
+        assert_eq!(all_modes.w_mode, "edge");
+        assert_eq!(all_modes.h_mode, "edge");
     }
 
     #[test]
@@ -7022,8 +8996,7 @@ mod tests {
         assert_eq!(dl[1], None);
         assert_eq!(dl[2].as_deref(), Some("4472C4"));
         assert_eq!(dl[3], None);
-        // Subtotal indices: idx0 always implicit, explicit idx3 added, the
-        // redundant explicit idx0 is de-duplicated away (0 is skipped).
+        // Both totals were explicitly authored; duplicates are de-duplicated.
         assert_eq!(m.subtotal_indices, vec![0, 3]);
         // gapWidth fraction 0.8 → legacy percent 80.
         assert_eq!(m.bar_gap_width, Some(80));
@@ -7036,10 +9009,415 @@ mod tests {
         assert_eq!(m.theme_minor_font_latin.as_deref(), Some("Calibri"));
     }
 
-    /// (b) Treemap: leaf categories + values, no `<cx:subtotals>` (so only the
-    /// implicit idx 0), no per-label colours, and no `gapWidth` (→ `None`). The
-    /// generic dimension walk carries the treemap leaves exactly like the
-    /// waterfall bars, so the same parse serves both layouts.
+    #[test]
+    fn parse_chartex_data_point_style_inherits_theme_fill_and_line_refs() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="waterfall"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:dataPoint>
+                <cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef>
+                <cs:lnRef idx="1"><cs:styleClr val="auto"/></cs:lnRef>
+                <cs:spPr><a:ln w="19050"/></cs:spPr>
+              </cs:dataPoint>
+            </cs:chartStyle>"#
+        );
+        let theme = format!(
+            r#"<a:theme xmlns:a="{A_NS}"><a:themeElements>
+              <a:fmtScheme name="Office">
+                <a:fillStyleLst>
+                  <a:solidFill><a:schemeClr val="phClr"><a:lumMod val="50000"/></a:schemeClr></a:solidFill>
+                </a:fillStyleLst>
+                <a:lnStyleLst>
+                  <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></a:ln>
+                </a:lnStyleLst>
+                <a:effectStyleLst/><a:bgFillStyleLst/>
+              </a:fmtScheme>
+            </a:themeElements></a:theme>"#
+        );
+        let resolver = FormatSchemeFixtureResolver {
+            format_scheme: crate::theme::ThemeFormatScheme::parse(&theme),
+        };
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part(document.root_element(), &resolver, Some(&style))
+            .expect("ChartEx style refs parse");
+
+        let accents = model.chartex_accents.expect("raw theme palette");
+        let style = model.chartex_data_point_style.expect("dataPoint style");
+        let fills = style.fill_colors.expect("fillRef palette");
+        let lines = style.line_colors.expect("lnRef palette");
+        assert_eq!(fills.len(), 6);
+        assert_eq!(lines.len(), 6);
+        assert_eq!(accents[0], "5B9BD5");
+        assert_ne!(fills[0].as_deref(), Some(accents[0].as_str()));
+        assert_ne!(lines[0], fills[0]);
+        assert_ne!(lines[0], lines[1]);
+        // Local width overlays only that property; the theme recipe still
+        // supplies paint through lnRef.
+        assert_eq!(style.line_width_emu, Some(19050));
+        assert_eq!(style.line_hidden, None);
+        assert_eq!(style.fill_hidden, None);
+    }
+
+    #[test]
+    fn parse_chartex_linked_color_style_and_role_specific_paints() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="boxWhisker"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:dataPoint><cs:spPr><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></cs:spPr></cs:dataPoint>
+              <cs:dataPointLine><cs:spPr><a:ln w="28575" cap="rnd"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="dash"/><a:round/></a:ln></cs:spPr></cs:dataPointLine>
+              <cs:dataPointMarker><cs:spPr><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:ln w="9525"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></cs:spPr></cs:dataPointMarker>
+            </cs:chartStyle>"#
+        );
+        let colors = format!(
+            r#"<cs:colorStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}" meth="cycle">
+              <a:schemeClr val="accent1"/><a:schemeClr val="accent2"/>
+              <cs:variation/><cs:variation><a:lumMod val="50000"/></cs:variation>
+            </cs:colorStyle>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part_with_style_parts(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&style),
+            Some(&colors),
+        )
+        .expect("linked chart color/style parts parse");
+
+        assert_eq!(model.chartex_color_style_method.as_deref(), Some("cycle"));
+        let palette = model.chartex_color_palette.clone().expect("color palette");
+        assert_eq!(
+            model.chartex_color_palette.as_deref(),
+            Some(
+                &[
+                    Some("4472C4".to_string()),
+                    Some("ED7D31".to_string()),
+                    Some("203864".to_string()),
+                    Some("843C0B".to_string()),
+                ][..]
+            )
+        );
+        let point = model.chartex_data_point_style.expect("point role");
+        assert_eq!(point.fill_colors, Some(palette));
+        let line = model.chartex_data_point_line_style.expect("line role");
+        assert_eq!(line.line_width_emu, Some(28575));
+        assert_eq!(line.line_cap.as_deref(), Some("rnd"));
+        assert_eq!(line.line_dash.as_deref(), Some("dash"));
+        assert_eq!(line.line_join.as_deref(), Some("round"));
+        let marker = model.chartex_data_point_marker_style.expect("marker role");
+        assert_eq!(marker.line_width_emu, Some(9525));
+        assert_eq!(
+            marker.line_colors,
+            Some(vec![Some("FFFFFF".to_string()); 4])
+        );
+
+        let no_fill_style = style.replace(
+            "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></cs:spPr></cs:dataPoint>",
+            "<a:noFill/></cs:spPr></cs:dataPoint>",
+        );
+        let no_fill_model = parse_chartex_part_with_style_parts(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&no_fill_style),
+            Some(&colors),
+        )
+        .expect("dataPoint noFill parses");
+        assert_eq!(
+            no_fill_model
+                .chartex_data_point_style
+                .expect("point role")
+                .fill_hidden,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parse_chartex_style_retains_shared_gradient_and_pattern_fill_recipes() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="boxWhisker"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let gradient_style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:dataPoint>
+                <cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef>
+                <cs:spPr><a:gradFill rotWithShape="0">
+                  <a:gsLst>
+                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                    <a:gs pos="100000"><a:schemeClr val="lt1"/></a:gs>
+                  </a:gsLst>
+                  <a:lin ang="5400000" scaled="1"/>
+                </a:gradFill></cs:spPr>
+              </cs:dataPoint>
+            </cs:chartStyle>"#
+        );
+        let document = chart_space_of(&xml);
+        let gradient_model = parse_chartex_part(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&gradient_style),
+        )
+        .expect("gradient Chart Style parses");
+        let gradient_paints = gradient_model
+            .chartex_data_point_style
+            .expect("point style")
+            .fill_paints
+            .expect("gradient paints");
+        assert_eq!(gradient_paints.len(), 6);
+        assert!(matches!(
+            gradient_paints[0].as_ref(),
+            Some(ChartStyleFill::Gradient {
+                stops,
+                angle,
+                grad_type,
+                scaled: Some(true),
+                rot_with_shape: Some(false),
+                ..
+            }) if stops[0].color == "5B9BD5"
+                && stops[1].color == "FFFFFF"
+                && (*angle - 90.0).abs() < 1e-9
+                && grad_type == "linear"
+        ));
+
+        let pattern_style = gradient_style.replace(
+            r#"<a:gradFill rotWithShape="0">
+                  <a:gsLst>
+                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                    <a:gs pos="100000"><a:schemeClr val="lt1"/></a:gs>
+                  </a:gsLst>
+                  <a:lin ang="5400000" scaled="1"/>
+                </a:gradFill>"#,
+            r#"<a:pattFill prst="diagCross">
+                  <a:fgClr><a:schemeClr val="phClr"/></a:fgClr>
+                  <a:bgClr><a:schemeClr val="lt1"/></a:bgClr>
+                </a:pattFill>"#,
+        );
+        let pattern_model = parse_chartex_part(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&pattern_style),
+        )
+        .expect("pattern Chart Style parses");
+        let pattern_paints = pattern_model
+            .chartex_data_point_style
+            .expect("point style")
+            .fill_paints
+            .expect("pattern paints");
+        assert!(matches!(
+            pattern_paints[0].as_ref(),
+            Some(ChartStyleFill::Pattern { fg, bg, preset })
+                if fg == "5B9BD5" && bg == "FFFFFF" && preset == "diagCross"
+        ));
+    }
+
+    #[test]
+    fn chart_style_fill_preflight_limits_palette_expansion_before_gradient_parse() {
+        let document = roxmltree::Document::parse(
+            r#"<a:spPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <a:gradFill><a:gsLst>
+                <a:gs pos="0"><a:srgbClr val="000000"/></a:gs>
+                <a:gs pos="50000"><a:srgbClr val="808080"/></a:gs>
+                <a:gs pos="100000"><a:srgbClr val="FFFFFF"/></a:gs>
+              </a:gsLst></a:gradFill>
+            </a:spPr>"#,
+        )
+        .expect("gradient style XML");
+        assert_eq!(
+            chart_style_paint_component_count(document.root_element()),
+            Some(3)
+        );
+        assert_eq!(chart_style_paint_entry_limit(Some(3), 4, 6), 2);
+        assert_eq!(chart_style_paint_entry_limit(Some(7), 4, 6), 0);
+        assert_eq!(chart_style_paint_entry_limit(Some(0), 4, 0), 4);
+        assert_eq!(chart_style_paint_entry_limit(None, 4, 0), 4);
+    }
+
+    #[test]
+    fn parse_chartex_style_color_uses_index_semantics_and_transforms() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="boxWhisker"/>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}">
+              <cs:dataPoint>
+                <cs:fillRef idx="1"><cs:styleClr val="2"><a:lumMod val="50000"/></cs:styleClr></cs:fillRef>
+                <cs:spPr><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></cs:spPr>
+              </cs:dataPoint>
+              <cs:dataPointLine>
+                <cs:lnRef idx="1"><cs:styleClr val="named-extension-value"/></cs:lnRef>
+                <cs:spPr><a:ln><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></cs:spPr>
+              </cs:dataPointLine>
+              <cs:dataPointMarker>
+                <cs:fillRef idx="1"><a:srgbClr val="AA5500"/></cs:fillRef>
+                <cs:lnRef idx="1" mods="ignoreCSTransforms"><cs:styleClr val="2"><a:lumMod val="10000"/></cs:styleClr></cs:lnRef>
+                <cs:spPr>
+                  <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                  <a:ln><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+                </cs:spPr>
+              </cs:dataPointMarker>
+            </cs:chartStyle>"#
+        );
+        let colors = format!(
+            r#"<cs:colorStyle xmlns:cs="{CS_NS}" xmlns:a="{A_NS}" meth="acrossLinear">
+              <a:schemeClr val="accent1"/><a:schemeClr val="missingSlot"/><a:schemeClr val="accent2"/>
+            </cs:colorStyle>"#
+        );
+        let document = chart_space_of(&xml);
+        let model = parse_chartex_part_with_style_parts(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&style),
+            Some(&colors),
+        )
+        .expect("styleClr values parse");
+
+        assert_eq!(
+            model.chartex_color_style_method.as_deref(),
+            Some("acrossLinear")
+        );
+        assert_eq!(
+            model.chartex_color_palette.as_deref(),
+            Some(&[Some("4472C4".to_string()), None, Some("ED7D31".to_string()),][..]),
+        );
+        let point = model.chartex_data_point_style.expect("point role");
+        assert_eq!(point.fill_color_index, Some(2));
+        let fixed_fills = point.fill_colors.expect("fixed transformed fill");
+        assert!(fixed_fills.iter().all(|color| color == &fixed_fills[0]));
+        assert_ne!(fixed_fills[0].as_deref(), Some("ED7D31"));
+
+        let within_colors = colors.replace("meth=\"acrossLinear\"", "meth=\"withinLinear\"");
+        let within = parse_chartex_part_with_style_parts(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&style),
+            Some(&within_colors),
+        )
+        .expect("withinLinear fixed index parses");
+        let within_fills = within
+            .chartex_data_point_style
+            .expect("within point role")
+            .fill_colors
+            .expect("within fills");
+        assert!(within_fills.iter().all(|color| color == &within_fills[0]));
+        assert_ne!(within_fills[0], fixed_fills[0]);
+
+        let wrapped_style = style.replace(
+            "<cs:styleClr val=\"2\"><a:lumMod val=\"50000\"/>",
+            "<cs:styleClr val=\"8\"><a:lumMod val=\"50000\"/>",
+        );
+        let cycle_colors = colors.replace("meth=\"acrossLinear\"", "meth=\"cycle\"");
+        let wrapped = parse_chartex_part_with_style_parts(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&wrapped_style),
+            Some(&cycle_colors),
+        )
+        .expect("cycle fixed index wraps");
+        assert_eq!(
+            wrapped
+                .chartex_data_point_style
+                .expect("wrapped point role")
+                .fill_colors,
+            Some(fixed_fills.clone()),
+        );
+
+        let line = model.chartex_data_point_line_style.expect("line role");
+        assert_eq!(line.line_color_index, Some(0));
+        assert_eq!(line.line_colors, Some(vec![Some("4472C4".to_string()); 3]));
+
+        let marker = model.chartex_data_point_marker_style.expect("marker role");
+        assert_eq!(
+            marker.fill_colors,
+            Some(vec![Some("AA5500".to_string()); 3])
+        );
+        assert_eq!(
+            marker.line_colors,
+            Some(vec![Some("ED7D31".to_string()); 3])
+        );
+
+        let unresolved_style = style.replace(
+            "mods=\"ignoreCSTransforms\"><cs:styleClr val=\"2\"",
+            "mods=\"ignoreCSTransforms\"><cs:styleClr val=\"1\"",
+        );
+        let unresolved = parse_chartex_part_with_style_parts(
+            document.root_element(),
+            &FixtureResolver,
+            Some(&unresolved_style),
+            Some(&colors),
+        )
+        .expect("unresolved fixed slot remains unresolved");
+        assert_eq!(
+            unresolved
+                .chartex_data_point_marker_style
+                .expect("marker role")
+                .line_colors,
+            None,
+        );
+    }
+
+    #[test]
+    fn chartex_cache_dimensions_reject_unbounded_counts_and_sparse_indices() {
+        let huge_count = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data>
+                <cx:strDim type="cat"><cx:lvl ptCount="4294967295"/></cx:strDim>
+                <cx:numDim type="size"><cx:lvl ptCount="4294967295"/></cx:numDim>
+              </cx:data></cx:chartData>
+            </cx:chartSpace>"#,
+        );
+        let count_doc = chart_space_of(&huge_count);
+        let mut references = EmptyChartReferenceResolver;
+        assert!(chartex_string_levels(count_doc.root_element(), &mut references).is_none());
+        assert!(
+            chartex_number_values(count_doc.root_element(), &["size"], &mut references,).is_none()
+        );
+
+        let huge_index = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data>
+                <cx:strDim type="cat"><cx:lvl><cx:pt idx="4294967295">x</cx:pt></cx:lvl></cx:strDim>
+                <cx:numDim type="size"><cx:lvl><cx:pt idx="4294967295">1</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+            </cx:chartSpace>"#,
+        );
+        let index_doc = chart_space_of(&huge_index);
+        assert!(chartex_string_levels(index_doc.root_element(), &mut references).is_none());
+        assert!(
+            chartex_number_values(index_doc.root_element(), &["size"], &mut references,).is_none()
+        );
+
+        let aggregate = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data><cx:strDim type="cat">
+                <cx:lvl ptCount="524289"/><cx:lvl ptCount="524288"/>
+              </cx:strDim></cx:data></cx:chartData>
+            </cx:chartSpace>"#,
+        );
+        let aggregate_doc = chart_space_of(&aggregate);
+        assert!(chartex_string_levels(aggregate_doc.root_element(), &mut references).is_none());
+    }
+
+    /// (b) Treemap: the same deepest→root category levels as sunburst, plus the
+    /// parent-label layout. The structured model preserves the full hierarchy;
+    /// the legacy flat fields remain populated for compatibility.
     #[test]
     fn parse_chartex_part_treemap_hierarchy_values() {
         let xml = format!(
@@ -7051,6 +9429,11 @@ mod tests {
                       <cx:pt idx="0">North</cx:pt>
                       <cx:pt idx="1">South</cx:pt>
                       <cx:pt idx="2">East</cx:pt>
+                    </cx:lvl>
+                    <cx:lvl ptCount="3">
+                      <cx:pt idx="0">Americas</cx:pt>
+                      <cx:pt idx="1">Americas</cx:pt>
+                      <cx:pt idx="2">Asia</cx:pt>
                     </cx:lvl>
                   </cx:strDim>
                   <cx:numDim type="val">
@@ -7065,7 +9448,13 @@ mod tests {
               <cx:chart>
                 <cx:plotArea>
                   <cx:plotAreaRegion>
-                    <cx:series layoutId="treemap"/>
+                    <cx:series layoutId="treemap">
+                      <cx:dataLabels pos="inEnd">
+                        <cx:visibility seriesName="0" categoryName="1" value="1"/>
+                        <cx:separator>&#10;</cx:separator>
+                      </cx:dataLabels>
+                      <cx:layoutPr><cx:parentLabelLayout val="banner"/></cx:layoutPr>
+                    </cx:series>
                   </cx:plotAreaRegion>
                 </cx:plotArea>
               </cx:chart>
@@ -7080,12 +9469,123 @@ mod tests {
         assert_eq!(m.series[0].values, vec![Some(50.0), Some(30.0), Some(20.0)]);
         assert_eq!(m.series[0].color, None);
         assert_eq!(m.series[0].data_label_colors, None);
-        // No `<cx:subtotals>` → only the implicit idx 0.
-        assert_eq!(m.subtotal_indices, vec![0]);
+        let labels = m.series[0]
+            .series_data_labels
+            .as_ref()
+            .expect("data labels");
+        assert!(labels.show_cat_name);
+        assert!(labels.show_val);
+        assert!(!labels.show_ser_name);
+        assert_eq!(labels.position.as_deref(), Some("inEnd"));
+        assert_eq!(labels.separator.as_deref(), Some("\n"));
+        let tm = m.chartex_treemap.expect("treemap data present");
+        assert_eq!(tm.parent_label_layout.as_deref(), Some("banner"));
+        assert_eq!(tm.rows.len(), 3);
+        assert_eq!(tm.rows[0].path, vec!["Americas", "North"]);
+        assert_eq!(tm.rows[0].size, 50.0);
+        assert_eq!(tm.rows[2].path, vec!["Asia", "East"]);
+        assert_eq!(tm.rows[2].size, 20.0);
+        // No `<cx:subtotals>` → no total points. Index 0 still begins at the
+        // zero baseline but keeps the ordinary positive/negative formatting.
+        assert!(m.subtotal_indices.is_empty());
         // No `<cx:catScaling gapWidth>` → unset (renderer default applies).
         assert_eq!(m.bar_gap_width, None);
         assert!(!m.cat_axis_hidden);
         assert!(!m.val_axis_hidden);
+    }
+
+    #[test]
+    fn parse_chartex_treemap_retains_hierarchy_node_label_overrides() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat">
+                  <cx:lvl ptCount="2"><cx:pt idx="0">Leaf A</cx:pt><cx:pt idx="1">Leaf B</cx:pt></cx:lvl>
+                  <cx:lvl ptCount="2"><cx:pt idx="0">Group A</cx:pt><cx:pt idx="1">Group B</cx:pt></cx:lvl>
+                </cx:strDim>
+                <cx:numDim type="size"><cx:lvl ptCount="2"><cx:pt idx="0">10</cx:pt><cx:pt idx="1">20</cx:pt></cx:lvl></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion><cx:series layoutId="treemap">
+                <cx:dataLabels pos="inEnd">
+                  <cx:visibility categoryName="1" value="1"/>
+                  <cx:dataLabel idx="3"><cx:txPr><a:p><a:r><a:rPr sz="900"><a:solidFill><a:srgbClr val="222222"/></a:solidFill></a:rPr><a:t>Custom Leaf&#10;20</a:t></a:r></a:p></cx:txPr></cx:dataLabel>
+                </cx:dataLabels>
+              </cx:series></cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let d = chart_space_of(&xml);
+        let m =
+            parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("treemap parses");
+        let overrides = m.series[0].data_label_overrides.as_ref().expect("override");
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].idx, 3);
+        assert_eq!(overrides[0].text, "Custom Leaf\n20");
+        assert_eq!(overrides[0].font_color.as_deref(), Some("222222"));
+        assert_eq!(overrides[0].font_size_hpt, Some(900));
+        assert_eq!(m.series[0].data_label_colors.as_ref().unwrap().len(), 4);
+    }
+
+    struct FormulaOnlyTreemapResolver;
+
+    impl ChartReferenceResolver for FormulaOnlyTreemapResolver {
+        fn resolve_strings(&mut self, _formula: &str) -> Option<Vec<String>> {
+            None
+        }
+
+        fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>> {
+            (formula == "_xlchart.v1.2").then(|| vec![Some(50.0), Some(30.0), Some(20.0)])
+        }
+
+        fn resolve_number_format(&mut self, formula: &str) -> Option<String> {
+            (formula == "_xlchart.v1.2").then(|| "#,##0".to_string())
+        }
+
+        fn resolve_string_levels(&mut self, formula: &str) -> Option<Vec<Vec<String>>> {
+            (formula == "_xlchart.v1.0").then(|| {
+                vec![
+                    vec!["North".into(), "South".into(), "East".into()],
+                    vec!["Americas".into(), "Americas".into(), "Asia".into()],
+                ]
+            })
+        }
+    }
+
+    /// Excel may omit every `<cx:lvl>` cache and reference hidden workbook
+    /// names (`_xlchart.v1.*`) instead. The package
+    /// resolver must populate both the structured treemap and flat fallback.
+    #[test]
+    fn parse_chartex_part_treemap_resolves_formula_only_dimensions() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}">
+              <cx:chartData><cx:data id="0">
+                <cx:strDim type="cat"><cx:f>_xlchart.v1.0</cx:f></cx:strDim>
+                <cx:numDim type="size"><cx:f>_xlchart.v1.2</cx:f></cx:numDim>
+              </cx:data></cx:chartData>
+              <cx:chart><cx:plotArea><cx:plotAreaRegion>
+                <cx:series layoutId="treemap"><cx:dataId val="0"/><cx:layoutPr><cx:parentLabelLayout val="overlapping"/></cx:layoutPr></cx:series>
+              </cx:plotAreaRegion></cx:plotArea></cx:chart>
+            </cx:chartSpace>"#
+        );
+        let document = chart_space_of(&xml);
+        let mut references = FormulaOnlyTreemapResolver;
+        let model = parse_chartex_part_with_references(
+            document.root_element(),
+            &FixtureResolver,
+            None,
+            &mut references,
+        )
+        .expect("formula-only treemap parses");
+
+        let treemap = model.chartex_treemap.expect("structured treemap data");
+        assert_eq!(treemap.rows[0].path, vec!["Americas", "North"]);
+        assert_eq!(treemap.rows[2].path, vec!["Asia", "East"]);
+        assert_eq!(treemap.rows[2].size, 20.0);
+        assert_eq!(model.categories, vec!["North", "South", "East"]);
+        assert_eq!(
+            model.series[0].values,
+            vec![Some(50.0), Some(30.0), Some(20.0)]
+        );
+        assert_eq!(model.series[0].val_format_code.as_deref(), Some("#,##0"));
     }
 
     /// (c) A `<cx:chartSpace>` with no `<cx:series>` is not a chartEx chart —
@@ -7121,12 +9621,12 @@ mod tests {
         assert_eq!(m.categories, vec!["FY2024 1Q"]);
     }
 
-    // ── CH15: chartEx boxWhisker / sunburst structured parse ─────────────────
+    // ── CH15: chartEx structured layout parsing ──────────────────────────────
 
     /// A box-and-whisker chart with two series, each referencing its own
     /// `<cx:data>` (via `<cx:dataId>`) of RAW sample points grouped across two
     /// categories. Verifies: (a) categories unique-in-order, (b) each series'
-    /// points binned by category, (c) series colored by the cycled theme accent,
+    /// points binned by category, (c) absent explicit series fills preserved,
     /// (d) `<cx:visibility>` / `<cx:statistics>` flags threaded, (e) the title
     /// is parsed and the accent palette exposed.
     #[test]
@@ -7191,19 +9691,212 @@ mod tests {
 
         let s0 = &box_data.series[0];
         assert_eq!(s0.name, "Series1");
-        assert_eq!(s0.color.as_deref(), Some("5B9BD5")); // accent1 (series idx 0)
-                                                         // Series1: Cat A got points 1 & 3, Cat B got 10.
+        assert_eq!(s0.color, None); // shared renderer applies style/theme fallback
+                                    // Series1: Cat A got points 1 & 3, Cat B got 10.
         assert_eq!(s0.values_by_category, vec![vec![1.0, 3.0], vec![10.0]]);
         assert!(s0.mean_marker && !s0.mean_line && s0.show_outliers && !s0.show_nonoutliers);
         assert_eq!(s0.quartile_method, "exclusive");
 
         let s1 = &box_data.series[1];
         assert_eq!(s1.name, "Series2");
-        assert_eq!(s1.color.as_deref(), Some("ED7D31")); // accent2 (series idx 1)
-                                                         // Series2: Cat A got 5, Cat B got 7 & 9.
+        assert_eq!(s1.color, None); // shared renderer applies style/theme fallback
+                                    // Series2: Cat A got 5, Cat B got 7 & 9.
         assert_eq!(s1.values_by_category, vec![vec![5.0], vec![7.0, 9.0]]);
         assert!(!s1.mean_marker && s1.mean_line && !s1.show_outliers && s1.show_nonoutliers);
         assert_eq!(s1.quartile_method, "inclusive");
+    }
+
+    struct FormulaOnlyBoxResolver;
+
+    impl ChartReferenceResolver for FormulaOnlyBoxResolver {
+        fn resolve_strings(&mut self, _formula: &str) -> Option<Vec<String>> {
+            None
+        }
+
+        fn resolve_numbers(&mut self, formula: &str) -> Option<Vec<Option<f64>>> {
+            match formula {
+                "_xlchart.v1.1" => Some(vec![Some(1.0), Some(2.0), Some(3.0)]),
+                "_xlchart.v1.3" => Some(vec![Some(4.0), Some(5.0), Some(6.0)]),
+                _ => None,
+            }
+        }
+    }
+
+    /// Excel-authored XLSX box-and-whisker charts may omit every cache and
+    /// store one formula-only numeric dimension per named series. In that form
+    /// each series is one category/box rather than a shared categorized grid.
+    #[test]
+    fn parse_chartex_part_boxwhisker_resolves_formula_only_series() {
+        let xml = format!(
+            r#"<cx:chartSpace xmlns:cx="{CX_NS}" xmlns:a="{A_NS}">
+              <cx:spPr><a:ln w="9525"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></cx:spPr>
+              <cx:chartData>
+                <cx:data id="0"><cx:numDim type="val"><cx:f>_xlchart.v1.1</cx:f></cx:numDim></cx:data>
+                <cx:data id="1"><cx:numDim type="val"><cx:f>_xlchart.v1.3</cx:f></cx:numDim></cx:data>
+              </cx:chartData>
+              <cx:chart>
+                <cx:title><cx:tx><cx:rich><a:p><a:r>
+                  <a:rPr sz="1100" b="1"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="Calibri"/></a:rPr>
+                  <a:t>Readiness</a:t>
+                </a:r></a:p></cx:rich></cx:tx></cx:title>
+                <cx:plotArea><cx:plotAreaRegion>
+                  <cx:series layoutId="boxWhisker">
+                    <cx:tx><cx:txData><cx:v>Foundations</cx:v></cx:txData></cx:tx>
+                    <cx:spPr><a:ln w="6350"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln></cx:spPr>
+                    <cx:dataId val="0"/>
+                  </cx:series>
+                  <cx:series layoutId="boxWhisker">
+                    <cx:tx><cx:txData><cx:v>Adaptation</cx:v></cx:txData></cx:tx>
+                    <cx:dataId val="1"/>
+                  </cx:series>
+                </cx:plotAreaRegion>
+                <cx:axis id="0" hidden="1"><cx:catScaling/></cx:axis>
+                <cx:axis id="1">
+                  <cx:valScaling min="1" max="6" majorUnit="0.25" minorUnit="0.05"/>
+                  <cx:title><cx:tx><cx:rich><a:p><a:r>
+                    <a:rPr sz="900" b="0"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="Calibri"/></a:rPr>
+                    <a:t>A&amp;R readiness score</a:t>
+                  </a:r></a:p></cx:rich></cx:tx></cx:title>
+                  <cx:majorGridlines/>
+                  <cx:numFmt formatCode="0.0" sourceLinked="0"/>
+                  <cx:txPr><a:p><a:pPr><a:defRPr sz="1200" b="0"><a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:latin typeface="Calibri"/></a:defRPr></a:pPr></a:p></cx:txPr>
+                </cx:axis>
+                </cx:plotArea>
+                <cx:legend pos="r"><cx:txPr><a:p><a:pPr><a:defRPr sz="900" b="0"><a:solidFill><a:srgbClr val="445566"/></a:solidFill><a:latin typeface="Calibri"/></a:defRPr></a:pPr></a:p></cx:txPr></cx:legend>
+              </cx:chart>
+            </cx:chartSpace>"#
+        );
+        let style = format!(
+            r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="{A_NS}">
+              <cs:gridlineMajor><cs:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="D9D9D9"/></a:solidFill></a:ln></cs:spPr></cs:gridlineMajor>
+              <cs:dataPoint><cs:spPr><a:ln w="19050"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></cs:spPr></cs:dataPoint>
+              <cs:valueAxis>
+                <cs:fontRef idx="minor"><a:srgbClr val="595959"/></cs:fontRef>
+                <cs:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="BFBFBF"/></a:solidFill></a:ln></cs:spPr>
+                <cs:defRPr sz="900" b="0"/>
+              </cs:valueAxis>
+            </cs:chartStyle>"#
+        );
+        let d = chart_space_of(&xml);
+        let mut references = FormulaOnlyBoxResolver;
+        let m = parse_chartex_part_with_references(
+            d.root_element(),
+            &WhiteChartFixtureResolver,
+            Some(&style),
+            &mut references,
+        )
+        .expect("boxWhisker parses");
+
+        assert_eq!(m.title.as_deref(), Some("Readiness"));
+        assert_eq!(m.title_font_size_hpt, Some(1100));
+        assert_eq!(m.title_font_bold, Some(true));
+        assert_eq!(m.title_font_color.as_deref(), Some("000000"));
+        assert_eq!(m.title_font_face.as_deref(), Some("Calibri"));
+        assert_eq!(m.chart_bg.as_deref(), Some("FFFFFF"));
+        assert_eq!(m.chart_border_color.as_deref(), Some("000000"));
+        assert_eq!(m.chart_border_width_emu, Some(9525));
+        assert_eq!((m.val_min, m.val_max), (Some(1.0), Some(6.0)));
+        assert_eq!(m.val_axis_major_unit, Some(0.25));
+        assert_eq!(m.val_axis_title.as_deref(), Some("A&R readiness score"));
+        assert_eq!(m.val_axis_title_font_size_hpt, Some(900));
+        assert_eq!(m.val_axis_title_font_bold, Some(false));
+        assert_eq!(m.val_axis_title_font_color.as_deref(), Some("000000"));
+        assert_eq!(m.val_axis_title_font_face.as_deref(), Some("Calibri"));
+        assert_eq!(m.val_axis_format_code.as_deref(), Some("0.0"));
+        assert_eq!(m.val_axis_major_gridlines, Some(true));
+        // The associated chartStyle's valueAxis entry supplies the effective
+        // ChartEx tick-label defaults. Its 9pt/gray properties therefore win
+        // over the otherwise-fallback axis txPr (12pt/112233).
+        assert_eq!(m.val_axis_font_size_hpt, Some(900));
+        assert_eq!(m.val_axis_font_bold, Some(false));
+        assert_eq!(m.val_axis_font_color.as_deref(), Some("595959"));
+        assert_eq!(m.val_axis_font_face.as_deref(), Some("Calibri"));
+        assert_eq!(m.val_axis_line_color.as_deref(), Some("BFBFBF"));
+        assert_eq!(m.val_axis_line_width_emu, Some(9525));
+        assert!(!m.val_axis_line_hidden);
+        assert_eq!(m.val_axis_gridline_color.as_deref(), Some("D9D9D9"));
+        assert_eq!(m.val_axis_gridline_width_emu, Some(9525));
+        let point_style = m
+            .chartex_data_point_style
+            .as_ref()
+            .expect("dataPoint style");
+        assert_eq!(
+            point_style.line_colors.as_deref(),
+            Some(&vec![Some("FFFFFF".to_string()); 6][..])
+        );
+        assert_eq!(point_style.line_width_emu, Some(19050));
+        assert_eq!(point_style.line_hidden, None);
+        // ChartEx does not inherit the classic chart-axis tick default. With
+        // no `<cx:majorTickMarks>` element, Excel draws no tick marks.
+        assert_eq!(m.val_axis_major_tick_mark, "none");
+        assert_eq!(m.cat_axis_major_tick_mark, "none");
+        assert!(m.show_legend);
+        assert_eq!(m.legend_pos.as_deref(), Some("r"));
+        assert_eq!(m.legend_font_size_hpt, Some(900));
+        assert_eq!(m.legend_font_bold, Some(false));
+        assert_eq!(m.legend_font_color.as_deref(), Some("445566"));
+        assert_eq!(m.legend_font_face.as_deref(), Some("Calibri"));
+        let no_fill_style = style.replace(
+            "<a:solidFill><a:schemeClr val=\"lt1\"/></a:solidFill>",
+            "<a:noFill/>",
+        );
+        let mut no_fill_references = FormulaOnlyBoxResolver;
+        let no_fill_model = parse_chartex_part_with_references(
+            d.root_element(),
+            &WhiteChartFixtureResolver,
+            Some(&no_fill_style),
+            &mut no_fill_references,
+        )
+        .expect("boxWhisker with noFill data-point style parses");
+        let no_fill_point = no_fill_model
+            .chartex_data_point_style
+            .expect("dataPoint style");
+        assert_eq!(no_fill_point.line_colors, None);
+        assert_eq!(no_fill_point.line_width_emu, Some(19050));
+        assert_eq!(no_fill_point.line_hidden, Some(true));
+        let placeholder_style = format!(
+            r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="{A_NS}">
+              <cs:dataPoint><cs:spPr>
+                <a:solidFill><a:schemeClr val="phClr"><a:lumMod val="50000"/></a:schemeClr></a:solidFill>
+                <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"><a:lumMod val="50000"/></a:schemeClr></a:solidFill></a:ln>
+              </cs:spPr></cs:dataPoint>
+            </cs:chartStyle>"#
+        );
+        let mut placeholder_references = FormulaOnlyBoxResolver;
+        let placeholder_model = parse_chartex_part_with_references(
+            d.root_element(),
+            &WhiteChartFixtureResolver,
+            Some(&placeholder_style),
+            &mut placeholder_references,
+        )
+        .expect("boxWhisker with phClr data-point style parses");
+        let raw_accents = placeholder_model.chartex_accents.expect("raw palette");
+        let placeholder_style = placeholder_model
+            .chartex_data_point_style
+            .expect("dataPoint style");
+        let placeholder_fills = placeholder_style.fill_colors.expect("phClr fills");
+        let placeholder_lines = placeholder_style.line_colors.expect("phClr lines");
+        assert_eq!(placeholder_lines, placeholder_fills.to_vec());
+        assert_ne!(
+            placeholder_fills[0].as_deref(),
+            Some(raw_accents[0].as_str())
+        );
+        assert_ne!(placeholder_fills[0], placeholder_fills[1]);
+        let box_data = m.chartex_box.expect("box data present");
+        assert_eq!(box_data.categories, vec!["Foundations", "Adaptation"]);
+        assert_eq!(
+            box_data.series[0].values_by_category,
+            vec![vec![1.0, 2.0, 3.0], vec![]]
+        );
+        assert_eq!(box_data.series[0].line_color.as_deref(), Some("000000"));
+        assert_eq!(box_data.series[0].line_width_emu, Some(6350));
+        assert_eq!(
+            box_data.series[1].values_by_category,
+            vec![vec![], vec![4.0, 5.0, 6.0]]
+        );
+        assert!(box_data.series.iter().all(|series| {
+            series.mean_marker && series.show_outliers && series.show_nonoutliers
+        }));
     }
 
     /// A sunburst with three `<cx:lvl>` (Leaf / Stem / Branch, in document
@@ -7256,11 +9949,11 @@ mod tests {
         assert_eq!(sb.rows[2].size, 18.0);
     }
 
-    /// A waterfall chart (the pre-CH15 chartEx path) must NOT get any of the new
-    /// boxWhisker/sunburst structured fields — they stay `None`, keeping the wire
-    /// byte-stable for the flat-model chartEx renderers.
+    /// A waterfall chart must not get hierarchy/box structured fields. It does
+    /// retain the shared ChartEx accent palette because positive, negative and
+    /// subtotal columns use the chart theme's first three accents.
     #[test]
-    fn parse_chartex_part_waterfall_leaves_chartex_box_sunburst_none() {
+    fn parse_chartex_part_waterfall_leaves_structured_fields_none() {
         let xml = format!(
             r#"<cx:chartSpace xmlns:cx="{CX_NS}">
               <cx:chartData><cx:data id="0">
@@ -7277,7 +9970,18 @@ mod tests {
             parse_chartex_part(d.root_element(), &FixtureResolver, None).expect("waterfall parses");
         assert!(m.chartex_box.is_none());
         assert!(m.chartex_sunburst.is_none());
-        assert!(m.chartex_accents.is_none());
+        assert!(m.chartex_treemap.is_none());
+        assert_eq!(
+            m.chartex_accents.as_ref().expect("waterfall accents"),
+            &vec![
+                "5B9BD5".to_string(),
+                "ED7D31".to_string(),
+                "A5A5A5".to_string(),
+                "FFC000".to_string(),
+                "4472C4".to_string(),
+                "70AD47".to_string(),
+            ]
+        );
         assert!(m.title.is_none());
     }
 
@@ -7805,6 +10509,9 @@ mod tests {
                 <c:yVal><c:numRef><c:f>Y</c:f></c:numRef></c:yVal>
                 <c:bubbleSize><c:numRef><c:f>Size</c:f></c:numRef></c:bubbleSize>
               </c:ser>
+              <c:bubbleScale val="40"/>
+              <c:sizeRepresents val="w"/>
+              <c:showNegBubbles/>
             </c:bubbleChart></c:plotArea></c:chart></c:chartSpace>"#
         );
         let doc = root_of(&xml);
@@ -7821,6 +10528,36 @@ mod tests {
             chart.series[0].bubble_sizes,
             Some(vec![Some(3.0), Some(5.0)])
         );
+        assert_eq!(chart.bubble_scale, Some(40));
+        assert_eq!(chart.bubble_size_represents.as_deref(), Some("w"));
+        assert_eq!(chart.show_negative_bubbles, Some(true));
+
+        // Strict OOXML uses the percentage lexical form; Transitional accepts
+        // both this and the integer form above.
+        let strict_xml = xml.replace(
+            "<c:bubbleScale val=\"40\"/>",
+            "<c:bubbleScale val=\"40%\"/>",
+        );
+        let strict_doc = root_of(&strict_xml);
+        let mut strict_references = FormulaResolver;
+        let strict_chart = parse_chart_part_with_references(
+            strict_doc.root_element(),
+            &FixtureResolver,
+            &mut strict_references,
+        )
+        .expect("strict bubble scale parses");
+        assert_eq!(strict_chart.bubble_scale, Some(40));
+
+        let disabled_xml = xml.replace("<c:showNegBubbles/>", "<c:showNegBubbles val=\"false\"/>");
+        let disabled_doc = root_of(&disabled_xml);
+        let mut disabled_references = FormulaResolver;
+        let disabled_chart = parse_chart_part_with_references(
+            disabled_doc.root_element(),
+            &FixtureResolver,
+            &mut disabled_references,
+        )
+        .expect("explicit false showNegBubbles parses");
+        assert_eq!(disabled_chart.show_negative_bubbles, Some(false));
     }
 
     #[test]
@@ -7842,6 +10579,7 @@ mod tests {
         assert_eq!(chart.series[0].categories, None);
         assert_eq!(chart.series[0].values, Vec::<Option<f64>>::new());
         assert_eq!(chart.series[0].bubble_sizes, None);
+        assert_eq!(chart.show_negative_bubbles, None);
     }
 
     struct CountingCategoryResolver {

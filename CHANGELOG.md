@@ -5,6 +5,27 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.78.0 — 2026-08-12
+
+Compatible minor release. Improves chart rendering across Office formats and
+adds Excel-style multiple-area selection to worksheets without requiring
+application changes.
+
+- **chart fidelity:** render authored axes, ticks, chart and plot backgrounds,
+  labels, legends, pattern fills, percentage stacking, and series geometry more
+  like Office across DOCX, XLSX, and PPTX. (#1196, #1219)
+- **modern charts:** improve waterfall, box-and-whisker, treemap, bubble, pie,
+  scatter, area, and mixed chart layouts, including linked Chart Styles and
+  Chart Colors. (#1196, #1219)
+- **XLSX multiple selection:** use Ctrl on Windows/Linux or Command on macOS to
+  add cell, row, or column areas while preserving the active cell and configured
+  selection color without doubled borders between adjacent areas. (#1194, #1219)
+- **worksheet interaction:** keep overflowing cell text visible across the
+  virtualized viewport and improve outline controls, collapse scrolling, frozen
+  pane boundaries, and focus presentation. (#1219)
+- **compatibility:** no migration is required; existing viewer setup,
+  single-area selection, and public APIs remain supported.
+
 ## 0.77.1 — 2026-08-11
 
 Patch. Improves shared DrawingML fidelity and PowerPoint rendering without

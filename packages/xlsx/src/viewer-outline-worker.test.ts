@@ -79,7 +79,9 @@ interface ViewerPriv {
   currentWorksheet: Worksheet;
   currentSheet: number;
   canvasArea: FakeEl;
+  scrollHost: FakeEl;
   rowOutline: OutlineLayout | null;
+  scrollOutlineSummaryToStart(axis: 'row' | 'col', summary: number): void;
   resizeDrag: { kind: 'col' | 'row'; index: number; originScaled: number; mdw: number } | null;
   buildOutline(ws: Worksheet): void;
   applyGroupToggle(group: OutlineLayout['groups'][number], axis: 'row' | 'col'): void;
@@ -166,6 +168,24 @@ describe('worker-mode outline collapse/expand reaches the grid bitmap', () => {
     const workerSheet = outlineWorksheet();
     applySizeOverrides(workerSheet, o);
     expect(workerSheet.rowHeights).toEqual(priv.currentWorksheet.rowHeights);
+  });
+
+  it('anchors the surviving summary row after collapsing its detail group', () => {
+    const { priv } = buildWorker();
+    priv.canvasArea.clientHeight = 60;
+    priv.scrollHost.clientWidth = 800;
+    priv.scrollHost.clientHeight = 60;
+    priv.scrollHost.scrollWidth = 1000;
+    priv.scrollHost.scrollHeight = 1000;
+    const expand = priv.rowOutline?.groups.find((g) => g.level === 3);
+    priv.applyGroupToggle(expand as OutlineLayout['groups'][number], 'row');
+    const collapse = priv.rowOutline?.groups.find((g) => g.level === 3);
+
+    priv.applyGroupToggle(collapse as OutlineLayout['groups'][number], 'row');
+
+    // Rows 1-3 remain at the 15pt default (= 20 CSS px) and rows 4-7 collapse
+    // to zero, so summary row 8 starts exactly 60px into the scrollable axis.
+    expect(priv.scrollHost.scrollTop).toBe(60);
   });
 });
 

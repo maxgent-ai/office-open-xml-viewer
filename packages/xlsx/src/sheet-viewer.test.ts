@@ -60,12 +60,91 @@ function pointerEvent(overrides: Record<string, unknown> = {}): Record<string, u
     clientX: 100,
     clientY: 80,
     shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
     preventDefault: () => undefined,
     ...overrides,
   };
 }
 
 describe('XlsxSheetViewer canvas mount', () => {
+  it('routes Ctrl/Cmd areas through the canonical state, context, copy, and notification APIs', async () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const notifications: unknown[] = [];
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      onSelectionStateChange(selection) { notifications.push(selection); },
+    });
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      scrollHost: FakeEl;
+      getCellAt(clientX: number, clientY: number): { row: number; col: number } | null;
+    } }).engine;
+    engine.currentWorksheet = worksheet('Multi selection');
+    engine.canvasArea.clientWidth = 800;
+    engine.canvasArea.clientHeight = 600;
+    engine.scrollHost.clientWidth = 800;
+    engine.scrollHost.clientHeight = 600;
+
+    const first = engine.getCellAt(100, 80);
+    const secondStart = engine.getCellAt(300, 180);
+    const secondEnd = engine.getCellAt(430, 260);
+    const third = engine.getCellAt(560, 340);
+    expect(first).not.toBeNull();
+    expect(secondStart).not.toBeNull();
+    expect(secondEnd).not.toBeNull();
+    expect(third).not.toBeNull();
+    if (!first || !secondStart || !secondEnd || !third) throw new Error('Expected cell hits');
+
+    engine.scrollHost.dispatch('pointerdown', pointerEvent({ clientX: 100, clientY: 80 }));
+    engine.scrollHost.dispatch('pointerup', pointerEvent({ clientX: 100, clientY: 80 }));
+
+    engine.scrollHost.dispatch('pointerdown', pointerEvent({
+      clientX: 300, clientY: 180, ctrlKey: true,
+    }));
+    engine.scrollHost.dispatch('pointermove', pointerEvent({
+      clientX: 430, clientY: 260, ctrlKey: true,
+    }));
+    engine.scrollHost.dispatch('pointerup', pointerEvent({
+      clientX: 430, clientY: 260, ctrlKey: true,
+    }));
+
+    engine.scrollHost.dispatch('pointerdown', pointerEvent({
+      clientX: 560, clientY: 340, metaKey: true,
+    }));
+    engine.scrollHost.dispatch('pointerup', pointerEvent({
+      clientX: 560, clientY: 340, metaKey: true,
+    }));
+
+    const expectedSelection = {
+      areas: [
+        { kind: 'cells', top: first.row, left: first.col, bottom: first.row, right: first.col },
+        {
+          kind: 'cells',
+          top: Math.min(secondStart.row, secondEnd.row),
+          left: Math.min(secondStart.col, secondEnd.col),
+          bottom: Math.max(secondStart.row, secondEnd.row),
+          right: Math.max(secondStart.col, secondEnd.col),
+        },
+        { kind: 'cells', top: third.row, left: third.col, bottom: third.row, right: third.col },
+      ],
+      activeAreaIndex: 2,
+      activeCell: third,
+      extensionAnchor: third,
+    } as const;
+    expect(viewer.selectionState).toEqual(expectedSelection);
+    expect(notifications.at(-1)).toEqual(expectedSelection);
+    const context = viewer.getSelectionContext();
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.selection).toEqual(expectedSelection);
+    await expect(viewer.copySelection()).resolves.toEqual({ status: 'unsupported-multiple-areas' });
+    viewer.destroy();
+  });
+
   it('keeps an existing range on contextmenu inside it and selects an outside target', async () => {
     installDom();
     const parent = makeContainer();
@@ -500,14 +579,11 @@ describe('XlsxSheetViewer canvas mount', () => {
 
     viewer.setSelection('A1:C3');
 
-    const fragments = descendants(engine.overlayHost.selection).filter(
-      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    const borders = descendants(engine.overlayHost.selection).filter(
+      (element) => element.getAttribute('data-xlsx-selection-border') !== null,
     );
-    expect(fragments).toHaveLength(4);
-    expect(fragments[0].style['border-right']).toBe('none');
-    expect(fragments[0].style['border-bottom']).toBe('none');
-    expect(fragments.every((fragment) => fragment.style['border-right'] === 'none')).toBe(true);
-    expect(fragments.some((fragment) => fragment.style['border-bottom'].includes('solid'))).toBe(true);
+    expect(borders).toHaveLength(1);
+    expect(borders[0].getAttribute('d')?.match(/[MHV]/g)).toHaveLength(6);
     viewer.destroy();
   });
 
@@ -521,6 +597,7 @@ describe('XlsxSheetViewer canvas mount', () => {
       currentWorksheet: Worksheet;
       canvasArea: FakeEl;
       overlayHost: { selection: FakeEl };
+      getCellRect(row: number, col: number): { x: number; y: number; w: number; h: number } | null;
     } }).engine;
     engine.currentWorksheet = {
       ...worksheet('Fully frozen'),
@@ -533,12 +610,11 @@ describe('XlsxSheetViewer canvas mount', () => {
 
     viewer.setSelection('A1:XFD1048576');
 
-    const fragments = descendants(engine.overlayHost.selection).filter(
-      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    const borders = descendants(engine.overlayHost.selection).filter(
+      (element) => element.getAttribute('data-xlsx-selection-border') !== null,
     );
-    expect(fragments).toHaveLength(1);
-    expect(Number.parseFloat(fragments[0].style.width)).toBeLessThanOrEqual(640);
-    expect(Number.parseFloat(fragments[0].style.height)).toBeLessThanOrEqual(360);
+    expect(borders).toHaveLength(1);
+    expect(borders[0].getAttribute('d')?.length).toBeLessThan(256);
     viewer.destroy();
   });
 
@@ -566,21 +642,22 @@ describe('XlsxSheetViewer canvas mount', () => {
       extensionAnchor: { row: 1, col: 1 },
     });
 
-    const fragments = descendants(engine.overlayHost.selection).filter(
-      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    const borders = descendants(engine.overlayHost.selection).filter(
+      (element) => element.getAttribute('data-xlsx-selection-border') !== null,
     );
-    expect(fragments).toHaveLength(1);
-    expect(fragments[0].style['border-right']).toContain('solid');
-    expect(fragments[0].style['border-left']).toBe('none');
+    expect(borders).toHaveLength(1);
+    expect(borders[0].getAttribute('d')).toContain('M0 ');
     viewer.destroy();
   });
 
-  it('paints overlapping selection areas as one translucent fill', () => {
+  it('paints every multiple-selection area in the configured color and only outlines the active cell', () => {
     installDom();
     const parent = makeContainer();
     const canvas = makeEl('canvas');
     parent.appendChild(canvas);
-    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
+      selectionColor: '#765432',
+    });
     const engine = (viewer as unknown as { engine: {
       currentWorksheet: Worksheet;
       canvasArea: FakeEl;
@@ -604,12 +681,64 @@ describe('XlsxSheetViewer canvas mount', () => {
     const fills = overlayDescendants.filter(
       (element) => element.getAttribute('data-xlsx-selection-fill') !== null,
     );
-    const fragments = overlayDescendants.filter(
-      (element) => element.getAttribute('data-xlsx-selection-fragment') === 'cells',
+    const borders = overlayDescendants.filter(
+      (element) => element.getAttribute('data-xlsx-selection-border') !== null,
+    );
+    const activeBorders = overlayDescendants.filter(
+      (element) => element.getAttribute('data-xlsx-active-cell-border') !== null,
+    );
+    const activeCutouts = overlayDescendants.filter(
+      (element) => element.getAttribute('data-xlsx-active-cell-cutout') !== null,
+    );
+    const coloredPaths = overlayDescendants.filter(
+      (element) => element.getAttribute('fill') ===
+        'color-mix(in srgb, #765432 8%, transparent)',
     );
     expect(fills).toHaveLength(1);
-    expect(fragments).toHaveLength(2);
-    expect(fragments.every((fragment) => fragment.style.background === 'transparent')).toBe(true);
+    expect(borders).toHaveLength(0);
+    expect(activeBorders).toHaveLength(1);
+    expect(activeCutouts).toHaveLength(1);
+    expect(activeBorders[0].getAttribute('stroke-width')).toBe('1');
+    expect(activeBorders[0].getAttribute('stroke')).toBe('#765432');
+    expect(coloredPaths).toHaveLength(1);
+    viewer.destroy();
+  });
+
+  it('does not outline or divide touching areas in a multiple selection', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      canvasArea: FakeEl;
+      overlayHost: { selection: FakeEl };
+    } }).engine;
+    engine.currentWorksheet = worksheet('Touching');
+    engine.canvasArea.clientWidth = 640;
+    engine.canvasArea.clientHeight = 360;
+
+    viewer.setSelection({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 1, right: 1 },
+        { kind: 'cells', top: 1, left: 2, bottom: 1, right: 2 },
+      ],
+      activeAreaIndex: 1,
+      activeCell: { row: 1, col: 2 },
+      extensionAnchor: { row: 1, col: 2 },
+    });
+
+    const overlayDescendants = descendants(engine.overlayHost.selection);
+    const border = overlayDescendants.find(
+      (element) => element.getAttribute('data-xlsx-selection-border') !== null,
+    );
+    const activeBorder = overlayDescendants.find(
+      (element) => element.getAttribute('data-xlsx-active-cell-border') !== null,
+    );
+    expect(border).toBeUndefined();
+    expect(activeBorder).toBeDefined();
+    expect(activeBorder?.getAttribute('stroke-width')).toBe('1');
     viewer.destroy();
   });
 
@@ -949,9 +1078,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(viewerStyle?.textContent).toContain(
       '[data-xlsx-viewport-input]:focus{outline:none}',
     );
-    expect(viewerStyle?.textContent).toContain(
-      '[data-xlsx-viewport-input]:focus-visible:not([data-xlsx-pointer-focus]){outline:2px solid #1a73e8;outline-offset:-2px}',
-    );
+    expect(viewerStyle?.textContent).not.toContain(':focus-visible');
     expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
     const viewportInput = mounted.find((element) => element.hasAttribute('data-xlsx-viewport-input')) as FakeEl;
     viewportInput.dispatch('pointerdown', {
@@ -962,9 +1089,6 @@ describe('XlsxSheetViewer canvas mount', () => {
       clientY: 0,
       shiftKey: false,
     });
-    expect(viewportInput.hasAttribute('data-xlsx-pointer-focus')).toBe(true);
-    viewportInput.dispatch('blur');
-    expect(viewportInput.hasAttribute('data-xlsx-pointer-focus')).toBe(false);
     expect(viewportInput._listeners.get('keydown')).toHaveLength(1);
     expect(popupDocument.listenerCount('keydown')).toBe(0);
     expect(openerDocument.listenerCount('keydown')).toBe(0);
@@ -1134,7 +1258,10 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(viewer.selectionState).toEqual(primarySelection);
 
     engine.scrollHost.dispatch('pointermove', pointer({ clientX: 1_600, clientY: 1_200 }));
-    expect(viewer.selectionState?.activeCell).toEqual(engine.getCellAt(779, 579));
+    const visibleEdgeCell = engine.getCellAt(779, 579);
+    expect(viewer.selectionState?.areas[0]).toMatchObject({
+      kind: 'cells', bottom: visibleEdgeCell?.row, right: visibleEdgeCell?.col,
+    });
     const visibleEdgeSelection = viewer.selectionState;
     engine.scrollHost.dispatch('pointerup', pointer({ pointerId: 2 }));
     engine.scrollHost.dispatch('pointercancel', pointer({ pointerId: 2 }));
@@ -1146,12 +1273,14 @@ describe('XlsxSheetViewer canvas mount', () => {
 
     expect(viewer.getViewportOffset().x).toBeGreaterThan(0);
     expect(viewer.getViewportOffset().y).toBeGreaterThan(0);
-    expect(viewer.selectionState?.activeCell.row).toBeGreaterThan(
-      visibleEdgeSelection?.activeCell.row ?? 0,
-    );
-    expect(viewer.selectionState?.activeCell.col).toBeGreaterThan(
-      visibleEdgeSelection?.activeCell.col ?? 0,
-    );
+    const finalArea = viewer.selectionState?.areas[0];
+    const visibleArea = visibleEdgeSelection?.areas[0];
+    expect(finalArea?.kind).toBe('cells');
+    expect(visibleArea?.kind).toBe('cells');
+    if (finalArea?.kind === 'cells' && visibleArea?.kind === 'cells') {
+      expect(finalArea.bottom).toBeGreaterThan(visibleArea.bottom);
+      expect(finalArea.right).toBeGreaterThan(visibleArea.right);
+    }
 
     engine.scrollHost.dispatch('pointerup', pointer({ clientX: 1_600, clientY: 1_200 }));
     viewer.destroy();

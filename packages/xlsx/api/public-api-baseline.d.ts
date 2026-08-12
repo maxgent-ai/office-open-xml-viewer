@@ -153,6 +153,7 @@ export interface CfValue {
     value: string | null;
 }
 export interface ChartAnchor {
+    zOrder?: number;
     fromCol: number;
     fromColOff: number;
     fromRow: number;
@@ -199,6 +200,8 @@ export interface ChartErrBars {
 export interface ChartexBoxSeries {
     name: string;
     color?: string | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
     valuesByCategory: number[][];
     meanMarker: boolean;
     meanLine: boolean;
@@ -210,6 +213,19 @@ export interface ChartexBoxWhisker {
     categories: string[];
     series: ChartexBoxSeries[];
 }
+export interface ChartExElementStyle {
+    fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
+    fillColors?: Array<string | null> | null;
+    fillHidden?: boolean | null;
+    lineColors?: Array<string | null> | null;
+    lineWidthEmu?: number | null;
+    lineHidden?: boolean | null;
+    lineDash?: string | null;
+    lineCap?: string | null;
+    lineJoin?: string | null;
+    fillColorIndex?: number | null;
+    lineColorIndex?: number | null;
+}
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
@@ -217,14 +233,20 @@ export interface ChartexSunburstRow {
     path: string[];
     size: number;
 }
+export interface ChartexTreemap {
+    rows: ChartexSunburstRow[];
+    parentLabelLayout?: string | null;
+}
 export interface ChartLabelBox {
     fill?: string;
     borderColor?: string;
     borderWidthEmu?: number;
 }
 export interface ChartManualLayout {
-    xMode: string;
-    yMode: string;
+    xMode?: string;
+    yMode?: string;
+    wMode?: string;
+    hMode?: string;
     layoutTarget?: string;
     x: number;
     y: number;
@@ -234,8 +256,10 @@ export interface ChartManualLayout {
 export interface ChartModel {
     chartType: ChartType;
     title: string | null;
+    titlePresent?: boolean;
     categories: string[];
     series: ChartSeries[];
+    chartTextBoxes?: ChartTextBox[] | null;
     varyColors?: boolean | null;
     showDataLabels: boolean;
     valMin: number | null;
@@ -263,6 +287,7 @@ export interface ChartModel {
     catAxisFontColor?: string | null;
     valAxisFontColor?: string | null;
     dataLabelFontSizeHpt: number | null;
+    dataLabelFontBold?: boolean | null;
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
@@ -307,8 +332,12 @@ export interface ChartModel {
     titleManualLayout?: ChartManualLayout | null;
     plotAreaManualLayout?: ChartManualLayout | null;
     scatterStyle?: string | null;
+    bubbleScale?: number | null;
+    bubbleSizeRepresents?: 'area' | 'w' | null;
+    showNegativeBubbles?: boolean | null;
     radarStyle?: string | null;
     secondaryValAxis?: SecondaryValueAxis | null;
+    secondaryCatAxis?: SecondaryValueAxis | null;
     date1904?: boolean;
     holeSize?: number | null;
     firstSliceAngle?: number | null;
@@ -326,6 +355,8 @@ export interface ChartModel {
     valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisTickLabelPos?: string | null;
+    catAxisTickLabelSkip?: number | null;
+    catAxisTickMarkSkip?: number | null;
     valAxisTickLabelPos?: string | null;
     catAxisLabelRotation?: number | null;
     stockHiLowLines?: boolean | null;
@@ -333,7 +364,13 @@ export interface ChartModel {
     stockUpDownBars?: boolean | null;
     chartexBox?: ChartexBoxWhisker | null;
     chartexSunburst?: ChartexSunburst | null;
+    chartexTreemap?: ChartexTreemap | null;
     chartexAccents?: string[] | null;
+    chartexColorPalette?: Array<string | null> | null;
+    chartexColorStyleMethod?: string | null;
+    chartexDataPointStyle?: ChartExElementStyle | null;
+    chartexDataPointLineStyle?: ChartExElementStyle | null;
+    chartexDataPointMarkerStyle?: ChartExElementStyle | null;
 }
 export interface ChartRect {
     x: number;
@@ -344,6 +381,9 @@ export interface ChartRect {
 export interface ChartSeries {
     name: string;
     color: string | null;
+    fillPattern?: PatternFill | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
     values: (number | null)[];
     dataPointColors?: (string | null)[] | null;
     dataLabelColors?: (string | null)[] | null;
@@ -353,6 +393,8 @@ export interface ChartSeries {
     categories?: string[] | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
+    catFormatCode?: string | null;
+    catFormatCodes?: (string | null)[] | null;
     markerSymbol?: string | null;
     markerSize?: number | null;
     markerFill?: string | null;
@@ -374,12 +416,33 @@ export interface ChartSeriesDataLabels {
     position?: string;
     fontColor?: string;
     formatCode?: string;
+    separator?: string;
     fontBold?: boolean;
     fontSizeHpt?: number;
     labelBox?: ChartLabelBox;
     showLeaderLines?: boolean;
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
+}
+export interface ChartTextBox {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    paragraphs: ChartTextParagraph[];
+    verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
+    wrap?: 'none' | 'square' | string | null;
+}
+export interface ChartTextParagraph {
+    runs: ChartTextRun[];
+    align?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
+}
+export interface ChartTextRun {
+    text: string;
+    fontSizeHpt?: number | null;
+    bold?: boolean | null;
+    color?: string | null;
+    fontFace?: string | null;
 }
 export interface ChartTrendline {
     trendlineType: string;
@@ -393,7 +456,7 @@ export interface ChartTrendline {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
 }
-export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | string;
+export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
 export interface ConditionalFormat {
     sqref: WorksheetCellRange[];
     rules: CfRule[];
@@ -493,6 +556,7 @@ export type HyperlinkTarget = {
     slideIndex?: number;
 };
 export interface ImageAnchor {
+    zOrder?: number;
     fromCol: number;
     fromColOff: number;
     fromRow: number;
@@ -527,8 +591,10 @@ interface ImageFill {
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export interface LegendManualLayout {
-    xMode: string;
-    yMode: string;
+    xMode?: string;
+    yMode?: string;
+    wMode?: string;
+    hMode?: string;
     x: number;
     y: number;
     w: number;
@@ -1010,6 +1076,7 @@ export type ShapeGeom = {
     duotone?: Duotone;
 };
 export interface ShapeInfo {
+    zOrder?: number;
     x: number;
     y: number;
     w: number;

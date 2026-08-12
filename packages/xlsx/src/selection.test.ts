@@ -7,6 +7,27 @@ import {
 } from './selection.js';
 
 describe('XLSX selection model', () => {
+  it('deduplicates identical areas and remaps the active-area index', () => {
+    expect(normalizeSelectionState({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 2, right: 2 },
+        { kind: 'cells', top: 4, left: 4, bottom: 5, right: 5 },
+        { kind: 'cells', top: 1, left: 1, bottom: 2, right: 2 },
+      ],
+      activeAreaIndex: 2,
+      activeCell: { row: 1, col: 1 },
+      extensionAnchor: { row: 1, col: 1 },
+    })).toEqual({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 2, right: 2 },
+        { kind: 'cells', top: 4, left: 4, bottom: 5, right: 5 },
+      ],
+      activeAreaIndex: 0,
+      activeCell: { row: 1, col: 1 },
+      extensionAnchor: { row: 1, col: 1 },
+    });
+  });
+
   it('does not infer ActiveCell direction from A1 endpoint order', () => {
     expect(selectionStateFromReference('D5:B2')).toEqual(
       selectionStateFromReference('B2:D5'),

@@ -2,7 +2,8 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, GradientFillSpec, ShapeInfo, SlicerItem, SlicerStyle, SlicerElementStyle,
+  Run, GradientFillSpec, ShapeInfo, ShapeAnchor, ImageAnchor, ChartAnchor,
+  SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import type { Stroke } from '@silurus/ooxml-core';
@@ -1609,6 +1610,10 @@ interface RenderContext {
    *  `x14:sparkline`. Built once at viewport start by flattening the
    *  parser's SparklineGroup + per-cell Sparkline pair. */
   sparklineMap: Map<string, SparklineModel>;
+  /** Off-screen cells whose unwrapped text reaches this viewport through empty
+   *  neighbours. These anchors bypass the ordinary cell-rectangle cull so the
+   *  existing overflow clip can paint the still-visible portion of the text. */
+  overflowTextAnchors: Set<string>;
   /** Max Digit Width resolved for the worksheet's Normal-style font
    *  (ECMA-376 §18.3.1.13). Used by `colWidthToPx` to convert character-
    *  unit column widths into pixels. */
@@ -2154,7 +2159,18 @@ function renderQuadrant(
     const rowIndex = rowIndices[ri];
     const cy = originY + rowYs[ri];
     const ch = rowHeights[ri];
-    if (cy + ch <= clipY || cy >= clipY + clipH) continue;
+    const rowOutsideClip = cy + ch <= clipY || cy >= clipY + clipH;
+    if (rowOutsideClip) {
+      // A merge anchor can remain in the materialized row-band list after its
+      // own row rectangle has scrolled behind the header. Keep that row alive
+      // when the full merged height still intersects the pane; the per-cell
+      // cull below performs the corresponding exact rectangle check.
+      const mergedRowIntersects = colIndices.some((colIndex) => {
+        const merge = mergeAnchorMap.get(`${rowIndex}:${colIndex}`);
+        return merge != null && cy + merge.totalH > clipY && cy < clipY + clipH;
+      });
+      if (!mergedRowIntersects) continue;
+    }
 
     // Pre-compute centerContinuous ranges in this row. ECMA-376 §18.18.40:
     // a contiguous run of cells whose alignment is `centerContinuous` is
@@ -2206,14 +2222,22 @@ function renderQuadrant(
       const cw = colWidths[ci];
       // Cull against the (un-mirrored) clip band — visibility is preserved
       // by the mirror, so the LTR test is correct for both directions.
-      if (ltrCx + cw <= clipX || ltrCx >= clipX + clipW) continue;
-
       const key = `${rowIndex}:${colIndex}`;
       if (mergeSkipSet.has(key)) continue;
 
+      // Use the authored merge rectangle for virtualization. A merge anchor's
+      // own row/column band may remain materialized while that single band is
+      // already fully clipped; Excel keeps painting the anchor until the full
+      // merged range has left the pane.
       const mergeInfo = mergeAnchorMap.get(key);
       const cellW = mergeInfo ? mergeInfo.totalW : cw;
       const cellH = mergeInfo ? mergeInfo.totalH : ch;
+      const horizontallyOutside = ltrCx + cellW <= clipX || ltrCx >= clipX + clipW;
+      const verticallyOutside = cy + cellH <= clipY || cy >= clipY + clipH;
+      if (
+        verticallyOutside ||
+        (horizontallyOutside && !rc.overflowTextAnchors.has(key))
+      ) continue;
       // Mirror the cell's canvas x for RTL. Uses the *full* drawn width
       // (merge span included) so the rect lands at the correct mirror band.
       const cx = mirrorX(ltrCx, cellW);
@@ -2932,6 +2956,7 @@ function renderQuadrant(
  *  cell-Map rebuild and a conditional-formatting recompile per frame. */
 interface SheetRenderCache {
   cellMap: Map<string, Cell>;
+  nonEmptyColsByRow: Map<number, readonly number[]>;
   cfContext: CfContext;
   mergeSkipSet: Set<string>;
   autoFilterCells: Set<string>;
@@ -2955,6 +2980,14 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
 
   const cellIdentity = coordinateIndexIdentity('worksheet-cell-index', 'index-worksheet-cells');
   const cellMap = buildCellCoordinateIndex(worksheet.rows, cellIdentity);
+  const nonEmptyColsByRow = new Map<number, readonly number[]>();
+  for (const row of worksheet.rows) {
+    const cols = row.cells
+      .filter((cell) => cell.value.type !== 'empty')
+      .map((cell) => cell.col)
+      .sort((a, b) => a - b);
+    if (cols.length > 0) nonEmptyColsByRow.set(row.index, cols);
+  }
 
   // Merge skip-set is pure topology (no scaled sizes) so it is cacheable; the
   // anchor map's pixel sizes depend on cellScale and stay per-frame.
@@ -3010,6 +3043,7 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
 
   const entry: SheetRenderCache = {
     cellMap,
+    nonEmptyColsByRow,
     cfContext: compileCf(worksheet, cellMap),
     mergeSkipSet,
     autoFilterCells,
@@ -3020,6 +3054,190 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
   };
   sheetRenderCache.set(worksheet, entry);
   return entry;
+}
+
+interface OverflowColumnOverscan {
+  startCol: number;
+  endCol: number;
+  anchorKeys: Set<string>;
+}
+
+function precedingColumn(cols: readonly number[], boundary: number): number | undefined {
+  let low = 0;
+  let high = cols.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (cols[middle] < boundary) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 ? cols[low - 1] : undefined;
+}
+
+function followingColumn(cols: readonly number[], boundary: number): number | undefined {
+  let low = 0;
+  let high = cols.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (cols[middle] <= boundary) low = middle + 1;
+    else high = middle;
+  }
+  return low < cols.length ? cols[low] : undefined;
+}
+
+function mergeBlocksOverflow(
+  worksheet: Worksheet,
+  row: number,
+  left: number,
+  right: number,
+): boolean {
+  return (worksheet.mergeCells ?? []).some((merge) => (
+    row >= merge.top && row <= merge.bottom &&
+    merge.right >= left && merge.left <= right
+  ));
+}
+
+/**
+ * Find off-screen text anchors whose authored, unwrapped display text still
+ * intersects the visible column band.
+ *
+ * OOXML stores alignment and wrapping (§18.8.1), but Excel's spill into empty
+ * neighbours is a paint-time behavior. Virtualization must therefore cull by
+ * the resulting text paint bounds rather than by the value cell's bounds. We
+ * inspect only the nearest non-empty cell on each side of each visible row:
+ * any earlier cell is necessarily blocked by that nearer value. A candidate is
+ * admitted only when its measured overflow crosses the sheet-space viewport
+ * boundary, so this does not introduce an arbitrary overscan column count.
+ */
+function virtualizedTextOverflowOverscan(
+  ctx: CanvasRenderingContext2D,
+  worksheet: Worksheet,
+  styles: Styles,
+  cellMap: Map<string, Cell>,
+  nonEmptyColsByRow: Map<number, readonly number[]>,
+  cfContext: CfContext,
+  tableStyleMap: Map<string, TableCellStyle>,
+  mergeAnchorMap: Map<string, { totalW: number; totalH: number; right: number; bottom: number }>,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
+  rowIndices: readonly number[],
+  visibleStartCol: number,
+  visibleEndCol: number,
+  firstScrollableCol: number,
+  cs: number,
+  mdw: number,
+  rtl: boolean,
+): OverflowColumnOverscan {
+  let startCol = visibleStartCol;
+  let endCol = visibleEndCol;
+  const anchorKeys = new Set<string>();
+
+  const reaches = (
+    row: number,
+    col: number,
+    logicalDirection: 'lower' | 'higher',
+    distanceToViewport: number,
+  ): boolean => {
+    const key = `${row}:${col}`;
+    const cell = cellMap.get(key);
+    if (!cell || cell.value.type === 'empty' || mergeAnchorMap.has(key)) return false;
+
+    const { font, xf } = resolveXf(styles, cell.styleIndex ?? 0);
+    const cf = evaluateCf(cell, row, col, cfContext, styles.dxfs ?? []);
+    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
+    const text = formatted.text;
+    if (
+      !text ||
+      (text === '0' && worksheet.showZeros === false) ||
+      cell.value.type === 'number' ||
+      xf.wrapText ||
+      !!xf.textRotation ||
+      text.includes('\n')
+    ) return false;
+
+    const tableStyle = tableStyleMap.get(key);
+    const tableFontDxfId = tableStyle?.isHeader
+      ? tableStyle.headerRowDxf
+      : tableStyle?.isTotals
+        ? tableStyle.totalRowDxf
+        : tableStyle?.isLastCol && tableStyle.lastColumnDxf != null
+          ? tableStyle.lastColumnDxf
+          : tableStyle?.isFirstCol && tableStyle.firstColumnDxf != null
+            ? tableStyle.firstColumnDxf
+            : tableStyle?.stripeDxf ?? tableStyle?.wholeTableDxf;
+    const tableFontDxf = tableFontDxfId != null ? styles.dxfs?.[tableFontDxfId] : undefined;
+    const builtInTableBold = !!tableStyle && !tableStyle.isCustom && (tableStyle.isHeader || tableStyle.isTotals);
+    const effectiveBold = font.bold || !!cf.fontBold || builtInTableBold || !!tableFontDxf?.font?.bold;
+    const effectiveItalic = font.italic || !!cf.fontItalic;
+    const effectiveFont = (effectiveBold !== font.bold || effectiveItalic !== font.italic)
+      ? { ...font, bold: effectiveBold, italic: effectiveItalic }
+      : font;
+    ctx.font = buildFont(effectiveFont, cs);
+
+    const alignH = xf.alignH ?? 'left';
+    const paddingX = 3;
+    const indentPx = xf.indent ? Math.round(xf.indent * 3 * mdw) : 0;
+    const cellW = colAxis.sizeOf(col);
+    const cellH = rowAxis.sizeOf(row);
+    const iconSize = cf.iconSet ? Math.max(8, Math.round(Math.min(cellW, cellH) * 0.55)) : 0;
+    const iconPad = iconSize > 0 ? iconSize + 4 : 0;
+    const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
+    const textPx = ctx.measureText(text).width + leftPad + paddingX;
+    const overflow = Math.max(0, textPx - cellW);
+    if (overflow <= 0) return false;
+
+    const physicalDirection = rtl
+      ? (logicalDirection === 'higher' ? 'left' : 'right')
+      : (logicalDirection === 'higher' ? 'right' : 'left');
+    const extension = alignH === 'center' || alignH === 'centerContinuous'
+      ? overflow / 2
+      : (physicalDirection === 'left' ? alignH === 'right' : alignH !== 'right')
+        ? overflow
+        : 0;
+    return extension > distanceToViewport;
+  };
+
+  for (const row of rowIndices) {
+    const nonEmptyCols = nonEmptyColsByRow.get(row);
+    if (!nonEmptyCols) continue;
+
+    const before = precedingColumn(nonEmptyCols, visibleStartCol);
+    const visibleStartCell = cellMap.get(`${row}:${visibleStartCol}`);
+    if (
+      before != null &&
+      before >= firstScrollableCol &&
+      (!visibleStartCell || visibleStartCell.value.type === 'empty') &&
+      !mergeBlocksOverflow(worksheet, row, before + 1, visibleStartCol) &&
+      reaches(
+        row,
+        before,
+        'higher',
+        colAxis.offsetOf(visibleStartCol) - colAxis.offsetOf(before + 1),
+      )
+    ) {
+      startCol = Math.min(startCol, before);
+      anchorKeys.add(`${row}:${before}`);
+    }
+
+    const after = followingColumn(nonEmptyCols, visibleEndCol);
+    const visibleEndCell = cellMap.get(`${row}:${visibleEndCol}`);
+    if (
+      after != null &&
+      after <= 16_384 &&
+      (!visibleEndCell || visibleEndCell.value.type === 'empty') &&
+      !mergeBlocksOverflow(worksheet, row, visibleEndCol, after - 1) &&
+      reaches(
+        row,
+        after,
+        'lower',
+        colAxis.offsetOf(after) - colAxis.offsetOf(visibleEndCol + 1),
+      )
+    ) {
+      endCol = Math.max(endCol, after);
+      anchorKeys.add(`${row}:${after}`);
+    }
+  }
+
+  return { startCol, endCol, anchorKeys };
 }
 
 /** Reuse viewport-independent indexes for a render-local worksheet projection.
@@ -3100,6 +3318,7 @@ export function renderViewport(
   const {
     cellMap, cfContext, mergeSkipSet, autoFilterCells,
     hyperlinkMap, commentCells, tableStyleMap, sparklineMap,
+    nonEmptyColsByRow,
   } = getSheetRenderCache(worksheet);
 
   // Merge anchor sizes are cellScale-scaled, so they stay per-frame.
@@ -3119,9 +3338,46 @@ export function renderViewport(
     );
   }
 
+  // Keep off-screen value cells alive only when their actual unwrapped text
+  // paint bounds cross into the visible scrollable band. The ordinary
+  // scrollColBands remain unchanged for headers and viewport bookkeeping;
+  // renderScrollColBands add only the measured spill anchors and the empty
+  // columns through which they paint.
+  const visibleStartCol = scrollColIndices[0] ?? startCol;
+  const visibleEndCol = scrollColIndices.at(-1) ?? Math.min(16_384, startCol + numCols - 1);
+  const overflowRows = [...new Set([...frozenRowIndices, ...scrollRowIndices])];
+  const overflowOverscan = virtualizedTextOverflowOverscan(
+    ctx,
+    worksheet,
+    styles,
+    cellMap,
+    nonEmptyColsByRow,
+    cfContext,
+    tableStyleMap,
+    mergeAnchorMap,
+    colAxis,
+    rowAxis,
+    overflowRows,
+    visibleStartCol,
+    visibleEndCol,
+    freezeCols + 1,
+    cs,
+    mdw,
+    worksheet.rightToLeft === true,
+  );
+  const renderScrollColBands = colAxis.bandsToCover(
+    overflowOverscan.startCol,
+    overflowOverscan.endCol,
+  );
+  const renderScrollColIndices = renderScrollColBands.map(({ index }) => index);
+  const renderScrollColWidths = renderScrollColBands.map(({ size }) => size);
+  const renderScrollOffsetX = scrollOffsetX
+    + colAxis.offsetOf(visibleStartCol)
+    - colAxis.offsetOf(overflowOverscan.startCol);
+
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
-    colWidths: scrollColWidths,
+    colWidths: renderScrollColWidths,
     rowHeights: scrollRowHeights,
     colAxis,
     rowAxis,
@@ -3135,6 +3391,7 @@ export function renderViewport(
     commentCells,
     tableStyleMap,
     sparklineMap,
+    overflowTextAnchors: overflowOverscan.anchorKeys,
     mdw,
     onTextRun: opts.onTextRun,
     rtl: worksheet.rightToLeft === true,
@@ -3163,9 +3420,9 @@ export function renderViewport(
   // ── Q2: frozen rows × scrollable cols ───────────────────────
   if (freezeRows > 0) {
     renderQuadrant(ctx, rc,
-      1, startCol, scrollColWidths, frozenRowHeights,
-      scrollColIndices, frozenRowIndices,
-      scrollOffsetX, 0,
+      1, overflowOverscan.startCol, renderScrollColWidths, frozenRowHeights,
+      renderScrollColIndices, frozenRowIndices,
+      renderScrollOffsetX, 0,
       scrollAreaX, cellAreaY,
       scrollAreaX, cellAreaY, scrollAreaW, frozenH,
     );
@@ -3184,49 +3441,20 @@ export function renderViewport(
 
   // ── Q4: scrollable rows × scrollable cols (main area) ───────
   renderQuadrant(ctx, rc,
-    startRow, startCol, scrollColWidths, scrollRowHeights,
-    scrollColIndices, scrollRowIndices,
-    scrollOffsetX, scrollOffsetY,
+    startRow, overflowOverscan.startCol, renderScrollColWidths, scrollRowHeights,
+    renderScrollColIndices, scrollRowIndices,
+    renderScrollOffsetX, scrollOffsetY,
     scrollAreaX, scrollAreaY,
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
   );
 
-  // ── Anchored images (clipped to scrollable area) ─────────────
-  if (worksheet.images && worksheet.images.length > 0 && opts.loadedImages) {
-    renderImages(
-      ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
-      startRow, startCol,
-      scrollOffsetX, scrollOffsetY,
-      scrollAreaX, scrollAreaY,
-      scrollAreaW, scrollAreaH,
-      worksheet.rightToLeft === true, canvasW,
-    );
-  }
-
-  // ── Anchored shape groups (custom geometry, incl. embedded images) ────
-  if (worksheet.shapeGroups && worksheet.shapeGroups.length > 0) {
-    renderShapeGroups(
-      ctx, worksheet, colAxis, rowAxis, cs,
-      startRow, startCol,
-      scrollOffsetX, scrollOffsetY,
-      scrollAreaX, scrollAreaY,
-      scrollAreaW, scrollAreaH,
-      opts.loadedImages,
-      worksheet.rightToLeft === true, canvasW,
-    );
-  }
-
-  // ── Anchored charts (clipped to scrollable area) ──────────────
-  if (worksheet.charts && worksheet.charts.length > 0) {
-    renderCharts(
-      ctx, worksheet, colAxis, rowAxis, cs,
-      startRow, startCol,
-      scrollOffsetX, scrollOffsetY,
-      scrollAreaX, scrollAreaY,
-      scrollAreaW, scrollAreaH,
-      worksheet.rightToLeft === true, canvasW,
-    );
-  }
+  // ── Anchored DrawingML objects, in authored z-order ───────────
+  renderAnchoredDrawings(
+    ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
+    startRow, startCol, scrollOffsetX, scrollOffsetY,
+    scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
+    worksheet.rightToLeft === true, canvasW,
+  );
 
   // ── Anchored slicers (Office 2010+ pivot/table filter buttons) ──
   if (worksheet.slicers && worksheet.slicers.length > 0) {
@@ -3269,14 +3497,11 @@ export function renderViewport(
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     const dy = scrollAreaY + crispOffset(scrollAreaY, 0.5, dpr);
-    if (rtl) {
-      // cell area is [0, canvasW - hw]
-      ctx.moveTo(0, dy);
-      ctx.lineTo(canvasW - hw, dy);
-    } else {
-      ctx.moveTo(hw, dy);
-      ctx.lineTo(canvasW, dy);
-    }
+    // Excel carries the separator through the row-number header so the frozen
+    // boundary stays visible at the left (LTR) or right (RTL) edge as well as
+    // across the cell area.
+    ctx.moveTo(0, dy);
+    ctx.lineTo(canvasW, dy);
     ctx.stroke();
     ctx.restore();
   }
@@ -3500,6 +3725,81 @@ function renderHeaders(
 // Image anchors  (ECMA-376 §20.5, <xdr:twoCellAnchor>)
 // ────────────────────────────────────────────────────────────────
 
+type AnchoredDrawing =
+  | { kind: 'image'; zOrder: number; fallbackOrder: number; anchor: ImageAnchor }
+  | { kind: 'shape'; zOrder: number; fallbackOrder: number; anchor: ShapeAnchor; shape: ShapeInfo }
+  | { kind: 'chart'; zOrder: number; fallbackOrder: number; anchor: ChartAnchor };
+
+/** Paint worksheet drawing objects in their DrawingML document order.
+ *
+ * ECMA-376 §20.5.2.35 defines the worksheet drawing as an ordered sequence;
+ * later objects are visually above earlier objects. A grouped chart can contain
+ * a chart frame followed by title/footer text boxes, so rendering by object type
+ * (all shapes, then all charts) incorrectly covered those text boxes with the
+ * chart background. Parser-emitted `zOrder` values are byte positions in the
+ * selected drawing-part XML and therefore preserve that authored order. */
+function renderAnchoredDrawings(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  colAxis: GridAxisGeometry,
+  rowAxis: GridAxisGeometry,
+  loadedImages: Map<string, CanvasImageSource | null> | undefined,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+  rtl: boolean,
+  canvasW: number,
+): void {
+  const drawings: AnchoredDrawing[] = [];
+  let fallbackOrder = 0;
+  if (loadedImages) {
+    for (const anchor of ws.images ?? []) {
+      drawings.push({ kind: 'image', zOrder: anchor.zOrder ?? Number.MAX_SAFE_INTEGER, fallbackOrder: fallbackOrder++, anchor });
+    }
+  }
+  for (const anchor of ws.shapeGroups ?? []) {
+    for (const shape of anchor.shapes) {
+      drawings.push({ kind: 'shape', zOrder: shape.zOrder ?? Number.MAX_SAFE_INTEGER, fallbackOrder: fallbackOrder++, anchor, shape });
+    }
+  }
+  for (const anchor of ws.charts ?? []) {
+    drawings.push({ kind: 'chart', zOrder: anchor.zOrder ?? Number.MAX_SAFE_INTEGER, fallbackOrder: fallbackOrder++, anchor });
+  }
+  drawings.sort((a, b) => a.zOrder - b.zOrder || a.fallbackOrder - b.fallbackOrder);
+
+  for (const drawing of drawings) {
+    if (drawing.kind === 'image') {
+      renderImages(
+        ctx, ws, colAxis, rowAxis, loadedImages as Map<string, CanvasImageSource | null>, cs,
+        startRow, startCol, scrollOffsetX, scrollOffsetY,
+        scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH, rtl, canvasW,
+        [drawing.anchor],
+      );
+    } else if (drawing.kind === 'shape') {
+      renderShapeGroups(
+        ctx, ws, colAxis, rowAxis, cs,
+        startRow, startCol, scrollOffsetX, scrollOffsetY,
+        scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
+        loadedImages, rtl, canvasW,
+        [{ ...drawing.anchor, shapes: [drawing.shape] }],
+      );
+    } else {
+      renderCharts(
+        ctx, ws, colAxis, rowAxis, cs,
+        startRow, startCol, scrollOffsetX, scrollOffsetY,
+        scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH, rtl, canvasW,
+        [drawing.anchor],
+      );
+    }
+  }
+}
+
 /** Sum scaled column widths for cols 1..n-1 (sheet-space X of col n in scaled px). */
 function sheetXForCol(
   axis: GridAxisGeometry,
@@ -3534,6 +3834,7 @@ function renderImages(
   scrollAreaH: number,
   rtl: boolean,
   canvasW: number,
+  anchors: readonly ImageAnchor[] = ws.images,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -3547,7 +3848,7 @@ function renderImages(
   ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
   ctx.clip();
 
-  for (const anchor of ws.images) {
+  for (const anchor of anchors) {
     // A `<a:duotone>` picture was recoloured at decode time and cached under a
     // colour-suffixed key (§20.1.8.23); look it up with the same key.
     const img = loadedImages.get(imageCacheKey(anchor.imagePath, anchor.duotone));
@@ -3627,10 +3928,10 @@ function renderShapeGroups(
   loadedImages: Map<string, CanvasImageSource | null> | undefined,
   rtl: boolean,
   canvasW: number,
+  anchors: readonly ShapeAnchor[] = ws.shapeGroups ?? [],
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
-  const anchors = ws.shapeGroups;
-  if (!anchors || anchors.length === 0) return;
+  if (anchors.length === 0) return;
 
   const scrollOriginSheetX = sheetXForCol(colAxis, startCol);
   const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
@@ -4427,6 +4728,29 @@ function mergeBorders(base: Border, overlay: Border | undefined): Border {
   };
 }
 
+/**
+ * Endpoint offsets for the two rails of an OOXML `double` cell border.
+ *
+ * Excel only extends/trims a rail at a corner that actually has a
+ * perpendicular border to join.  A standalone bottom border, for example,
+ * keeps both rails at the full cell width; applying the boxed-cell corner
+ * treatment there makes the inner (upper) rail visibly too short.
+ */
+export function doubleBorderRailEndpoints(
+  start: number,
+  end: number,
+  startJoined: boolean,
+  endJoined: boolean,
+  off = 1,
+): { outerStart: number; outerEnd: number; innerStart: number; innerEnd: number } {
+  return {
+    outerStart: startJoined ? start - off : start,
+    outerEnd: endJoined ? end + off : end,
+    innerStart: startJoined ? start + off : start,
+    innerEnd: endJoined ? end - off : end,
+  };
+}
+
 function renderBorder(
   ctx: CanvasRenderingContext2D,
   border: Border,
@@ -4501,14 +4825,28 @@ function renderBorder(
         // it), so no inherited-redraw "swap" is needed.
         const outerY = isTop ? y - off : y + h + off;
         const innerY = isTop ? y + off : y + h - off;
-        ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
-        ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
+        const rails = doubleBorderRailEndpoints(
+          x,
+          x + w,
+          !!border.left?.style && border.left.style !== 'none',
+          !!border.right?.style && border.right.style !== 'none',
+          off,
+        );
+        ctx.moveTo(rails.outerStart, outerY); ctx.lineTo(rails.outerEnd, outerY);
+        ctx.moveTo(rails.innerStart, innerY); ctx.lineTo(rails.innerEnd, innerY);
       } else {
         const isLeft = x1 === x;
         const outerX = isLeft ? x - off : x + w + off;
         const innerX = isLeft ? x + off : x + w - off;
-        ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
-        ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
+        const rails = doubleBorderRailEndpoints(
+          y,
+          y + h,
+          !!border.top?.style && border.top.style !== 'none',
+          !!border.bottom?.style && border.bottom.style !== 'none',
+          off,
+        );
+        ctx.moveTo(outerX, rails.outerStart); ctx.lineTo(outerX, rails.outerEnd);
+        ctx.moveTo(innerX, rails.innerStart); ctx.lineTo(innerX, rails.innerEnd);
       }
       ctx.stroke();
       continue;
@@ -4624,6 +4962,7 @@ function renderCharts(
   scrollAreaH: number,
   rtl: boolean,
   canvasW: number,
+  anchors: readonly ChartAnchor[] = ws.charts,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -4631,7 +4970,7 @@ function renderCharts(
   const scrollOriginSheetY = sheetYForRow(rowAxis, startRow);
   const clipX = sheetAnchoredRectX(scrollAreaX, scrollAreaW, canvasW, rtl);
 
-  for (const anchor of ws.charts) {
+  for (const anchor of anchors) {
     const fromCol1 = anchor.fromCol + 1;
     const fromRow1 = anchor.fromRow + 1;
     const toCol1   = anchor.toCol   + 1;

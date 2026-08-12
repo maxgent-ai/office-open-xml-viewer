@@ -63,6 +63,10 @@ import {
   colBands,
   summaryAfterFor,
   gutterExtentPx,
+  outlineBracketSegments,
+  outlineLevelButtonCenterPx,
+  outlinePaneClipRect,
+  OUTLINE_BUTTON_PX,
   OUTLINE_LANE_PX,
   type BandOutline,
   type OutlineGroup,
@@ -136,11 +140,10 @@ const VIEWER_STYLE_ATTR = 'data-xlsx-viewer-styles';
  *  it must live in a stylesheet rather than on the elements. */
 const VIEWER_STYLE_CSS =
   `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
-  // The viewport must remain focusable so copy shortcuts belong to the active
-  // Viewer. Suppress the browser's click-focus ring, but retain an explicit
-  // inset indicator for keyboard navigation.
+  // The viewport remains focusable so copy shortcuts belong to the active
+  // Viewer, but selection state is communicated at cell level. A viewport-wide
+  // focus ring is visually indistinguishable from a sheet selection border.
   `[data-xlsx-viewport-input]:focus{outline:none}` +
-  `[data-xlsx-viewport-input]:focus-visible:not([data-xlsx-pointer-focus]){outline:2px solid #1a73e8;outline-offset:-2px}` +
   `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
   `.xlsx-tab-nav:hover{background:rgba(0,0,0,0.08);}` +
   // Excel-status-bar zoom slider: a thin uniform gray track (no colored
@@ -467,6 +470,83 @@ export function selectionOverlayStyle(color: string): { border: string; backgrou
   };
 }
 
+interface SelectionOverlayRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly top: boolean;
+  readonly right: boolean;
+  readonly bottom: boolean;
+  readonly left: boolean;
+}
+
+interface SelectionBoundarySegment {
+  readonly axis: 'h' | 'v';
+  readonly fixed: number;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Build the single-Area outline from its visible frozen-pane fragments.
+ * Splitting collinear edges at every endpoint emits coincident fragment edges
+ * only once. Work is bounded by the visible fragment count, not sheet size.
+ */
+function selectionBoundaryPath(rects: readonly SelectionOverlayRect[]): string {
+  const raw: SelectionBoundarySegment[] = [];
+  for (const rect of rects) {
+    const x2 = rect.x + rect.width;
+    const y2 = rect.y + rect.height;
+    if (rect.top) raw.push({ axis: 'h', fixed: rect.y, start: rect.x, end: x2 });
+    if (rect.right) raw.push({ axis: 'v', fixed: x2, start: rect.y, end: y2 });
+    if (rect.bottom) raw.push({ axis: 'h', fixed: y2, start: rect.x, end: x2 });
+    if (rect.left) raw.push({ axis: 'v', fixed: rect.x, start: rect.y, end: y2 });
+  }
+
+  const groups = new Map<string, SelectionBoundarySegment[]>();
+  for (const segment of raw) {
+    const key = `${segment.axis}:${segment.fixed}`;
+    const group = groups.get(key);
+    if (group) group.push(segment);
+    else groups.set(key, [segment]);
+  }
+
+  const commands: string[] = [];
+  for (const segments of groups.values()) {
+    const points = [...new Set(segments.flatMap(({ start, end }) => [start, end]))]
+      .sort((a, b) => a - b);
+    let runStart: number | null = null;
+    let runEnd = 0;
+    const flush = () => {
+      if (runStart === null || runEnd <= runStart) return;
+      const { axis, fixed } = segments[0];
+      commands.push(axis === 'h'
+        ? `M${runStart} ${fixed}H${runEnd}`
+        : `M${fixed} ${runStart}V${runEnd}`);
+      runStart = null;
+    };
+    for (let index = 0; index + 1 < points.length; index++) {
+      const start = points[index];
+      const end = points[index + 1];
+      const covered = segments.some((segment) => segment.start < end && segment.end > start);
+      if (covered && runStart !== null && start === runEnd) {
+        runEnd = end;
+      } else {
+        flush();
+        if (covered) {
+          runStart = start;
+          runEnd = end;
+        }
+      }
+    }
+    flush();
+  }
+  return commands.join('');
+}
+
+let selectionMaskSequence = 0;
+
 const DEFAULT_FIND_HIGHLIGHT = 'color-mix(in srgb, #ffb300 8%, transparent)';
 const DEFAULT_FIND_ACTIVE_HIGHLIGHT = 'color-mix(in srgb, #fb8c00 8%, transparent)';
 
@@ -664,7 +744,9 @@ class XlsxViewerEngine implements ZoomableViewer {
   // touch/pen (swipe-to-scroll must not change the cell) and for mouse
   // presses inside the overlay-scrollbar band (a thumb drag must not select
   // the cell underneath).
-  private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
+  private pendingTap:
+    | { x: number; y: number; shiftKey: boolean; additiveKey: boolean; pointerId: number }
+    | null = null;
   // IX1 — mouse press bookkeeping for hyperlink activation: the down position and
   // the cell under it. On pointerup, if the pointer did not move beyond the tap
   // slop (a genuine click, not a drag-select), a hyperlink on that cell is
@@ -1254,6 +1336,48 @@ class XlsxViewerEngine implements ZoomableViewer {
     ctx.lineWidth = 1;
     ctx.fillStyle = '#404040';
 
+    // Outline gutter geometry participates in the same header/frozen-pane split
+    // as the worksheet canvas. Clip every logical run to its own pane so a
+    // scrolled detail rail cannot leak upward into the column-letter header or
+    // through the frozen-row boundary (and mirror the equivalent rule for RTL
+    // frozen columns).
+    const geometry = getGridGeometryForWorksheet(ws);
+    const effective = geometry.effectiveFrozenBands({
+      scale: cs,
+      width: this.canvasArea.clientWidth,
+      height: this.canvasArea.clientHeight,
+      headerWidth: HEADER_W,
+      headerHeight: HEADER_H,
+      rows: ws.freezeRows ?? 0,
+      cols: ws.freezeCols ?? 0,
+    });
+    const axes = geometry.axesAtScale(cs);
+    const frozenBandCount = isRow ? effective.rows : effective.cols;
+    const frozenExtent = isRow
+      ? axes.row.offsetOf(effective.rows + 1)
+      : axes.col.offsetOf(effective.cols + 1);
+    const headerExtent = (isRow ? HEADER_H : HEADER_W) * cs;
+    const paneClip = (start: number, end: number) => outlinePaneClipRect(
+      axis,
+      start,
+      end,
+      frozenBandCount,
+      headerExtent,
+      frozenExtent,
+      cssW,
+      cssH,
+      !isRow && ws.rightToLeft === true,
+    );
+    const clipContext = (start: number, end: number): boolean => {
+      const clip = paneClip(start, end);
+      if (clip.w <= 0 || clip.h <= 0) return false;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(clip.x, clip.y, clip.w, clip.h);
+      ctx.clip();
+      return true;
+    };
+
     for (const g of layout.groups) {
       // Lane index for this level: lane 0 is the outermost (level 1). Buttons and
       // the outermost bracket sit nearest the grid edge? Excel draws level 1 in
@@ -1275,20 +1399,15 @@ class XlsxViewerEngine implements ZoomableViewer {
       // draws only the +/- toggle, no bracket. Skip the bracket when the run has
       // negligible length.
       if (!g.collapsed && runEnd - runStart > 1) {
-        ctx.beginPath();
-        if (isRow) {
-          ctx.moveTo(laneCenterCross, runStart);
-          ctx.lineTo(laneCenterCross, runEnd);
-          // Elbow tick toward the grid at the summary end.
-          const tickY = g.summary != null && g.summary > g.end ? runEnd : runStart;
-          ctx.lineTo(laneCenterCross + lanePx / 2, tickY);
-        } else {
-          ctx.moveTo(runStart, laneCenterCross);
-          ctx.lineTo(runEnd, laneCenterCross);
-          const tickX = g.summary != null && g.summary > g.end ? runEnd : runStart;
-          ctx.lineTo(tickX, laneCenterCross + lanePx / 2);
+        if (clipContext(g.start, g.end)) {
+          ctx.beginPath();
+          for (const segment of outlineBracketSegments(axis, laneCenterCross, a, b, lanePx)) {
+            ctx.moveTo(segment.x1, segment.y1);
+            ctx.lineTo(segment.x2, segment.y2);
+          }
+          ctx.stroke();
+          ctx.restore();
         }
-        ctx.stroke();
       }
 
       // +/- toggle box on the summary band.
@@ -1298,7 +1417,10 @@ class XlsxViewerEngine implements ZoomableViewer {
           const along = isRow
             ? sRect.y + sRect.h / 2
             : this.screenX(sRect.x, sRect.w) + sRect.w / 2;
-          this.drawToggleBox(ctx, isRow ? laneCenterCross : along, isRow ? along : laneCenterCross, g.collapsed, cs);
+          if (clipContext(g.summary, g.summary)) {
+            this.drawToggleBox(ctx, isRow ? laneCenterCross : along, isRow ? along : laneCenterCross, g.collapsed, cs);
+            ctx.restore();
+          }
         }
       }
     }
@@ -1313,15 +1435,40 @@ class XlsxViewerEngine implements ZoomableViewer {
     // made the row expand-all button unreachable.
     const bankCross = isRow ? (HEADER_H * cs) / 2 : (HEADER_W * cs) / 2;
     for (let l = 1; l <= layout.maxLevel + 1; l++) {
-      const laneCenter = (l - 0.5) * lanePx;
-      if (laneCenter + lanePx / 2 > (isRow ? cssW : cssH) + 0.5) break;
+      const buttonCenter = outlineLevelButtonCenterPx(l) * cs;
+      if (buttonCenter + (OUTLINE_BUTTON_PX * cs) / 2 > (isRow ? cssW : cssH) + 0.5) break;
       this.drawLevelButton(
         ctx,
-        isRow ? laneCenter : bankCross,
-        isRow ? bankCross : laneCenter,
+        isRow ? buttonCenter : bankCross,
+        isRow ? bankCross : buttonCenter,
         String(l),
         cs,
       );
+    }
+
+    // Paint the pane separator last so it visibly cuts the outline rail at the
+    // same coordinate as the main grid's separator. This also extends the line
+    // through the outline gutter, making the frozen-row boundary continuous
+    // from the gutter through the row-number header and cells.
+    if (frozenBandCount > 0) {
+      const divider = isRow
+        ? headerExtent + frozenExtent
+        : ws.rightToLeft === true
+          ? cssW - headerExtent - frozenExtent
+          : headerExtent + frozenExtent;
+      ctx.save();
+      ctx.strokeStyle = '#7a7a7a';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      if (isRow) {
+        ctx.moveTo(0, divider);
+        ctx.lineTo(cssW, divider);
+      } else {
+        ctx.moveTo(divider, 0);
+        ctx.lineTo(divider, cssH);
+      }
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -1366,7 +1513,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     label: string,
     cs: number,
   ): void {
-    const s = Math.round(11 * cs);
+    const s = Math.round(OUTLINE_BUTTON_PX * cs);
     const x = Math.round(cx - s / 2);
     const y = Math.round(cy - s / 2);
     ctx.save();
@@ -1414,7 +1561,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const py = e.clientY - rect.top;
     const cs = this.viewport.scale;
     const lanePx = OUTLINE_LANE_PX * cs;
-    const hitR = 7 * cs; // generous grab radius around a button center
+    const hitR = 7 * cs; // generous grab radius around a +/- button center
 
     // Numbered level bank first: it lives in this gutter's header strip (row
     // bank beside the column-letter header, column bank above the row-number
@@ -1423,10 +1570,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     const inBankStrip = (isRow ? py : px) <= (isRow ? HEADER_H : HEADER_W) * cs;
     if (inBankStrip) {
       for (let l = 1; l <= layout.maxLevel + 1; l++) {
-        const laneCenter = (l - 0.5) * lanePx;
-        const cx = isRow ? laneCenter : bankCross;
-        const cy = isRow ? bankCross : laneCenter;
-        if (Math.abs(px - cx) <= hitR && Math.abs(py - cy) <= hitR) {
+        const buttonCenter = outlineLevelButtonCenterPx(l) * cs;
+        const cx = isRow ? buttonCenter : bankCross;
+        const cy = isRow ? bankCross : buttonCenter;
+        const buttonHitR = (OUTLINE_BUTTON_PX * cs) / 2;
+        if (Math.abs(px - cx) <= buttonHitR && Math.abs(py - cy) <= buttonHitR) {
           e.preventDefault();
           this.applyLevelButton(l, axis);
           return;
@@ -1465,7 +1613,38 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Reflect the new collapsed state on the summary band so the next toggle
     // reads the correct direction and the +/- glyph flips.
     if (group.summary != null) this.setBandCollapsed(axis, group.summary, nowCollapsed);
-    this.afterOutlineMutation(ws);
+    // Collapsing removes the detail bands before the summary. Anchor that
+    // surviving summary band at the viewport start after geometry has been
+    // rebuilt; otherwise the browser clamps the shortened scroll extent and
+    // leaves an unrelated partial row at the top.
+    this.afterOutlineMutation(
+      ws,
+      nowCollapsed && group.summary != null ? { axis, summary: group.summary } : undefined,
+    );
+  }
+
+  /** Align an outline summary band to the scrollable viewport's start without
+   * disturbing the perpendicular axis. */
+  private scrollOutlineSummaryToStart(axis: OutlineAxis, summary: number): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    const cs = this.viewport.scale;
+    const offset = getGridGeometryForWorksheet(ws).scrollOffsetForCell(
+      axis === 'row' ? summary : 1,
+      axis === 'col' ? summary : 1,
+      {
+        scale: cs,
+        viewportWidth: this.canvasArea.clientWidth,
+        viewportHeight: this.canvasArea.clientHeight,
+        currentX: this.effectiveScrollLeft,
+        currentY: this.viewportTop,
+        headerWidth: HEADER_W,
+        headerHeight: HEADER_H,
+        align: 'start',
+      },
+    );
+    if (axis === 'row') this.viewportTop = offset.y;
+    else this.setViewportLeft(offset.x);
   }
 
   /** Collapse/expand the whole sheet to `level` on one axis. */
@@ -1588,12 +1767,18 @@ class XlsxViewerEngine implements ZoomableViewer {
 
   /** Shared tail of a gutter interaction: invalidate the axis cache, rebuild the
    *  outline (collapsed flags changed), refresh dependent geometry, re-render. */
-  private afterOutlineMutation(ws: Worksheet): void {
+  private afterOutlineMutation(
+    ws: Worksheet,
+    anchor?: { axis: OutlineAxis; summary: number },
+  ): void {
     GridGeometry.invalidate(ws);
     this.buildOutlineLayoutOnly(ws);
     this.updateSpacerSize(ws);
+    if (anchor) this.scrollOutlineSummaryToStart(anchor.axis, anchor.summary);
     this.updateSelectionOverlay();
+    this.updateFindOverlay();
     this.scheduleRender();
+    if (anchor) this.emitViewportChange();
   }
 
   /** Rebuild only the layout + band lists (not the stashes) after a collapse
@@ -2496,12 +2681,11 @@ class XlsxViewerEngine implements ZoomableViewer {
           { first: effective.rows + 1, last: MAX_WORKSHEET_ROW, start: Math.min(height, headerH + frozenH), end: height },
         ]
       : [{ first: 1, last: MAX_WORKSHEET_ROW, start: headerH, end: height }];
-    const { border, background } = selectionOverlayStyle(
-      this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR,
-    );
+    const selectionColor = this.opts.selectionColor ?? DEFAULT_SELECTION_COLOR;
+    const { background } = selectionOverlayStyle(selectionColor);
     const seenFragments = new Set<string>();
     const fillSubpaths: string[] = [];
-    const borderFragments: HTMLElement[] = [];
+    const overlayRects: SelectionOverlayRect[] = [];
 
     for (const area of state.areas) {
       const bounds = area.kind === 'cells'
@@ -2540,10 +2724,10 @@ class XlsxViewerEngine implements ZoomableViewer {
 
         // Only paint a border where the logical selection itself ends. Pane and
         // viewport clips are not selection edges and must not create fake lines.
-        const topBorder = bounds.topEdge && top === bounds.top && rawTop >= yp.start ? border : 'none';
-        const bottomBorder = bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end ? border : 'none';
-        const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start ? border : 'none';
-        const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end ? border : 'none';
+        const topBorder = bounds.topEdge && top === bounds.top && rawTop >= yp.start;
+        const bottomBorder = bounds.bottomEdge && bottom === bounds.bottom && rawBottom <= yp.end;
+        const leftBorder = bounds.leftEdge && left === bounds.left && rawLeft >= xp.start;
+        const rightBorder = bounds.rightEdge && right === bounds.right && rawRight <= xp.end;
         const screenLeft = this.screenX(x, fragmentW);
         const physicalLeftBorder = this.isRtl ? rightBorder : leftBorder;
         const physicalRightBorder = this.isRtl ? leftBorder : rightBorder;
@@ -2559,14 +2743,16 @@ class XlsxViewerEngine implements ZoomableViewer {
         fillSubpaths.push(
           `M${screenLeft} ${y}h${fragmentW}v${fragmentH}h${-fragmentW}Z`,
         );
-        const box = this.hostDocument.createElement('div');
-        box.setAttribute('data-xlsx-selection-fragment', area.kind);
-        box.style.cssText =
-          `position:absolute;left:${screenLeft}px;top:${y}px;width:${fragmentW}px;height:${fragmentH}px;` +
-          `box-sizing:border-box;border-top:${topBorder};border-right:${physicalRightBorder};` +
-          `border-bottom:${bottomBorder};border-left:${physicalLeftBorder};` +
-          'background:transparent;pointer-events:none;';
-        borderFragments.push(box);
+        overlayRects.push({
+          x: screenLeft,
+          y,
+          width: fragmentW,
+          height: fragmentH,
+          top: topBorder,
+          right: physicalRightBorder,
+          bottom: bottomBorder,
+          left: physicalLeftBorder,
+        });
       }
     }
 
@@ -2576,13 +2762,87 @@ class XlsxViewerEngine implements ZoomableViewer {
       svg.setAttribute('data-xlsx-selection-fill', '');
       svg.style.cssText =
         'position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none;';
-      const path = this.hostDocument.createElementNS(svgNamespace, 'path');
-      path.setAttribute('d', fillSubpaths.join(''));
-      path.setAttribute('fill', background);
-      svg.appendChild(path);
+      const isMultipleAreaSelection = state.areas.length > 1;
+      const activeRect = this.getCellRect(state.activeCell.row, state.activeCell.col);
+      const maskId = `xlsx-selection-mask-${++selectionMaskSequence}`;
+      const defs = this.hostDocument.createElementNS(svgNamespace, 'defs');
+      const mask = this.hostDocument.createElementNS(svgNamespace, 'mask');
+      mask.setAttribute('id', maskId);
+      mask.setAttribute('maskUnits', 'userSpaceOnUse');
+      mask.setAttribute('x', '0');
+      mask.setAttribute('y', '0');
+      mask.setAttribute('width', String(width));
+      mask.setAttribute('height', String(height));
+      const selectedPath = this.hostDocument.createElementNS(svgNamespace, 'path');
+      selectedPath.setAttribute('d', fillSubpaths.join(''));
+      selectedPath.setAttribute('fill', '#fff');
+      mask.appendChild(selectedPath);
+
+      // Excel leaves ActiveCell unshaded so it remains distinct from the
+      // selected cells. ActiveCell stays at the drag origin; only the Area's
+      // opposite corner changes during extension.
+      if (activeRect) {
+        for (const yp of yPanes) for (const xp of xPanes) {
+          const clippedX = Math.max(activeRect.x, xp.start);
+          const clippedY = Math.max(activeRect.y, yp.start);
+          const clippedX2 = Math.min(activeRect.x + activeRect.w, xp.end);
+          const clippedY2 = Math.min(activeRect.y + activeRect.h, yp.end);
+          if (clippedX2 <= clippedX || clippedY2 <= clippedY) continue;
+          const cutout = this.hostDocument.createElementNS(svgNamespace, 'rect');
+          cutout.setAttribute('data-xlsx-active-cell-cutout', '');
+          cutout.setAttribute('x', String(this.screenX(clippedX, clippedX2 - clippedX)));
+          cutout.setAttribute('y', String(clippedY));
+          cutout.setAttribute('width', String(clippedX2 - clippedX));
+          cutout.setAttribute('height', String(clippedY2 - clippedY));
+          cutout.setAttribute('fill', '#000');
+          mask.appendChild(cutout);
+        }
+      }
+      defs.appendChild(mask);
+      svg.appendChild(defs);
+
+      const fill = this.hostDocument.createElementNS(svgNamespace, 'rect');
+      fill.setAttribute('x', '0');
+      fill.setAttribute('y', '0');
+      fill.setAttribute('width', String(width));
+      fill.setAttribute('height', String(height));
+      fill.setAttribute('fill', background);
+      fill.setAttribute('mask', `url(#${maskId})`);
+      svg.appendChild(fill);
+
+      const boundaryPath = isMultipleAreaSelection ? '' : selectionBoundaryPath(overlayRects);
+      if (boundaryPath) {
+        const boundary = this.hostDocument.createElementNS(svgNamespace, 'path');
+        boundary.setAttribute('data-xlsx-selection-border', '');
+        boundary.setAttribute('d', boundaryPath);
+        boundary.setAttribute('fill', 'none');
+        boundary.setAttribute('stroke', selectionColor);
+        boundary.setAttribute('stroke-width', '2');
+        boundary.setAttribute('stroke-linecap', 'square');
+        boundary.setAttribute('stroke-linejoin', 'miter');
+        svg.appendChild(boundary);
+      }
+      if (activeRect && isMultipleAreaSelection) {
+        for (const yp of yPanes) for (const xp of xPanes) {
+          const clippedX = Math.max(activeRect.x, xp.start);
+          const clippedY = Math.max(activeRect.y, yp.start);
+          const clippedX2 = Math.min(activeRect.x + activeRect.w, xp.end);
+          const clippedY2 = Math.min(activeRect.y + activeRect.h, yp.end);
+          if (clippedX2 <= clippedX || clippedY2 <= clippedY) continue;
+          const focus = this.hostDocument.createElementNS(svgNamespace, 'rect');
+          focus.setAttribute('data-xlsx-active-cell-border', '');
+          focus.setAttribute('x', String(this.screenX(clippedX, clippedX2 - clippedX)));
+          focus.setAttribute('y', String(clippedY));
+          focus.setAttribute('width', String(clippedX2 - clippedX));
+          focus.setAttribute('height', String(clippedY2 - clippedY));
+          focus.setAttribute('fill', 'none');
+          focus.setAttribute('stroke', selectionColor);
+          focus.setAttribute('stroke-width', '1');
+          svg.appendChild(focus);
+        }
+      }
       this.overlayHost.appendSelection(svg as unknown as HTMLElement);
     }
-    for (const fragment of borderFragments) this.overlayHost.appendSelection(fragment);
 
     // List data-validation dropdown arrow (ECMA-376 §18.3.1.33). Excel shows an
     // in-cell dropdown button only while the cell is *selected* and only for
@@ -3153,7 +3413,14 @@ class XlsxViewerEngine implements ZoomableViewer {
     this.overlayHost.hideComment();
   }
 
-  private applyPointerSelection(clientX: number, clientY: number, shiftKey: boolean, pointerId: number, allowDrag: boolean): void {
+  private applyPointerSelection(
+    clientX: number,
+    clientY: number,
+    shiftKey: boolean,
+    additiveKey: boolean,
+    pointerId: number,
+    allowDrag: boolean,
+  ): void {
     const headerHit = this.getHeaderHit(clientX, clientY);
 
     if (headerHit) {
@@ -3165,8 +3432,10 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (shiftKey && this.anchorCell && this.selectionMode === 'rows') {
           this.selectionController.extend({ row: headerHit.row, col: 1 });
         } else {
-          this.selectionController.select({ row: headerHit.row, col: 1 }, 'rows');
-          if (allowDrag) {
+          const selected = additiveKey
+            ? this.selectionController.add({ row: headerHit.row, col: 1 }, 'rows')
+            : (this.selectionController.select({ row: headerHit.row, col: 1 }, 'rows'), true);
+          if (allowDrag && selected) {
             this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
           }
@@ -3175,8 +3444,10 @@ class XlsxViewerEngine implements ZoomableViewer {
         if (shiftKey && this.anchorCell && this.selectionMode === 'cols') {
           this.selectionController.extend({ row: 1, col: headerHit.col });
         } else {
-          this.selectionController.select({ row: 1, col: headerHit.col }, 'cols');
-          if (allowDrag) {
+          const selected = additiveKey
+            ? this.selectionController.add({ row: 1, col: headerHit.col }, 'cols')
+            : (this.selectionController.select({ row: 1, col: headerHit.col }, 'cols'), true);
+          if (allowDrag && selected) {
             this.beginSelectionDrag(pointerId);
             this.scrollHost.setPointerCapture(pointerId);
           }
@@ -3191,12 +3462,15 @@ class XlsxViewerEngine implements ZoomableViewer {
     const cell = this.getCellAt(clientX, clientY);
     if (!cell) return;
 
+    let selected = true;
     if (shiftKey && this.anchorCell && this.selectionMode === 'cells') {
       this.selectionController.extend(cell);
     } else {
-      this.selectionController.select(cell, 'cells');
+      selected = additiveKey
+        ? this.selectionController.add(cell, 'cells')
+        : (this.selectionController.select(cell, 'cells'), true);
     }
-    if (allowDrag) {
+    if (allowDrag && selected) {
       this.beginSelectionDrag(pointerId);
       this.scrollHost.setPointerCapture(pointerId);
     }
@@ -3393,7 +3667,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     } else {
       this.setElementContext(null);
       if (!this.contextMenuTargetIsSelected(event.clientX, event.clientY)) {
-        this.applyPointerSelection(event.clientX, event.clientY, false, -1, false);
+        this.applyPointerSelection(event.clientX, event.clientY, false, false, -1, false);
       }
     }
     const context = this.getSelectionContext();
@@ -3415,11 +3689,6 @@ class XlsxViewerEngine implements ZoomableViewer {
     }
 
     this.surface.on('pointerdown', (e: PointerEvent) => {
-      // focus() is programmatic even though this path originated from a pointer,
-      // so Chromium may otherwise match :focus-visible and draw a full blue
-      // viewport frame on every cell click. Mark that focus origin explicitly;
-      // keyboard Tab focus still receives the accessible focus indicator.
-      this.scrollHost.setAttribute('data-xlsx-pointer-focus', '');
       this.scrollHost.focus?.({ preventScroll: true });
       if (e.button !== 0) return;
       if (this.isSelecting && e.pointerId !== this.selectionPointerId) return;
@@ -3498,7 +3767,13 @@ class XlsxViewerEngine implements ZoomableViewer {
       // Touch / pen: defer selection until pointerup so swipe-to-scroll doesn't change the cell.
       // Mouse: select immediately to preserve drag-to-extend behavior.
       if (e.pointerType !== 'mouse' || inOverlayBand) {
-        this.pendingTap = { x: e.clientX, y: e.clientY, shiftKey: e.shiftKey, pointerId: e.pointerId };
+        this.pendingTap = {
+          x: e.clientX,
+          y: e.clientY,
+          shiftKey: e.shiftKey,
+          additiveKey: e.ctrlKey || e.metaKey,
+          pointerId: e.pointerId,
+        };
         return;
       }
 
@@ -3510,11 +3785,14 @@ class XlsxViewerEngine implements ZoomableViewer {
         ? { x: e.clientX, y: e.clientY, pointerId: e.pointerId, cell: downCell }
         : null;
 
-      this.applyPointerSelection(e.clientX, e.clientY, e.shiftKey, e.pointerId, true);
-    });
-
-    this.surface.on('blur', () => {
-      this.scrollHost.removeAttribute('data-xlsx-pointer-focus');
+      this.applyPointerSelection(
+        e.clientX,
+        e.clientY,
+        e.shiftKey,
+        e.ctrlKey || e.metaKey,
+        e.pointerId,
+        true,
+      );
     });
 
     this.surface.on('pointermove', (e: PointerEvent) => {
@@ -3616,7 +3894,14 @@ class XlsxViewerEngine implements ZoomableViewer {
         const dx = e.clientX - this.pendingTap.x;
         const dy = e.clientY - this.pendingTap.y;
         if (dx * dx + dy * dy <= TAP_SLOP * TAP_SLOP) {
-          this.applyPointerSelection(e.clientX, e.clientY, this.pendingTap.shiftKey, e.pointerId, false);
+          this.applyPointerSelection(
+            e.clientX,
+            e.clientY,
+            this.pendingTap.shiftKey,
+            this.pendingTap.additiveKey,
+            e.pointerId,
+            false,
+          );
           // Touch / pen have no hover, so surface the comment popup on a tap
           // (the active cell after the selection commit). Mouse uses hover.
           if (e.pointerType !== 'mouse' && this.activeCell) {

@@ -37,6 +37,21 @@ export const OUTLINE_LANE_PX = 19;
  *  numbered "1 2 3" buttons that collapse the whole sheet to a level. */
 export const OUTLINE_BUTTON_PX = 12;
 
+/** Gap between adjacent numbered outline-level buttons. The level bank is
+ *  independent from the wider bracket lanes: Excel packs these buttons into a
+ *  compact strip instead of centering them in the 19px rail lanes. */
+export const OUTLINE_BUTTON_GAP_PX = 2;
+
+/** Leading inset of the numbered level-button bank. */
+export const OUTLINE_BUTTON_INSET_PX = 2;
+
+/** Center coordinate of a numbered outline-level button within its bank. */
+export function outlineLevelButtonCenterPx(level: number): number {
+  return OUTLINE_BUTTON_INSET_PX
+    + OUTLINE_BUTTON_PX / 2
+    + (level - 1) * (OUTLINE_BUTTON_PX + OUTLINE_BUTTON_GAP_PX);
+}
+
 /** Extent (px) of the gutter for an axis with `maxLevel` nesting levels, or 0
  *  when the axis has no outlining. The lanes hold the group brackets; one extra
  *  lane holds the numbered level buttons (levels 1..maxLevel+1). */
@@ -79,6 +94,85 @@ export interface OutlineLayout {
   maxLevel: number;
   /** All group brackets, in ascending `(level, start)` order. */
   groups: OutlineGroup[];
+}
+
+/** One canvas segment of an outline bracket. Kept in the pure geometry layer
+ * so the start hook cannot accidentally become a diagonal or migrate to the
+ * summary end when row/column rendering changes. */
+export interface OutlineBracketSegment {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Visible pane rectangle for one outline detail/summary run. Outline gutter
+ * geometry shares the worksheet header + frozen-pane coordinate system, so a
+ * scrolled run must be clipped at the frozen boundary instead of leaking into
+ * the column/row header. Fractions are already resolved to CSS pixels by the
+ * viewer before calling this helper. */
+export function outlinePaneClipRect(
+  axis: OutlineAxis,
+  start: number,
+  end: number,
+  frozenBandCount: number,
+  headerExtentPx: number,
+  frozenExtentPx: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  rtl = false,
+): { x: number; y: number; w: number; h: number } {
+  if (axis === 'row') {
+    const boundary = Math.min(canvasHeight, headerExtentPx + frozenExtentPx);
+    let top = Math.min(canvasHeight, headerExtentPx);
+    let bottom = canvasHeight;
+    if (frozenBandCount > 0 && end <= frozenBandCount) bottom = boundary;
+    else if (frozenBandCount > 0 && start > frozenBandCount) top = boundary;
+    return { x: 0, y: top, w: canvasWidth, h: Math.max(0, bottom - top) };
+  }
+
+  if (!rtl) {
+    const boundary = Math.min(canvasWidth, headerExtentPx + frozenExtentPx);
+    let left = Math.min(canvasWidth, headerExtentPx);
+    let right = canvasWidth;
+    if (frozenBandCount > 0 && end <= frozenBandCount) right = boundary;
+    else if (frozenBandCount > 0 && start > frozenBandCount) left = boundary;
+    return { x: left, y: 0, w: Math.max(0, right - left), h: canvasHeight };
+  }
+
+  const headerLeft = Math.max(0, canvasWidth - headerExtentPx);
+  const boundary = Math.max(0, headerLeft - frozenExtentPx);
+  let left = 0;
+  let right = headerLeft;
+  if (frozenBandCount > 0 && end <= frozenBandCount) left = boundary;
+  else if (frozenBandCount > 0 && start > frozenBandCount) right = boundary;
+  return { x: left, y: 0, w: Math.max(0, right - left), h: canvasHeight };
+}
+
+/** Build the expanded-group bracket. Excel hooks the bracket toward the grid at
+ * the FIRST detail band; the summary band at the opposite end carries the
+ * minus button and therefore has no second hook. `detailStart` is the on-screen
+ * coordinate of the group's first logical detail band (important for RTL
+ * columns), while the long rail spans both detail endpoints. */
+export function outlineBracketSegments(
+  axis: OutlineAxis,
+  laneCenter: number,
+  detailStart: number,
+  detailEnd: number,
+  laneExtent: number,
+): OutlineBracketSegment[] {
+  const low = Math.min(detailStart, detailEnd);
+  const high = Math.max(detailStart, detailEnd);
+  if (axis === 'row') {
+    return [
+      { x1: laneCenter, y1: low, x2: laneCenter, y2: high },
+      { x1: laneCenter, y1: detailStart, x2: laneCenter + laneExtent / 2, y2: detailStart },
+    ];
+  }
+  return [
+    { x1: low, y1: laneCenter, x2: high, y2: laneCenter },
+    { x1: detailStart, y1: laneCenter, x2: detailStart, y2: laneCenter + laneExtent / 2 },
+  ];
 }
 
 /**

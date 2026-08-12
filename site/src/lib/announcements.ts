@@ -28,6 +28,49 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v078-chart-fidelity-and-multi-selection',
+    date: '2026-08-12',
+    label: 'Release note',
+    version: 'v0.78.0',
+    title: 'Better charts and XLSX multi-selection in v0.78.0',
+    summary: 'Charts in DOCX, XLSX and PPTX render more like Office, and XLSX sheets now support selecting multiple separate areas.',
+    audience: 'Users who view charts in Office files or work with interactive worksheets. No application changes are required when upgrading from v0.77.1.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This release improves how charts look across Word, Excel and PowerPoint files and adds multiple-area selection to worksheets.',
+        ],
+        bullets: [
+          'Chart axes, backgrounds, fills, labels, legends and stacked values more closely match Office.',
+          'Waterfall, box-and-whisker, treemap and bubble charts have more accurate layout and styling.',
+          'Hold Ctrl on Windows/Linux or Command on macOS to select multiple worksheet areas.',
+        ],
+      },
+      {
+        title: 'Charts look closer to Office',
+        paragraphs: [
+          'Charts now follow more of the formatting saved by Office, including axis ranges and ticks, chart and plot backgrounds, wrapped category labels, data-label placement, legend keys, pattern fills and percentage stacking.',
+          'Modern chart types also receive substantial visual improvements. Bubble sizes, treemap hierarchy, waterfall styling and box-and-whisker geometry now more closely match their Office appearance.',
+        ],
+      },
+      {
+        title: 'Select multiple worksheet areas',
+        paragraphs: [
+          'Hold Ctrl on Windows/Linux or Command on macOS while dragging to add another cell, row or column area to the selection.',
+          'Each selected area uses the configured selection color, while the active cell remains easy to identify. Adjacent areas no longer create doubled borders.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No migration is required. Existing viewer setup and single-area worksheet selection continue to work as before.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v0771-rendering-fidelity',
     date: '2026-08-11',
     label: 'Release note',

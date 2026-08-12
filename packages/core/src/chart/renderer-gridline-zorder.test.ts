@@ -13,11 +13,12 @@ import { renderChart } from './renderer.js';
 
 // Ordered event recorder: logs each fill()/stroke() with the style in effect at
 // the call, so we can assert the RELATIVE order of gridline strokes vs series
-// fills. A translucent `rgba(...)` fillStyle marks a series area/line fill; a
+// fills. These fixtures have no other path fill, so `fill()` marks a series
+// area fill; a
 // thin hairline strokeStyle (the resolved gridline color, default `#e0e0e0`)
 // marks a gridline. We tag events by role and check the first gridline precedes
 // the first series fill.
-type Ev = { op: 'fill' | 'stroke'; fillStyle: string; strokeStyle: string; lineWidth: number };
+type Ev = { op: 'fill' | 'stroke' | 'text'; fillStyle: string; strokeStyle: string; lineWidth: number; text?: string };
 
 function orderedRecordingCtx(): { ctx: CanvasRenderingContext2D; events: Ev[] } {
   const events: Ev[] = [];
@@ -42,13 +43,15 @@ function orderedRecordingCtx(): { ctx: CanvasRenderingContext2D; events: Ev[] } 
           return () => events.push({ op: 'fill', fillStyle: String(state.fillStyle), strokeStyle: String(state.strokeStyle), lineWidth: Number(state.lineWidth) });
         case 'stroke':
           return () => events.push({ op: 'stroke', fillStyle: String(state.fillStyle), strokeStyle: String(state.strokeStyle), lineWidth: Number(state.lineWidth) });
+        case 'fillText':
+          return (text: string) => events.push({ op: 'text', text, fillStyle: String(state.fillStyle), strokeStyle: String(state.strokeStyle), lineWidth: Number(state.lineWidth) });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
         case 'save': case 'restore': case 'beginPath': case 'closePath':
         case 'moveTo': case 'lineTo': case 'arc': case 'fillRect':
         case 'bezierCurveTo': case 'quadraticCurveTo': case 'rect':
-        case 'strokeRect': case 'clearRect': case 'fillText': case 'strokeText':
+        case 'strokeRect': case 'clearRect': case 'strokeText':
         case 'setLineDash': case 'translate': case 'rotate': case 'scale':
         case 'clip': case 'setTransform': case 'resetTransform': case 'getTransform':
           return () => undefined;
@@ -101,11 +104,11 @@ function baseModel(over: Partial<ChartModel>): ChartModel {
 const RECT: ChartRect = { x: 0, y: 0, w: 640, h: 360 };
 
 // The default value-axis gridline is a thin hairline (`#e0e0e0`, 0.5 px). A
-// series fill for the area family is a translucent `rgba(...)`. These heuristics
-// classify the recorded events by role.
+// series fill for the area family is an authored opaque solid fill. These
+// predicates classify the recorded events by role.
 const isGridlineStroke = (e: Ev): boolean =>
   e.op === 'stroke' && e.lineWidth <= 1 && e.strokeStyle.toLowerCase() === '#e0e0e0';
-const isSeriesFill = (e: Ev): boolean => e.op === 'fill' && /^rgba\(/i.test(e.fillStyle);
+const isSeriesFill = (e: Ev): boolean => e.op === 'fill';
 
 describe('CH — value-axis gridlines paint under the data series', () => {
   it('an area chart strokes its major gridlines BEFORE filling the series area', () => {
@@ -142,6 +145,34 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstSeriesFill).toBeGreaterThanOrEqual(0);
     expect(firstGridline).toBeGreaterThanOrEqual(0);
     expect(firstGridline).toBeLessThan(firstSeriesFill);
+  });
+
+  it('a stacked area/line combo stacks only area series and paints the line as an overlay', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A', 'B', 'C'],
+      series: [
+        series({
+          name: 'Invisible baseline', seriesType: 'area', color: '00000000',
+          lineHidden: true, values: [80, 90, 85],
+        }),
+        series({ name: 'Band', seriesType: 'area', color: '1696D2', values: [10, 12, 11] }),
+        series({
+          name: 'Forecast', seriesType: 'line', color: '000000', lineColor: '000000',
+          showMarker: false, values: [85, 95, 91],
+        }),
+      ],
+    }), RECT, 1);
+
+    const fills = rec.events.filter(event => event.op === 'fill');
+    expect(fills.map(event => event.fillStyle.toLowerCase())).toEqual(['#00000000', '#1696d2']);
+    const lineOverlay = rec.events.find(event =>
+      event.op === 'stroke'
+      && event.strokeStyle.toLowerCase() === '#000000'
+      && event.lineWidth > 1,
+    );
+    expect(lineOverlay).toBeDefined();
   });
 
   it('an area chart honors <c:minorGridlines> with the same count as line, all before the fill', () => {
@@ -196,5 +227,118 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstGridline).toBeGreaterThanOrEqual(0);
     expect(firstSeriesFill).toBeGreaterThanOrEqual(0);
     expect(firstGridline).toBeLessThan(firstSeriesFill);
+  });
+
+  it('a horizontal bar/scatter dot plot paints category gridlines below its markers', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['A', 'B'],
+      catAxisMajorGridlines: true,
+      catAxisGridlineColor: 'D9D9D9',
+      series: [
+        series({ name: 'range anchor', values: [0, 0] }),
+        series({
+          name: 'dot',
+          seriesType: 'scatter',
+          categories: ['2', '4'],
+          values: [1, 2],
+          markerSymbol: 'circle',
+          markerFill: '1696D2',
+        }),
+      ],
+      secondaryCatAxis: {
+        min: 0, max: 5, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+      secondaryValAxis: {
+        min: 0, max: 3, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+    }), RECT, 1);
+
+    const firstGridline = rec.events.findIndex(event =>
+      event.op === 'stroke' && event.strokeStyle.toLowerCase() === '#d9d9d9',
+    );
+    const firstMarker = rec.events.findIndex(event =>
+      event.op === 'fill' && event.fillStyle.toLowerCase() === '#1696d2',
+    );
+    expect(firstGridline).toBeGreaterThanOrEqual(0);
+    expect(firstMarker).toBeGreaterThanOrEqual(0);
+    expect(firstGridline).toBeLessThan(firstMarker);
+  });
+
+  it('paints every scatter error-range series before every marker and data label in a dot plot combo', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'category anchor', values: [0, 0] }),
+        series({
+          name: 'start',
+          seriesType: 'scatter',
+          categories: ['0.2', '0.4'],
+          values: [1, 2],
+          markerSymbol: 'circle',
+          markerFill: 'EC008C',
+          errBars: [{
+            dir: 'x', barType: 'plus', plus: [0.3, 0.3], minus: [null, null],
+            noEndCap: false, color: 'E7E6E6', lineWidthEmu: 85_725,
+          }],
+          seriesDataLabels: {
+            showVal: false, showCatName: true, showSerName: false, showPercent: false,
+            position: 'l', fontColor: 'EC008C',
+          },
+        }),
+        series({
+          name: 'end',
+          seriesType: 'scatter',
+          categories: ['0.5', '0.7'],
+          values: [1, 2],
+          markerSymbol: 'circle',
+          markerFill: '1596D2',
+        }),
+        // This final scatter series authors the full-width horizontal guides.
+        // Per-series painting used to draw these AFTER the preceding series'
+        // markers and labels, visibly crossing through both.
+        series({
+          name: 'guides',
+          seriesType: 'scatter',
+          categories: ['0', '0'],
+          values: [1, 2],
+          markerSymbol: 'none',
+          showMarker: false,
+          errBars: [{
+            dir: 'x', barType: 'plus', plus: [1, 1], minus: [null, null],
+            noEndCap: true, color: 'D9D9D9', lineWidthEmu: 9_525,
+          }],
+        }),
+      ],
+      secondaryCatAxis: {
+        min: 0, max: 1, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+      secondaryValAxis: {
+        min: 0, max: 3, title: null, hidden: true, lineHidden: true, majorTickMark: 'none',
+      },
+    }), RECT, 1);
+
+    let lastGuide = -1;
+    for (let index = rec.events.length - 1; index >= 0; index--) {
+      const event = rec.events[index];
+      if (event.op === 'stroke' && event.strokeStyle.toLowerCase() === '#d9d9d9') {
+        lastGuide = index;
+        break;
+      }
+    }
+    const firstMarker = rec.events.findIndex(event =>
+      event.op === 'fill' && event.fillStyle.toLowerCase() === '#ec008c',
+    );
+    const firstDataLabel = rec.events.findIndex(event =>
+      event.op === 'text' && event.fillStyle.toLowerCase() === '#ec008c',
+    );
+    expect(lastGuide).toBeGreaterThanOrEqual(0);
+    expect(firstMarker).toBeGreaterThanOrEqual(0);
+    expect(firstDataLabel).toBeGreaterThanOrEqual(0);
+    expect(lastGuide).toBeLessThan(firstMarker);
+    expect(lastGuide).toBeLessThan(firstDataLabel);
   });
 });

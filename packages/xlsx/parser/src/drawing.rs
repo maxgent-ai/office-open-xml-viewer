@@ -53,13 +53,17 @@ fn vml_xdr_index(value: i64) -> u32 {
 }
 
 /// ECMA-376 Part 3 §9.3 "given application configuration" for the xlsx parser:
-/// the Microsoft 2010 drawing extensions (a14 — wraps ordinary shapes/charts and
-/// OMML `a14:m` equations) and the 2009/9 spreadsheet extensions (x14 — slicers
-/// and the OLE `objectPr` image preview). Both have real render paths here.
+/// the Microsoft chartEx extension (the 2014 payload namespace and Excel's
+/// 2015/9/8 MCE capability namespace), the 2010 drawing extensions (a14 — wraps
+/// ordinary shapes/charts and OMML `a14:m` equations), and the 2009/9
+/// spreadsheet extensions (x14 — slicers and the OLE `objectPr` image preview).
+/// All have real render paths here.
 pub(crate) fn xlsx_understands_ns(ns: &str) -> bool {
     matches!(
         ns,
-        "http://schemas.microsoft.com/office/drawing/2010/main"
+        "http://schemas.microsoft.com/office/drawing/2014/chartex"
+            | "http://schemas.microsoft.com/office/drawing/2015/9/8/chartex"
+            | "http://schemas.microsoft.com/office/drawing/2010/main"
             | "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
     )
 }
@@ -256,6 +260,11 @@ pub(crate) fn parse_drawing_anchors(
         let mime_type = mime_from_ext(&image_path).to_string();
 
         anchors.push(ImageAnchor {
+            z_order: anchor
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "pic")
+                .map(|n| n.range().start as u64)
+                .unwrap_or(anchor.range().start as u64),
             from_col,
             from_col_off,
             from_row,
@@ -1367,6 +1376,7 @@ pub(crate) fn collect_shapes(
             }
 
             out.push(ShapeInfo {
+                z_order: child.range().start as u64,
                 x: nx,
                 y: ny,
                 w: nw,
@@ -1474,6 +1484,7 @@ pub(crate) fn collect_shapes(
             }
 
             out.push(ShapeInfo {
+                z_order: child.range().start as u64,
                 x: nx,
                 y: ny,
                 w: nw,
@@ -2214,6 +2225,7 @@ pub(crate) fn parse_ole_object_anchors(
         };
 
         anchors.push(ImageAnchor {
+            z_order: ole.range().start as u64,
             from_col: rect.from_col,
             from_col_off: rect.from_col_off,
             from_row: rect.from_row,
@@ -3745,6 +3757,7 @@ mod blip_svg_tests {
     #[test]
     fn image_anchor_serializes_path_refs_not_data_url() {
         let anchor = ImageAnchor {
+            z_order: 42,
             from_col: 1,
             from_col_off: 0,
             from_row: 1,

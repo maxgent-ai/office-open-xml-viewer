@@ -71,14 +71,15 @@ const LEGEND_Y_MIN = 320; // RECT.h = 360; the bottom legend band starts well be
 
 function recordingCtx(): {
   ctx: CanvasRenderingContext2D;
-  keys: Array<'marker' | 'line'>;
+  keys: Array<'marker' | 'line' | 'line-marker'>;
   plotMarkerYs: number[];
 } {
-  const keys: Array<'marker' | 'line'> = [];
+  const keys: Array<'marker' | 'line' | 'line-marker'> = [];
   const plotMarkerYs: number[] = [];
   let pathVerts = 0;
   let lastPathY = 0;   // y of the last moveTo/lineTo/arc vertex (band gating).
-  let pendingKey: 'marker' | 'line' | null = null;
+  let pendingMarker = false;
+  let pendingLine = false;
   const inBand = (): boolean => lastPathY >= LEGEND_Y_MIN;
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
@@ -113,9 +114,9 @@ function recordingCtx(): {
           };
         case 'fill':
           // A marker glyph (arc/diamond/triangle/star) fills a closed path.
-          return () => { if (inBand()) pendingKey = 'marker'; };
+          return () => { if (inBand()) pendingMarker = true; };
         case 'fillRect':
-          return (_x: number, y: number) => { if (y >= LEGEND_Y_MIN) pendingKey = 'marker'; };
+          return (_x: number, y: number) => { if (y >= LEGEND_Y_MIN) pendingMarker = true; };
         case 'stroke':
           return () => {
             if (!inBand()) return;
@@ -124,11 +125,16 @@ function recordingCtx(): {
             // those are handled by 'marker' fills; the only 2-vertex stroke a
             // markers-only legend emits comes from the line swatch itself, so a
             // 2-vertex band stroke unambiguously means a line key here.
-            if (pathVerts === 2) pendingKey = 'line';
+            if (pathVerts === 2) pendingLine = true;
           };
         case 'fillText':
           return (_text: string, _x: number, y: number) => {
-            if (y >= LEGEND_Y_MIN && pendingKey) { keys.push(pendingKey); pendingKey = null; }
+            if (y < LEGEND_Y_MIN) return;
+            if (pendingLine && pendingMarker) keys.push('line-marker');
+            else if (pendingLine) keys.push('line');
+            else if (pendingMarker) keys.push('marker');
+            pendingLine = false;
+            pendingMarker = false;
           };
         case 'createLinearGradient':
         case 'createRadialGradient':
@@ -191,15 +197,14 @@ describe('scatter legend key reflects the plotted mark (#803, §21.2.2.42/.198)'
     expect(rec.keys).toEqual(['marker']);
   });
 
-  it('keeps the LINE key for a line-drawing scatter (lineMarker, series line visible)', () => {
+  it('draws a LINE + MARKER key for a lineMarker scatter', () => {
     const rec = recordingCtx();
     renderChart(
       rec.ctx,
       scatterModel({ scatterStyle: 'lineMarker' }, { lineHidden: null }),
       RECT, 1,
     );
-    expect(rec.keys).toContain('line');
-    expect(rec.keys).not.toContain('marker');
+    expect(rec.keys).toContain('line-marker');
   });
 
   it('keeps the LINE key for a lineNoMarker scatter', () => {
@@ -211,6 +216,24 @@ describe('scatter legend key reflects the plotted mark (#803, §21.2.2.42/.198)'
     );
     expect(rec.keys).toContain('line');
     expect(rec.keys).not.toContain('marker');
+  });
+
+  it('draws a LINE + MARKER key for a marked line chart', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      series: [series({
+        name: 'Debt',
+        color: '1696D2',
+        values: [10, 20],
+        showMarker: true,
+        markerSymbol: 'circle',
+        markerFill: 'FFFFFF',
+        markerLine: '1696D2',
+      })],
+    }), RECT, 1);
+    expect(rec.keys).toContain('line-marker');
   });
 
   it('does not reuse chart-level X values for an explicitly empty later series', () => {

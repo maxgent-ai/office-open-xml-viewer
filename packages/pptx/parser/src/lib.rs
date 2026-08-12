@@ -3827,7 +3827,7 @@ mod tests {
         let mut zip = PptxZip::new(cursor).unwrap();
         let xml = read_zip_str(&mut zip, "ppt/charts/chartEx1.xml").unwrap();
         let theme = HashMap::new();
-        let result = parse_chartex(&xml, None, &theme);
+        let result = parse_chartex(&xml, None, None, &theme, None);
         println!("parse_chartex result: {:?}", result.is_some());
         if let Some(ref c) = result {
             println!("  chart_type: {}", c.chart.chart_type);
@@ -3931,7 +3931,7 @@ mod tests {
 
         if let Ok(chart_xml) = result {
             let theme = HashMap::new();
-            let r = parse_chartex(&chart_xml, None, &theme);
+            let r = parse_chartex(&chart_xml, None, None, &theme, None);
             println!("parse_chartex: {:?}", r.is_some());
         }
     }

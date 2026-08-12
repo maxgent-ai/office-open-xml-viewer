@@ -9,9 +9,9 @@ import {
   applyMutation,
   CommandExecutionError,
 } from '../src/engine/mutation-engine';
-import { RemoveElementMutation } from '../src/mutations/remove-element-mutation';
-import { UpdateTextMutation } from '../src/mutations/update-text-mutation';
-import { UpdateTransformMutation } from '../src/mutations/update-transform-mutation';
+import { RemoveElementMutation } from '../src/mutations/remove-element';
+import { UpdateTextMutation } from '../src/mutations/update-text';
+import { UpdateTransformMutation } from '../src/mutations/update-transform';
 import { deck, shape } from './fixtures/presentation';
 
 describe('mutation engine', () => {

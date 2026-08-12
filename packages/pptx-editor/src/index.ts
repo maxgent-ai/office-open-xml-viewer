@@ -10,35 +10,37 @@ export type {
   MutationCommandContext,
 } from './domain/mutation';
 
-export { AddElementMutation } from './mutations/add-element-mutation';
-export type { AddElementMutationParams } from './mutations/add-element-mutation';
-export { RemoveElementMutation } from './mutations/remove-element-mutation';
-export type { RemoveElementMutationParams } from './mutations/remove-element-mutation';
-export { UpdateTextMutation } from './mutations/update-text-mutation';
+export { AddElementMutation } from './mutations/add-element';
+export type {
+  AddElementMutationJson,
+  AddElementMutationParams,
+} from './mutations/add-element';
+export { RemoveElementMutation } from './mutations/remove-element';
+export type {
+  RemoveElementMutationJson,
+  RemoveElementMutationParams,
+} from './mutations/remove-element';
+export {
+  formatOfficeCliRange,
+  paragraphRunPlainText,
+  runPlainText,
+  UpdateTextMutation,
+} from './mutations/update-text';
 export type {
   TextScope,
   TextSpan,
   TextStyleEdit,
   TextStylePatch,
-  UpdateTextMutationParams,
-} from './mutations/update-text-mutation';
-export {
-  formatOfficeCliRange,
-  paragraphRunPlainText,
-  runPlainText,
-} from './mutations/text-editing';
-export { UpdateTransformMutation } from './mutations/update-transform-mutation';
-export type {
-  UpdateTransformMutationParams,
-} from './mutations/update-transform-mutation';
-export { mutationFromJson } from './mutations/mutation-from-json';
-export type {
-  AddElementMutationJson,
-  MutationJson,
-  RemoveElementMutationJson,
   UpdateTextMutationJson,
+  UpdateTextMutationParams,
+} from './mutations/update-text';
+export { UpdateTransformMutation } from './mutations/update-transform';
+export type {
   UpdateTransformMutationJson,
-} from './mutations/mutation-from-json';
+  UpdateTransformMutationParams,
+} from './mutations/update-transform';
+export { mutationFromJson } from './mutations/mutation-from-json';
+export type { MutationJson } from './mutations/mutation-from-json';
 
 export type { Command, NonEmptyReadonlyArray } from './domain/command';
 

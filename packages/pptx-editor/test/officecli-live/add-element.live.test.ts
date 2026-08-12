@@ -7,8 +7,8 @@ import type { Presentation } from '@maxgent/ooxml/pptx';
 import { getSlideMutationId } from '../../src/adapters/pptx-json-adapter';
 import { ELEMENT_ORIGINS } from '../../src/domain/element-origin';
 import type { ElementRef } from '../../src/domain/mutation';
-import { AddElementMutation } from '../../src/mutations/add-element-mutation';
-import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
+import { AddElementMutation } from '../../src/mutations/add-element';
+import { RemoveElementMutation } from '../../src/mutations/remove-element';
 import { toOfficeCliBatch } from '../../src/transport/officecli/officecli-translator';
 import { shape } from '../fixtures/presentation';
 import {

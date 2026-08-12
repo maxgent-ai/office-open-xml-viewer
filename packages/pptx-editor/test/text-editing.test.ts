@@ -4,7 +4,7 @@ import {
   applyTextStyleEdit,
   resolveInheritedStylePatch,
   runPlainText,
-} from '../src/mutations/text-editing';
+} from '../src/mutations/update-text/text-editing';
 import { shape } from './fixtures/presentation';
 
 describe('text-editing addressing', () => {

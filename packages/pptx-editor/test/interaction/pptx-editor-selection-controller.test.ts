@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
-import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
-import { UpdateTransformMutation } from '../../src/mutations/update-transform-mutation';
+import { RemoveElementMutation } from '../../src/mutations/remove-element';
+import { UpdateTransformMutation } from '../../src/mutations/update-transform';
 import { EDITOR_SELECTION_CHANGE_REASONS } from '../../src/interaction/constants';
 import { PptxEditorSelectionControllerError } from '../../src/interaction/errors';
 import { PptxEditorSelectionController } from '../../src/interaction/pptx-editor-selection-controller';

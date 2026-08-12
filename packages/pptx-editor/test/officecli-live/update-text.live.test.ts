@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { Presentation, ShapeElement } from '@maxgent/ooxml/pptx';
 
-import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
+import { UpdateTextMutation } from '../../src/mutations/update-text';
 import { toOfficeCliBatch } from '../../src/transport/officecli/officecli-translator';
 import {
   addShape,

@@ -8,9 +8,9 @@ import type { ElementRef } from '../../src/domain/mutation';
 import { UndoRedoStackError } from '../../src/history/errors';
 import type { UndoRedoCommandIdFactory } from '../../src/history/types';
 import { UndoRedoStack } from '../../src/history/undo-redo-stack';
-import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
-import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
-import { UpdateTransformMutation } from '../../src/mutations/update-transform-mutation';
+import { RemoveElementMutation } from '../../src/mutations/remove-element';
+import { UpdateTextMutation } from '../../src/mutations/update-text';
+import { UpdateTransformMutation } from '../../src/mutations/update-transform';
 import { PptxEditorStore } from '../../src/store/editor-store';
 import {
   COMMAND_SUBMISSION_STATUSES,

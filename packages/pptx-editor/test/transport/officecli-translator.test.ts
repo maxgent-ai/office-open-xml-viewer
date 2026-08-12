@@ -6,10 +6,10 @@ import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
 import { applyCommand } from '../../src/engine/mutation-engine';
 import { createUndoRedoEntry } from '../../src/history/command-inverter';
-import { AddElementMutation } from '../../src/mutations/add-element-mutation';
-import { RemoveElementMutation } from '../../src/mutations/remove-element-mutation';
-import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
-import { UpdateTransformMutation } from '../../src/mutations/update-transform-mutation';
+import { AddElementMutation } from '../../src/mutations/add-element';
+import { RemoveElementMutation } from '../../src/mutations/remove-element';
+import { UpdateTextMutation } from '../../src/mutations/update-text';
+import { UpdateTransformMutation } from '../../src/mutations/update-transform';
 import {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_VERSION,

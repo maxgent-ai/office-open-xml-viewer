@@ -1,41 +1,28 @@
-import type { SlideElement } from '@maxgent/ooxml/pptx';
-
-import type { ElementRef, ElementTransform, Mutation } from '../domain/mutation';
+import type { Mutation } from '../domain/mutation';
 import { MUTATION_TYPES } from '../domain/mutation-types';
-import { AddElementMutation } from './add-element-mutation';
-import { RemoveElementMutation } from './remove-element-mutation';
+import {
+  AddElementMutation,
+  type AddElementMutationJson,
+} from './add-element';
+import {
+  RemoveElementMutation,
+  type RemoveElementMutationJson,
+} from './remove-element';
 import {
   UpdateTextMutation,
-  type TextStyleEdit,
-  type TextStylePatch,
-} from './update-text-mutation';
-import { UpdateTransformMutation } from './update-transform-mutation';
+  type UpdateTextMutationJson,
+} from './update-text';
+import {
+  UpdateTransformMutation,
+  type UpdateTransformMutationJson,
+} from './update-transform';
 
-export interface AddElementMutationJson {
-  readonly type: typeof MUTATION_TYPES.ADD_ELEMENT;
-  readonly target: ElementRef;
-  readonly element: SlideElement;
-  readonly presentationElementIndex: number;
-}
-
-export interface UpdateTransformMutationJson {
-  readonly type: typeof MUTATION_TYPES.UPDATE_TRANSFORM;
-  readonly target: ElementRef;
-  readonly value: ElementTransform;
-}
-
-export interface UpdateTextMutationJson {
-  readonly type: typeof MUTATION_TYPES.UPDATE_TEXT;
-  readonly target: ElementRef;
-  readonly value?: string;
-  readonly style?: TextStylePatch;
-  readonly edits?: readonly TextStyleEdit[];
-}
-
-export interface RemoveElementMutationJson {
-  readonly type: typeof MUTATION_TYPES.REMOVE_ELEMENT;
-  readonly target: ElementRef;
-}
+export type {
+  AddElementMutationJson,
+  RemoveElementMutationJson,
+  UpdateTextMutationJson,
+  UpdateTransformMutationJson,
+};
 
 export type MutationJson =
   | AddElementMutationJson

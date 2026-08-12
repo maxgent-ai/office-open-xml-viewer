@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
-import { RemoveElementMutation } from '../src/mutations/remove-element-mutation';
-import { UpdateTextMutation } from '../src/mutations/update-text-mutation';
+import { RemoveElementMutation } from '../src/mutations/remove-element';
+import { UpdateTextMutation } from '../src/mutations/update-text';
 import { toOfficeCliBatch } from '../src/transport/officecli/officecli-translator';
 import { deck, shape } from './fixtures/presentation';
 

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
-import { AddElementMutation } from '../src/mutations/add-element-mutation';
+import { AddElementMutation } from '../src/mutations/add-element';
 import type { MutationJson } from '../src/mutations/mutation-from-json';
 import { mutationFromJson } from '../src/mutations/mutation-from-json';
-import { UpdateTextMutation } from '../src/mutations/update-text-mutation';
+import { UpdateTextMutation } from '../src/mutations/update-text';
 import { deck, shape } from './fixtures/presentation';
 
 describe('Mutation classes', () => {

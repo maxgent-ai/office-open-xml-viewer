@@ -5,7 +5,7 @@ import type { Presentation, ShapeElement } from '@maxgent/ooxml/pptx';
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
 import type { ElementRef } from '../../src/domain/mutation';
-import { UpdateTextMutation } from '../../src/mutations/update-text-mutation';
+import { UpdateTextMutation } from '../../src/mutations/update-text';
 import { PptxEditorViewBindingError } from '../../src/rendering/errors';
 import { PptxEditorViewBinding } from '../../src/rendering/pptx-editor-view-binding';
 import type { PptxEditorViewHost } from '../../src/rendering/types';

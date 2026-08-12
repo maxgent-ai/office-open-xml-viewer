@@ -216,6 +216,12 @@ importers:
       '@types/node':
         specifier: ^25.6.0
         version: 25.6.0
+      rolldown-plugin-dts:
+        specifier: ^0.28.0
+        version: 0.28.0(@volar/typescript@2.4.28)(rolldown@1.2.0)(typescript@7.0.2)
+      vite:
+        specifier: ^8.0.8
+        version: 8.0.8(@types/node@25.6.0)(esbuild@0.27.7)
       vitest:
         specifier: ^4.1.4
         version: 4.1.4(@types/node@25.6.0)(@vitest/browser-playwright@4.1.4)(@vitest/coverage-v8@4.1.4)(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7))

@@ -174,9 +174,8 @@ jobs:
           pnpm check:public-type-exports
           pnpm check:public-api:built
 
-      # The editor's publish build uses tsconfig.build.json and its declaration
-      # shim for @maxgent/ooxml/pptx. The ordinary typecheck resolves directly
-      # against PPTX source types, so it cannot detect drift in that shim.
+      # Typecheck resolves the editor against PPTX source types. Build its
+      # Vite library output separately to validate the publish configuration.
       - name: Build pptx-editor publish artifact
         run: pnpm --filter @maxgent/ooxml-pptx-editor build
 

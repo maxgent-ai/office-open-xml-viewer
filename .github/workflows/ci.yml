@@ -174,11 +174,37 @@ jobs:
           pnpm check:public-type-exports
           pnpm check:public-api:built
 
-      # The editor's publish build uses tsconfig.build.json and its declaration
-      # shim for @maxgent/ooxml/pptx. The ordinary typecheck resolves directly
-      # against PPTX source types, so it cannot detect drift in that shim.
-      - name: Build pptx-editor publish artifact
-        run: pnpm --filter @maxgent/ooxml-pptx-editor build
+      # Exercise the same package metadata injection, declaration build, pack,
+      # peer resolution, installation, and runtime import used by the release.
+      # The ordinary typecheck resolves against source types and cannot detect
+      # build-shim or packed-manifest drift.
+      - name: Pack and smoke test pptx-editor publish artifact
+        run: |
+          SMOKE_VERSION="$(node -p "require('./package.json').version + '-maxgent.0'")"
+          PACK_DIR="$RUNNER_TEMP/maxgent-packages"
+          SMOKE_DIR="$RUNNER_TEMP/maxgent-editor-smoke"
+
+          npm pkg set "name=@maxgent/ooxml" "version=$SMOKE_VERSION"
+          pnpm --filter @maxgent/ooxml-pptx-editor exec npm version "$SMOKE_VERSION" --no-git-tag-version
+          pnpm --filter @maxgent/ooxml-pptx-editor exec npm pkg set "peerDependencies.@maxgent/ooxml=$SMOKE_VERSION"
+          pnpm --filter @maxgent/ooxml-pptx-editor build
+
+          mkdir -p "$PACK_DIR" "$SMOKE_DIR"
+          npm pack --pack-destination "$PACK_DIR"
+          pnpm --filter @maxgent/ooxml-pptx-editor pack --pack-destination "$PACK_DIR"
+
+          MAIN_TARBALL=$(ls -1 "$PACK_DIR"/maxgent-ooxml-[0-9]*.tgz | head -n 1)
+          EDITOR_TARBALL=$(ls -1 "$PACK_DIR"/maxgent-ooxml-pptx-editor-*.tgz | head -n 1)
+          cd "$SMOKE_DIR"
+          npm init -y
+          npm install "$MAIN_TARBALL" "$EDITOR_TARBALL"
+          node --input-type=module -e "
+            const e = await import('@maxgent/ooxml-pptx-editor');
+            if (!e.PptxEditorSession || !e.PptxEditorViewBinding) {
+              throw new Error('pptx-editor exports missing');
+            }
+            console.log('Maxgent pptx-editor package smoke test passed');
+          "
 
   # Rendering smoke: boots Storybook, drives the Layouts stories in a real
   # Chrome, and asserts every canvas receives ink. The only CI job that

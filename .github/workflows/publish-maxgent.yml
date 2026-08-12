@@ -129,17 +129,19 @@ jobs:
         run: |
           pnpm --filter @maxgent/ooxml-pptx-editor build
           pnpm --filter @maxgent/ooxml-pptx-editor exec npm version "$RELEASE_VERSION" --no-git-tag-version
-          pnpm --filter @maxgent/ooxml-pptx-editor pack
+          pnpm --filter @maxgent/ooxml-pptx-editor exec npm pkg set "peerDependencies.@maxgent/ooxml=$RELEASE_VERSION"
+          pnpm --filter @maxgent/ooxml-pptx-editor pack --pack-destination "$GITHUB_WORKSPACE"
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
 
       - name: Smoke test pptx-editor tarball
         run: |
-          EDITOR_TARBALL=$(ls -1 packages/pptx-editor/maxgent-ooxml-pptx-editor-*.tgz | head -n 1)
+          MAIN_TARBALL=$(ls -1 "$GITHUB_WORKSPACE"/maxgent-ooxml-[0-9]*.tgz | head -n 1)
+          EDITOR_TARBALL=$(ls -1 "$GITHUB_WORKSPACE"/maxgent-ooxml-pptx-editor-*.tgz | head -n 1)
           mkdir -p /tmp/maxgent-editor-smoke
           cd /tmp/maxgent-editor-smoke
           npm init -y
-          npm install "$GITHUB_WORKSPACE"/maxgent-ooxml-*.tgz "$GITHUB_WORKSPACE/$EDITOR_TARBALL"
+          npm install "$MAIN_TARBALL" "$EDITOR_TARBALL"
           node --input-type=module -e "
             const e = await import('@maxgent/ooxml-pptx-editor');
             if (!e.PptxEditorSession || !e.PptxEditorViewBinding) {
@@ -154,7 +156,6 @@ jobs:
           name: maxgent-ooxml-${{ steps.version.outputs.release_version }}
           path: |
             maxgent-ooxml-*.tgz
-            packages/pptx-editor/maxgent-ooxml-pptx-editor-*.tgz
           if-no-files-found: error
 
       - name: Publish to npm

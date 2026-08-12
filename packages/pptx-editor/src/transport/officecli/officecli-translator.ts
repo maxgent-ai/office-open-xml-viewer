@@ -1,12 +1,12 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command, NonEmptyReadonlyArray } from '../../domain/command.js';
-import type { Mutation } from '../../domain/mutation.js';
+import type { Command, NonEmptyReadonlyArray } from '../../domain/command';
+import type { Mutation } from '../../domain/mutation';
 import {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_VERSION,
-} from './constants.js';
-import type { OfficeCliBatch, OfficeCliCommand } from './types.js';
+} from './constants';
+import type { OfficeCliBatch, OfficeCliCommand } from './types';
 
 /**
  * 将一个用户 Command 转成原子的 native `officecli batch` 命令数组。

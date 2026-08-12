@@ -5,6 +5,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "declaration": true,
+    "emitDeclarationOnly": true,
     "types": [],
     "paths": {
       "@maxgent/ooxml/pptx": ["./shims/maxgent-ooxml-pptx.d.ts"]

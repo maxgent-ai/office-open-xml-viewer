@@ -1,12 +1,12 @@
-import type { ElementRef } from '../domain/mutation.js';
-import type { PptxEditorSessionChange } from '../session/types.js';
-import { EDITOR_SELECTION_CHANGE_REASONS } from './constants.js';
-import { PptxEditorSelectionControllerError } from './errors.js';
+import type { ElementRef } from '../domain/mutation';
+import type { PptxEditorSessionChange } from '../session/types';
+import { EDITOR_SELECTION_CHANGE_REASONS } from './constants';
+import { PptxEditorSelectionControllerError } from './errors';
 import {
   clientPointToSlidePoint,
   hitTestSlideShape,
   resolveShapeSelection,
-} from './hit-test.js';
+} from './hit-test';
 import type {
   PptxEditorSelectionChange,
   PptxEditorSelectionControllerOptions,
@@ -14,7 +14,7 @@ import type {
   PptxEditorSelectionListenerErrorHandler,
   PptxEditorSelectionSnapshot,
   PptxEditorShapeSelection,
-} from './types.js';
+} from './types';
 
 const DEFAULT_HIT_SLOP_PX = 4;
 

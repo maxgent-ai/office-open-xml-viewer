@@ -1,5 +1,5 @@
-export type { UpdateTransformMutationJson } from './interface.js';
+export type { UpdateTransformMutationJson } from './interface';
 export {
   UpdateTransformMutation,
   type UpdateTransformMutationParams,
-} from './update-transform-mutation.js';
+} from './update-transform-mutation';

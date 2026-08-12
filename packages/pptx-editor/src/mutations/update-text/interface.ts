@@ -1,6 +1,6 @@
-import type { ElementRef } from '../../domain/mutation.js';
-import { MUTATION_TYPES } from '../../domain/mutation-types.js';
-import type { TextStyleEdit, TextStylePatch } from './text-editing.js';
+import type { ElementRef } from '../../domain/mutation';
+import { MUTATION_TYPES } from '../../domain/mutation-types';
+import type { TextStyleEdit, TextStylePatch } from './text-editing';
 
 export interface UpdateTextMutationJson {
   readonly type: typeof MUTATION_TYPES.UPDATE_TEXT;

@@ -1,16 +1,16 @@
-export type { UpdateTextMutationJson } from './interface.js';
+export type { UpdateTextMutationJson } from './interface';
 export {
   formatOfficeCliRange,
   paragraphRunPlainText,
   runPlainText,
-} from './text-editing.js';
+} from './text-editing';
 export type {
   TextScope,
   TextSpan,
   TextStyleEdit,
   TextStylePatch,
-} from './text-editing.js';
+} from './text-editing';
 export {
   UpdateTextMutation,
   type UpdateTextMutationParams,
-} from './update-text-mutation.js';
+} from './update-text-mutation';

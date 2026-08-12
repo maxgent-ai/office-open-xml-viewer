@@ -5,12 +5,12 @@ import {
   getSlideMutationId,
   resolveElementRef,
   type ResolvedElementRef,
-} from '../adapters/pptx-json-adapter.js';
-import { ELEMENT_ORIGINS } from '../domain/element-origin.js';
-import type { Mutation, MutationCommandContext } from '../domain/mutation.js';
-import { MutationExecutionError } from '../engine/errors.js';
-import { OfficeCliTranslatorError } from '../transport/officecli/errors.js';
-import type { OfficeCliProps } from '../transport/officecli/types.js';
+} from '../adapters/pptx-json-adapter';
+import { ELEMENT_ORIGINS } from '../domain/element-origin';
+import type { Mutation, MutationCommandContext } from '../domain/mutation';
+import { MutationExecutionError } from '../engine/errors';
+import { OfficeCliTranslatorError } from '../transport/officecli/errors';
+import type { OfficeCliProps } from '../transport/officecli/types';
 
 export type ResolvedMutationTarget = ResolvedElementRef;
 

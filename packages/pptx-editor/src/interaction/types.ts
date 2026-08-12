@@ -1,8 +1,8 @@
 import type { ShapeElement } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef } from '../domain/mutation.js';
-import type { PptxEditorSession } from '../session/pptx-editor-session.js';
-import type { EDITOR_SELECTION_CHANGE_REASONS } from './constants.js';
+import type { ElementRef } from '../domain/mutation';
+import type { PptxEditorSession } from '../session/pptx-editor-session';
+import type { EDITOR_SELECTION_CHANGE_REASONS } from './constants';
 
 export interface ClientPoint {
   readonly clientX: number;

@@ -3,19 +3,19 @@ import type { Presentation, ShapeElement, TextBody } from '@maxgent/ooxml/pptx';
 import {
   replaceResolvedElement,
   replaceTextBodyPlainText,
-} from '../../adapters/pptx-json-adapter.js';
-import type { NonEmptyReadonlyArray } from '../../domain/command.js';
-import { ELEMENT_ORIGINS } from '../../domain/element-origin.js';
+} from '../../adapters/pptx-json-adapter';
+import type { NonEmptyReadonlyArray } from '../../domain/command';
+import { ELEMENT_ORIGINS } from '../../domain/element-origin';
 import {
   Mutation,
   type ElementRef,
   type MutationCommandContext,
-} from '../../domain/mutation.js';
-import { MUTATION_TYPES } from '../../domain/mutation-types.js';
-import { textNotEditable } from '../../engine/mutation-engine-utils.js';
-import type { MutationExecutionResult } from '../../engine/types.js';
-import { OFFICECLI_COMMAND_TYPES } from '../../transport/officecli/constants.js';
-import type { OfficeCliCommand } from '../../transport/officecli/types.js';
+} from '../../domain/mutation';
+import { MUTATION_TYPES } from '../../domain/mutation-types';
+import { textNotEditable } from '../../engine/mutation-engine-utils';
+import type { MutationExecutionResult } from '../../engine/types';
+import { OFFICECLI_COMMAND_TYPES } from '../../transport/officecli/constants';
+import type { OfficeCliCommand } from '../../transport/officecli/types';
 import {
   freezeProps,
   freezeTarget,
@@ -24,7 +24,7 @@ import {
   resolveMutationTarget,
   resolveStableParagraphPath,
   resolveStableShapePath,
-} from '../mutation-utils.js';
+} from '../mutation-utils';
 import {
   applyTextStyleEdit,
   applyTextStylePatch,
@@ -40,14 +40,14 @@ import {
   materializeTextStyleEditForOfficeCli,
   type TextStyleEdit,
   type TextStylePatch,
-} from './text-editing.js';
+} from './text-editing';
 
 export type {
   TextSpan,
   TextScope,
   TextStyleEdit,
   TextStylePatch,
-} from './text-editing.js';
+} from './text-editing';
 
 export interface UpdateTextMutationParams {
   readonly target: ElementRef;

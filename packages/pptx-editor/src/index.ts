@@ -1,31 +1,31 @@
-export { MUTATION_TYPES } from './domain/mutation-types.js';
-export type { MutationType } from './domain/mutation-types.js';
-export { ELEMENT_ORIGINS } from './domain/element-origin.js';
-export type { ElementOrigin } from './domain/element-origin.js';
+export { MUTATION_TYPES } from './domain/mutation-types';
+export type { MutationType } from './domain/mutation-types';
+export { ELEMENT_ORIGINS } from './domain/element-origin';
+export type { ElementOrigin } from './domain/element-origin';
 
-export { Mutation } from './domain/mutation.js';
+export { Mutation } from './domain/mutation';
 export type {
   ElementRef,
   ElementTransform,
   MutationCommandContext,
-} from './domain/mutation.js';
+} from './domain/mutation';
 
-export { AddElementMutation } from './mutations/add-element/index.js';
+export { AddElementMutation } from './mutations/add-element';
 export type {
   AddElementMutationJson,
   AddElementMutationParams,
-} from './mutations/add-element/index.js';
-export { RemoveElementMutation } from './mutations/remove-element/index.js';
+} from './mutations/add-element';
+export { RemoveElementMutation } from './mutations/remove-element';
 export type {
   RemoveElementMutationJson,
   RemoveElementMutationParams,
-} from './mutations/remove-element/index.js';
+} from './mutations/remove-element';
 export {
   formatOfficeCliRange,
   paragraphRunPlainText,
   runPlainText,
   UpdateTextMutation,
-} from './mutations/update-text/index.js';
+} from './mutations/update-text';
 export type {
   TextScope,
   TextSpan,
@@ -33,16 +33,16 @@ export type {
   TextStylePatch,
   UpdateTextMutationJson,
   UpdateTextMutationParams,
-} from './mutations/update-text/index.js';
-export { UpdateTransformMutation } from './mutations/update-transform/index.js';
+} from './mutations/update-text';
+export { UpdateTransformMutation } from './mutations/update-transform';
 export type {
   UpdateTransformMutationJson,
   UpdateTransformMutationParams,
-} from './mutations/update-transform/index.js';
-export { mutationFromJson } from './mutations/mutation-from-json.js';
-export type { MutationJson } from './mutations/mutation-from-json.js';
+} from './mutations/update-transform';
+export { mutationFromJson } from './mutations/mutation-from-json';
+export type { MutationJson } from './mutations/mutation-from-json';
 
-export type { Command, NonEmptyReadonlyArray } from './domain/command.js';
+export type { Command, NonEmptyReadonlyArray } from './domain/command';
 
 export {
   POSITIONAL_ELEMENT_ID_PREFIX,
@@ -51,52 +51,52 @@ export {
   getElementMutationId,
   getSlideMutationId,
   isSlideRegionInsertIndex,
-} from './adapters/pptx-json-adapter.js';
-export type { ResolvedElementRef } from './adapters/pptx-json-adapter.js';
+} from './adapters/pptx-json-adapter';
+export type { ResolvedElementRef } from './adapters/pptx-json-adapter';
 
 export {
   CommandExecutionError,
   MutationExecutionError,
   applyCommand,
   applyMutation,
-} from './engine/mutation-engine.js';
+} from './engine/mutation-engine';
 export type {
   CommandExecutionResult,
   MutationExecutionErrorCode,
   MutationExecutionResult,
-} from './engine/mutation-engine.js';
+} from './engine/mutation-engine';
 
-export { PptxEditorStore } from './store/editor-store.js';
-export { EditorStoreError } from './store/errors.js';
-export type { EditorStoreErrorCode } from './store/errors.js';
-export { EDITOR_STORE_CHANGE_REASONS } from './store/types.js';
+export { PptxEditorStore } from './store/editor-store';
+export { EditorStoreError } from './store/errors';
+export type { EditorStoreErrorCode } from './store/errors';
+export { EDITOR_STORE_CHANGE_REASONS } from './store/types';
 export type {
   EditorStoreChange,
   EditorStoreChangeReason,
   EditorStoreListener,
   EditorStoreSnapshot,
-} from './store/types.js';
+} from './store/types';
 export {
   EDITOR_SYNC_STATUSES,
   READY_EDITOR_SYNC_STATE,
-} from './store/sync-state.js';
+} from './store/sync-state';
 export type {
   EditorSyncState,
   HaltedEditorSyncState,
   ReadyEditorSyncState,
-} from './store/sync-state.js';
+} from './store/sync-state';
 
 export {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_COMMAND_TYPES,
   OFFICECLI_ELEMENT_TYPES,
   OFFICECLI_VERSION,
-} from './transport/officecli/constants.js';
-export { OfficeCliTranslatorError } from './transport/officecli/errors.js';
+} from './transport/officecli/constants';
+export { OfficeCliTranslatorError } from './transport/officecli/errors';
 export type {
   OfficeCliTranslatorErrorCode,
-} from './transport/officecli/errors.js';
-export { toOfficeCliBatch } from './transport/officecli/officecli-translator.js';
+} from './transport/officecli/errors';
+export { toOfficeCliBatch } from './transport/officecli/officecli-translator';
 export type {
   OfficeCliAddCommand,
   OfficeCliBatch,
@@ -105,29 +105,29 @@ export type {
   OfficeCliProps,
   OfficeCliRemoveCommand,
   OfficeCliSetCommand,
-} from './transport/officecli/types.js';
+} from './transport/officecli/types';
 
-export { UNDO_REDO_DIRECTIONS } from './history/constants.js';
-export { UndoRedoStackError } from './history/errors.js';
-export type { UndoRedoStackErrorCode } from './history/errors.js';
-export { UndoRedoStack } from './history/undo-redo-stack.js';
+export { UNDO_REDO_DIRECTIONS } from './history/constants';
+export { UndoRedoStackError } from './history/errors';
+export type { UndoRedoStackErrorCode } from './history/errors';
+export { UndoRedoStack } from './history/undo-redo-stack';
 export type {
   UndoRedoCommandIdContext,
   UndoRedoCommandIdFactory,
   UndoRedoDirection,
   UndoRedoStackListener,
   UndoRedoStackSnapshot,
-} from './history/types.js';
+} from './history/types';
 
 export {
   COMMAND_SUBMISSION_STATUSES,
   OFFICECLI_BATCH_SEND_STATUSES,
-} from './submission/constants.js';
-export { CommandSubmitterError } from './submission/errors.js';
+} from './submission/constants';
+export { CommandSubmitterError } from './submission/errors';
 export type {
   CommandSubmitterErrorCode,
-} from './submission/errors.js';
-export { SerialOfficeCliSubmitter } from './submission/serial-officecli-submitter.js';
+} from './submission/errors';
+export { SerialOfficeCliSubmitter } from './submission/serial-officecli-submitter';
 export type {
   CommandSubmission,
   CommandSubmissionResult,
@@ -141,12 +141,12 @@ export type {
   RejectedOfficeCliBatchSendResult,
   RejectedCommandSubmissionResult,
   UnknownOfficeCliBatchSendResult,
-} from './submission/types.js';
+} from './submission/types';
 
-export { EDITOR_SESSION_CHANGE_REASONS } from './session/constants.js';
-export { PptxEditorSessionError } from './session/errors.js';
-export type { PptxEditorSessionErrorCode } from './session/errors.js';
-export { PptxEditorSession } from './session/pptx-editor-session.js';
+export { EDITOR_SESSION_CHANGE_REASONS } from './session/constants';
+export { PptxEditorSessionError } from './session/errors';
+export type { PptxEditorSessionErrorCode } from './session/errors';
+export { PptxEditorSession } from './session/pptx-editor-session';
 export type {
   PptxEditorSessionChange,
   PptxEditorSessionChangeReason,
@@ -155,35 +155,35 @@ export type {
   PptxEditorSessionOptions,
   PptxEditorSessionSnapshot,
   PptxEditorSessionSubmission,
-} from './session/types.js';
+} from './session/types';
 
-export { PptxEditorViewBindingError } from './rendering/errors.js';
+export { PptxEditorViewBindingError } from './rendering/errors';
 export type {
   PptxEditorViewBindingErrorCode,
-} from './rendering/errors.js';
-export { PptxEditorViewBinding } from './rendering/pptx-editor-view-binding.js';
-export { PptxEditorViewerHost } from './rendering/pptx-editor-viewer-host.js';
+} from './rendering/errors';
+export { PptxEditorViewBinding } from './rendering/pptx-editor-view-binding';
+export { PptxEditorViewerHost } from './rendering/pptx-editor-viewer-host';
 export type {
   PptxEditorBorrowedViewer,
   PptxEditorLoadedPresentation,
-} from './rendering/pptx-editor-viewer-host.js';
+} from './rendering/pptx-editor-viewer-host';
 export type {
   PptxEditorViewBindingOptions,
   PptxEditorViewErrorHandler,
   PptxEditorViewHost,
-} from './rendering/types.js';
+} from './rendering/types';
 
-export { EDITOR_SELECTION_CHANGE_REASONS } from './interaction/constants.js';
-export { PptxEditorSelectionControllerError } from './interaction/errors.js';
+export { EDITOR_SELECTION_CHANGE_REASONS } from './interaction/constants';
+export { PptxEditorSelectionControllerError } from './interaction/errors';
 export type {
   PptxEditorSelectionControllerErrorCode,
-} from './interaction/errors.js';
+} from './interaction/errors';
 export {
   clientPointToSlidePoint,
   hitTestSlideShape,
   resolveShapeSelection,
-} from './interaction/hit-test.js';
-export { PptxEditorSelectionController } from './interaction/pptx-editor-selection-controller.js';
+} from './interaction/hit-test';
+export { PptxEditorSelectionController } from './interaction/pptx-editor-selection-controller';
 export type {
   ClientPoint,
   PptxEditorInteractionHost,
@@ -196,4 +196,4 @@ export type {
   PptxEditorShapeSelection,
   ShapeHitTestOptions,
   SlidePoint,
-} from './interaction/types.js';
+} from './interaction/types';

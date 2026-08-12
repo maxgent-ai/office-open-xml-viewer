@@ -9,8 +9,8 @@ import type {
   TextRunData,
 } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef } from '../domain/mutation.js';
-import { ELEMENT_ORIGINS } from '../domain/element-origin.js';
+import type { ElementRef } from '../domain/mutation';
+import { ELEMENT_ORIGINS } from '../domain/element-origin';
 
 export const POSITIONAL_ELEMENT_ID_PREFIX = 'index:';
 

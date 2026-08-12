@@ -1,21 +1,21 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command } from '../domain/command.js';
-import type { PptxEditorStore } from '../store/editor-store.js';
-import type { EditorStoreChange } from '../store/types.js';
-import { toOfficeCliBatch } from '../transport/officecli/officecli-translator.js';
-import type { OfficeCliBatch } from '../transport/officecli/types.js';
+import type { Command } from '../domain/command';
+import type { PptxEditorStore } from '../store/editor-store';
+import type { EditorStoreChange } from '../store/types';
+import { toOfficeCliBatch } from '../transport/officecli/officecli-translator';
+import type { OfficeCliBatch } from '../transport/officecli/types';
 import {
   COMMAND_SUBMISSION_STATUSES,
   OFFICECLI_BATCH_SEND_STATUSES,
-} from './constants.js';
-import { CommandSubmitterError } from './errors.js';
+} from './constants';
+import { CommandSubmitterError } from './errors';
 import type {
   CommandSubmission,
   CommandSubmissionResult,
   OfficeCliBatchSendResult,
   OfficeCliBatchSender,
-} from './types.js';
+} from './types';
 
 interface QueuedSubmission {
   readonly commandId: string;

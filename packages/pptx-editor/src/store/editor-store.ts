@@ -1,21 +1,21 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import { getSlideMutationId } from '../adapters/pptx-json-adapter.js';
-import type { Command } from '../domain/command.js';
-import { applyCommand } from '../engine/mutation-engine.js';
-import { EditorStoreError } from './errors.js';
-import { collectCommandInvalidations } from './editor-store-utils.js';
+import { getSlideMutationId } from '../adapters/pptx-json-adapter';
+import type { Command } from '../domain/command';
+import { applyCommand } from '../engine/mutation-engine';
+import { EditorStoreError } from './errors';
+import { collectCommandInvalidations } from './editor-store-utils';
 import {
   EDITOR_SYNC_STATUSES,
   READY_EDITOR_SYNC_STATE,
   type EditorSyncState,
-} from './sync-state.js';
+} from './sync-state';
 import {
   EDITOR_STORE_CHANGE_REASONS,
   type EditorStoreChange,
   type EditorStoreListener,
   type EditorStoreSnapshot,
-} from './types.js';
+} from './types';
 
 export class PptxEditorStore {
   readonly #listeners = new Set<EditorStoreListener>();

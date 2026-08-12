@@ -143,6 +143,19 @@ jobs:
           npm init -y
           npm install "$MAIN_TARBALL" "$EDITOR_TARBALL"
           node --input-type=module -e "
+            const { readFile } = await import('node:fs/promises');
+            const map = JSON.parse(await readFile(
+              'node_modules/@maxgent/ooxml-pptx-editor/dist/index.js.map',
+              'utf8',
+            ));
+            if (
+              map.sourcesContent?.length !== map.sources?.length ||
+              !map.sources.some((source) =>
+                source.endsWith('/src/session/pptx-editor-session.ts'),
+              )
+            ) {
+              throw new Error('pptx-editor source map missing TypeScript sources');
+            }
             const e = await import('@maxgent/ooxml-pptx-editor');
             if (!e.PptxEditorSession || !e.PptxEditorViewBinding) {
               throw new Error('pptx-editor exports missing');

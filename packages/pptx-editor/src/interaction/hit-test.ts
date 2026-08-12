@@ -4,15 +4,15 @@ import {
   createElementRef,
   getElementSources,
   resolveElementRef,
-} from '../adapters/pptx-json-adapter.js';
-import { ELEMENT_ORIGINS } from '../domain/element-origin.js';
-import type { ElementRef } from '../domain/mutation.js';
+} from '../adapters/pptx-json-adapter';
+import { ELEMENT_ORIGINS } from '../domain/element-origin';
+import type { ElementRef } from '../domain/mutation';
 import type {
   ClientPoint,
   PptxEditorShapeSelection,
   ShapeHitTestOptions,
   SlidePoint,
-} from './types.js';
+} from './types';
 
 export function clientPointToSlidePoint(
   canvas: Pick<HTMLCanvasElement, 'getBoundingClientRect'>,

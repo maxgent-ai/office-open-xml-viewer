@@ -1,4 +1,4 @@
-import type { Mutation } from '../../domain/mutation.js';
+import type { Mutation } from '../../domain/mutation';
 
 export type OfficeCliTranslatorErrorCode =
   | 'target.slideNotFound'

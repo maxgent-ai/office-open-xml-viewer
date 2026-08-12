@@ -1,21 +1,21 @@
-import type { Mutation } from '../domain/mutation.js';
-import { MUTATION_TYPES } from '../domain/mutation-types.js';
+import type { Mutation } from '../domain/mutation';
+import { MUTATION_TYPES } from '../domain/mutation-types';
 import {
   AddElementMutation,
   type AddElementMutationJson,
-} from './add-element/index.js';
+} from './add-element';
 import {
   RemoveElementMutation,
   type RemoveElementMutationJson,
-} from './remove-element/index.js';
+} from './remove-element';
 import {
   UpdateTextMutation,
   type UpdateTextMutationJson,
-} from './update-text/index.js';
+} from './update-text';
 import {
   UpdateTransformMutation,
   type UpdateTransformMutationJson,
-} from './update-transform/index.js';
+} from './update-transform';
 
 export type {
   AddElementMutationJson,

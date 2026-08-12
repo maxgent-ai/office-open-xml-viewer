@@ -1,6 +1,6 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef } from '../domain/mutation.js';
+import type { ElementRef } from '../domain/mutation';
 
 export interface MutationExecutionResult {
   readonly presentation: Presentation;

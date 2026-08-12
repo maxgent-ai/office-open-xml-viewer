@@ -125,15 +125,42 @@ jobs:
           npm install "$GITHUB_WORKSPACE"/maxgent-ooxml-*.tgz
           node --input-type=module -e "const d = await import('@maxgent/ooxml/docx'); if (!d.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@maxgent/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@maxgent/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); console.log('Maxgent package smoke test passed');"
 
+      - name: Build and pack pptx-editor
+        run: |
+          pnpm --filter @maxgent/ooxml-pptx-editor build
+          pnpm --filter @maxgent/ooxml-pptx-editor exec npm version "$RELEASE_VERSION" --no-git-tag-version
+          pnpm --filter @maxgent/ooxml-pptx-editor pack
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
+
+      - name: Smoke test pptx-editor tarball
+        run: |
+          EDITOR_TARBALL=$(ls -1 packages/pptx-editor/maxgent-ooxml-pptx-editor-*.tgz | head -n 1)
+          mkdir -p /tmp/maxgent-editor-smoke
+          cd /tmp/maxgent-editor-smoke
+          npm init -y
+          npm install "$GITHUB_WORKSPACE"/maxgent-ooxml-*.tgz "$GITHUB_WORKSPACE/$EDITOR_TARBALL"
+          node --input-type=module -e "
+            const e = await import('@maxgent/ooxml-pptx-editor');
+            if (!e.PptxEditorSession || !e.PptxEditorViewBinding) {
+              throw new Error('pptx-editor exports missing');
+            }
+            console.log('Maxgent pptx-editor smoke test passed');
+          "
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
           name: maxgent-ooxml-${{ steps.version.outputs.release_version }}
-          path: maxgent-ooxml-*.tgz
+          path: |
+            maxgent-ooxml-*.tgz
+            packages/pptx-editor/maxgent-ooxml-pptx-editor-*.tgz
           if-no-files-found: error
 
       - name: Publish to npm
         if: github.event_name == 'push'
-        run: pnpm publish --no-git-checks --tag latest
+        run: |
+          pnpm publish --no-git-checks --tag latest
+          pnpm --filter @maxgent/ooxml-pptx-editor publish --no-git-checks --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

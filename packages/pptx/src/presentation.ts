@@ -1,4 +1,4 @@
-import type { DimOptions } from './types';
+import type { DimOptions, Slide } from './types';
 import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import {
@@ -784,6 +784,33 @@ export class PptxPresentation {
       });
     } catch (error) {
       this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /**
+   * Replace in-memory slide models used by subsequent main-thread renders.
+   *
+   * Intended for editor optimistic updates: keep the loaded package's media /
+   * theme / fetch plumbing, but paint the caller's mutated {@link Slide}
+   * snapshots. Unavailable in `mode: 'worker'` — the worker owns its own slide
+   * projections and cannot accept main-thread model patches.
+   *
+   * @internal Used by `@maxgent/ooxml-pptx-editor`; not part of the public
+   * `@maxgent/ooxml/pptx` API.
+   */
+  replaceSlides(
+    replacements: ReadonlyArray<{ readonly index: number; readonly slide: Slide }>,
+  ): void {
+    this._assertResourceHealthy();
+    if (this._mode === 'worker') {
+      throw new Error(
+        "replaceSlides is unavailable in mode: 'worker'; use mode: 'main' for editor-driven slide updates",
+      );
+    }
+    const repository = this._slides;
+    if (!repository) throw new Error('Presentation not loaded');
+    for (const { index, slide } of replacements) {
+      repository.replace(index, slide);
     }
   }
 

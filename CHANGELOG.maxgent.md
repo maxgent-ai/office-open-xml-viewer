@@ -18,6 +18,19 @@ release history remains in [`CHANGELOG.md`](CHANGELOG.md).
 - Do not create a GitHub Release for a Maxgent npm-only tag. The upstream MCP
   binary workflow listens to every created GitHub Release regardless of tag.
 
+## 0.75.0-maxgent.2 — 2026-08-04
+
+- Add `@maxgent/ooxml-pptx-editor` as a separate package for optimistic PPTX
+  mutations, serial OfficeCLI submission, confirmed-command undo/redo, sync
+  recovery, and viewer binding.
+- Expose PPTX element provenance through `Slide.elementSources` so editor
+  consumers can distinguish direct slide shapes from inherited layout and
+  master decorations.
+- Add main-thread slide replacement hooks to `PptxPresentation` and
+  `PptxViewer` for repainting optimistic editor state on the existing canvas.
+- Extend the Maxgent release checks to build, pack, and smoke-test the PPTX
+  editor package alongside the viewer package.
+
 ## 0.75.0-maxgent.1 — 2026-08-03
 
 Based on upstream [`v0.75.0`](https://github.com/yukiyokotani/office-open-xml-viewer/releases/tag/v0.75.0),

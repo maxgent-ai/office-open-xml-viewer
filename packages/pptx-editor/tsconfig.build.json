@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "declaration": true,
+    "types": [],
+    "paths": {
+      "@maxgent/ooxml/pptx": ["./shims/maxgent-ooxml-pptx.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "shims/**/*.d.ts"]
+}

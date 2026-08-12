@@ -563,6 +563,7 @@ fn finalize_projected_sheet(
             None
         }
     };
+    let defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     let charts = load_sheet_charts(
         archive,
         sheet_path,
@@ -572,6 +573,7 @@ fn finalize_projected_sheet(
             sheets: &shared.sheets,
             workbook_rels: &rels_doc,
             shared_strings: shared.shared_strings.as_ref(),
+            defined_names: &defined_names,
             session: &mut reference_session,
         }),
         theme_colors,
@@ -579,6 +581,7 @@ fn finalize_projected_sheet(
             shared.theme_fonts.0.as_deref(),
             shared.theme_fonts.1.as_deref(),
         ),
+        Some(shared.theme_format_scheme.as_ref()),
     );
     ws.charts = charts;
     ws.shape_groups = load_sheet_shape_groups(
@@ -590,7 +593,7 @@ fn finalize_projected_sheet(
     ws.hyperlinks = load_hyperlinks(archive, sheet_path, hyperlink_rids);
     ws.comments = load_sheet_comments(archive, sheet_path);
     ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
-    ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
+    ws.defined_names = defined_names;
     ws.tables = load_sheet_tables(archive, sheet_path, theme_colors);
     ws.slicers = load_sheet_slicers(archive, sheet_path, theme_colors);
     (ws.pivot_tables, ws.pivot_diagnostics) = load_sheet_pivots(archive, sheet_path);

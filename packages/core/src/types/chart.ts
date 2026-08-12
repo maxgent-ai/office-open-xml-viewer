@@ -6,10 +6,23 @@
 // truth for chart rendering across PPTX / XLSX (and future DrawingML charts
 // in DOCX).
 
+import type { GradientFill, PatternFill, SolidFill } from './common';
+
 export interface ChartSeries {
   name: string;
   /** Hex without '#'. null = fall back to palette. */
   color: string | null;
+  /**
+   * `<c:ser><c:spPr><a:pattFill>` DrawingML pattern fill. When present it
+   * paints the series marks and matching legend key; `color` remains the
+   * solid/fallback series colour.
+   */
+  fillPattern?: PatternFill | null;
+  /** `<c:ser><c:spPr><a:ln><a:solidFill>` series outline/stroke color (hex,
+   * no '#'). For bar/column charts this is the border around each bar. */
+  lineColor?: string | null;
+  /** Explicit series outline/stroke width from `<a:ln@w>` (EMU). */
+  lineWidthEmu?: number | null;
   /** Numeric values; null = missing data point. */
   values: (number | null)[];
   /**
@@ -65,6 +78,10 @@ export interface ChartSeries {
    * chart-level `<c:dLbls><c:numFmt>` is not set. null = no series-level code.
    */
   valFormatCode?: string | null;
+  /** Number format from the series category/X cache. */
+  catFormatCode?: string | null;
+  /** Per-point category/X formats from `<c:pt@formatCode>`. */
+  catFormatCodes?: (string | null)[] | null;
   /**
    * `<c:marker><c:symbol val>` (ECMA-376 §21.2.2.32) — point marker shape.
    * One of "circle"|"square"|"diamond"|"triangle"|"x"|"plus"|"star"|
@@ -77,7 +94,8 @@ export interface ChartSeries {
    * points. null = renderer default (~5 pt).
    */
   markerSize?: number | null;
-  /** `<c:marker><c:spPr><a:solidFill>` resolved hex (no `#`). */
+  /** `<c:marker><c:spPr>` fill as 6/8-digit resolved hex (no `#`); transparent
+   *  `00000000` represents an explicit `<a:noFill/>`. */
   markerFill?: string | null;
   /** `<c:marker><c:spPr><a:ln><a:solidFill>` resolved hex (no `#`). */
   markerLine?: string | null;
@@ -253,6 +271,8 @@ export interface ChartSeriesDataLabels {
   position?: string;
   fontColor?: string;
   formatCode?: string;
+  /** `<c:dLbls><c:separator>` (§21.2.2.170), including authored line breaks. */
+  separator?: string;
   /** Series-level bold default for data labels. */
   fontBold?: boolean;
   /** Series-level font size for data labels (OOXML hundredths of a point). */
@@ -301,14 +321,43 @@ export type ChartType =
   | 'scatter' | 'bubble' | 'radar' | 'waterfall'
   | 'stock'
   // chartEx (MS 2014 chartex ext) layouts CH15 renders.
-  | 'boxWhisker' | 'sunburst'
+  | 'boxWhisker' | 'sunburst' | 'treemap'
   | string;
+
+/** Effective paint for one role in an Office 2013+ Chart Style part. */
+export interface ChartExElementStyle {
+  /**
+   * Per-color-style-index DrawingML fill recipes after `phClr` substitution.
+   * Uses the same shared fill model as DrawingML shapes and cell-adjacent
+   * drawing content; image fills are not emitted by the Chart Style parser.
+   */
+  fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
+  /** Per-color-style-index fills after `phClr` substitution and transforms. */
+  fillColors?: Array<string | null> | null;
+  fillHidden?: boolean | null;
+  /** Per-color-style-index outlines after `phClr` substitution/transforms. */
+  lineColors?: Array<string | null> | null;
+  lineWidthEmu?: number | null;
+  lineHidden?: boolean | null;
+  lineDash?: string | null;
+  lineCap?: string | null;
+  lineJoin?: string | null;
+  /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
+  fillColorIndex?: number | null;
+  /** Fixed zero-based Chart Colors index; absent means relative (`auto`). */
+  lineColorIndex?: number | null;
+}
 
 export interface ChartModel {
   chartType: ChartType;
   title: string | null;
+  /** Direct chart title element exists; an empty title still reserves its band. */
+  titlePresent?: boolean;
   categories: string[];
   series: ChartSeries[];
+  /** Text boxes in the Chart Drawing part referenced by `<c:userShapes>`.
+   *  Coordinates are chart-space fractions from `<cdr:relSizeAnchor>`. */
+  chartTextBoxes?: ChartTextBox[] | null;
   /**
    * §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column chart:
    * color each data point (bar) from the theme/palette sequence and list one
@@ -371,6 +420,8 @@ export interface ChartModel {
   valAxisFontColor?: string | null;
   /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
   dataLabelFontSizeHpt: number | null;
+  /** `<c:dLbls|cx:dataLabels>` text bold flag. null = chart-style default. */
+  dataLabelFontBold?: boolean | null;
   /** Waterfall subtotal category indices. */
   subtotalIndices: number[];
   /** `<c:legend><c:manualLayout>` absolute placement fractions of the chart
@@ -507,9 +558,9 @@ export interface ChartModel {
   titleManualLayout?: ChartManualLayout | null;
   /**
    * `<c:plotArea><c:layout><c:manualLayout>` absolute placement for the
-   * plot area. `layoutTarget="inner"` (default) describes the inner plot
-   * rect (no axes / labels); `outer` describes the outer rect (axes
-   * included).
+   * plot area. `layoutTarget="inner"` describes the inner plot rect (no axes /
+   * labels); `outer` describes the outer rect (axes included) and is the schema
+   * default when the element or its `val` is omitted.
    */
   plotAreaManualLayout?: ChartManualLayout | null;
   /**
@@ -522,6 +573,22 @@ export interface ChartModel {
    * for `chartType === "scatter"`; bubble ignores it.
    */
   scatterStyle?: string | null;
+  /**
+   * `<c:bubbleChart><c:bubbleScale val>` (ECMA-376 §21.2.2.21), 0–300 percent
+   * of the default bubble diameter. null/undefined uses the schema default 100.
+   */
+  bubbleScale?: number | null;
+  /**
+   * `<c:bubbleChart><c:sizeRepresents val>` (ECMA-376 §21.2.2.193,
+   * ST_SizeRepresents §21.2.3.43). `area` (the schema default) makes bubble
+   * area proportional to the value; `w` makes the radius proportional.
+   */
+  bubbleSizeRepresents?: 'area' | 'w' | null;
+  /**
+   * `<c:bubbleChart><c:showNegBubbles val>` (ECMA-376 §21.2.2.179).
+   * Absent means false; a present CT_Boolean without `val` means true.
+   */
+  showNegativeBubbles?: boolean | null;
   /**
    * `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). Controls
    * whether radar series render as line + markers ("standard" / "marker")
@@ -536,6 +603,9 @@ export interface ChartModel {
    * value axis (the common case). See {@link SecondaryValueAxis}.
    */
   secondaryValAxis?: SecondaryValueAxis | null;
+  /** Numeric horizontal `<c:valAx>` used by a scatter/bubble group overlaid
+   *  on a non-scatter primary chart. */
+  secondaryCatAxis?: SecondaryValueAxis | null;
   /**
    * `<c:date1904>` (ECMA-376 §21.2.2.38). When true the chart's serial
    * date-times resolve against the 1904 date system (base 1904-01-01) instead
@@ -653,6 +723,10 @@ export interface ChartModel {
    * labels. null/undefined ⇒ nextTo (byte-stable).
    */
   catAxisTickLabelPos?: string | null;
+  /** `<c:catAx><c:tickLblSkip val>` category-label interval. */
+  catAxisTickLabelSkip?: number | null;
+  /** `<c:catAx><c:tickMarkSkip val>` category-tick interval. */
+  catAxisTickMarkSkip?: number | null;
   /** `<c:valAx><c:tickLblPos val>` (§21.2.2.207). "none" hides value tick labels. */
   valAxisTickLabelPos?: string | null;
   /**
@@ -680,7 +754,7 @@ export interface ChartModel {
    * NOT yet draw them (tracked follow-up). null/undefined when absent.
    */
   stockUpDownBars?: boolean | null;
-  // ── chartEx box-and-whisker / sunburst (CH15, MS 2014 chartex ext) ─────────
+  // ── chartEx structured layouts (CH15, MS 2014 chartex ext) ────────────────
   /**
    * Structured box-and-whisker data (`chartType === 'boxWhisker'`). Present
    * ONLY for boxWhisker charts; null/absent otherwise so the flat
@@ -694,12 +768,55 @@ export interface ChartModel {
    */
   chartexSunburst?: ChartexSunburst | null;
   /**
+   * Structured treemap hierarchy (`chartType === 'treemap'`). Present ONLY
+   * for treemap charts; null/absent otherwise.
+   */
+  chartexTreemap?: ChartexTreemap | null;
+  /**
    * Theme accent palette (`accent1..6`, hex without '#') for chartEx charts
-   * that color by branch/series index (boxWhisker series, sunburst branches).
+   * that color by branch/series index (boxWhisker series and
+   * sunburst/treemap branches).
    * null/absent when the resolver supplies no default palette (pptx); the
    * renderer then falls back to its own `CHART_PALETTE`.
    */
   chartexAccents?: string[] | null;
+  /** Total color set resolved from the linked Chart Colors part. */
+  chartexColorPalette?: Array<string | null> | null;
+  /** `<cs:colorStyle meth>`; unknown methods have `cycle` semantics. */
+  chartexColorStyleMethod?: string | null;
+  /** Effective `<cs:dataPoint>` style. */
+  chartexDataPointStyle?: ChartExElementStyle | null;
+  /** Effective `<cs:dataPointLine>` style for whiskers/median/connectors. */
+  chartexDataPointLineStyle?: ChartExElementStyle | null;
+  /** Effective `<cs:dataPointMarker>` style for raw/outlier/mean markers. */
+  chartexDataPointMarkerStyle?: ChartExElementStyle | null;
+}
+
+/** A formatted DrawingML run inside a chart-relative text box. */
+export interface ChartTextRun {
+  text: string;
+  fontSizeHpt?: number | null;
+  bold?: boolean | null;
+  color?: string | null;
+  fontFace?: string | null;
+}
+
+/** One DrawingML paragraph inside a chart-relative text box. */
+export interface ChartTextParagraph {
+  runs: ChartTextRun[];
+  align?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
+}
+
+/** A text shape anchored to a fractional rectangle in the chart space. */
+export interface ChartTextBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  paragraphs: ChartTextParagraph[];
+  verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
+  /** DrawingML `<a:bodyPr wrap>`; absent uses the application-default square wrap. */
+  wrap?: 'none' | 'square' | string | null;
 }
 
 /**
@@ -711,9 +828,13 @@ export interface ChartModel {
 export interface ChartexBoxSeries {
   /** Series display name (`<cx:tx><cx:v>`). */
   name: string;
-  /** Fill (hex, no '#') — theme accent cycled by series index. null = fall
-   *  back to the renderer palette. */
+  /** Explicit `<cx:series><cx:spPr>` fill (hex, no '#'). null = resolve the
+   *  Chart Style / linked Chart Colors, then fall back to the theme palette. */
   color?: string | null;
+  /** Explicit `<cx:series><cx:spPr><a:ln>` outline color (hex, no '#'). */
+  lineColor?: string | null;
+  /** Explicit series outline width from `<a:ln@w>` (EMU). */
+  lineWidthEmu?: number | null;
   /** Raw sample values grouped by category (outer = category index parallel to
    *  {@link ChartexBoxWhisker.categories}, inner = the points in that group). */
   valuesByCategory: number[][];
@@ -724,9 +845,7 @@ export interface ChartexBoxSeries {
   /** `<cx:visibility outliers>` — draw outlier points. */
   showOutliers: boolean;
   /** `<cx:visibility nonoutliers>` — draw the interior (non-outlier) sample
-   *  points as jittered dots on top of the box. Flag parsed; interior-dot
-   *  rendering is pending a fixture that enables it (every sample-24 series
-   *  ships `nonoutliers="0"`, so there is nothing to verify against yet). */
+   *  points as dots on top of the box. */
   showNonoutliers: boolean;
   /** `<cx:statistics quartileMethod>` — "exclusive" (Excel default) | "inclusive". */
   quartileMethod: string;
@@ -754,6 +873,13 @@ export interface ChartexSunburstRow {
 /** A chartEx sunburst: the flat rows the renderer folds into a ring tree. */
 export interface ChartexSunburst {
   rows: ChartexSunburstRow[];
+}
+
+/** A chartEx treemap hierarchy and its requested parent-label presentation. */
+export interface ChartexTreemap {
+  rows: ChartexSunburstRow[];
+  /** `<cx:parentLabelLayout val>`: `banner`, `overlapping`, or `none`. */
+  parentLabelLayout?: string | null;
 }
 
 /**
@@ -806,8 +932,10 @@ export interface SecondaryValueAxis {
  * fraction offset from default position.
  */
 export interface ChartManualLayout {
-  xMode: string;
-  yMode: string;
+  xMode?: string;
+  yMode?: string;
+  wMode?: string;
+  hMode?: string;
   layoutTarget?: string;
   x: number;
   y: number;
@@ -818,8 +946,10 @@ export interface ChartManualLayout {
 export interface LegendManualLayout {
   /** `"edge"` = `x`/`y` are fractions from top-left of chart space;
    *  `"factor"` = fractions offset from the default position. */
-  xMode: string;
-  yMode: string;
+  xMode?: string;
+  yMode?: string;
+  wMode?: string;
+  hMode?: string;
   /** Fractions of chart space width/height. */
   x: number;
   y: number;

@@ -1,7 +1,7 @@
 import type { Worksheet } from '../types.js';
 import type { XlsxWorkbook } from '../workbook.js';
 import type { CellAddress, XlsxSelectionArea, XlsxSelectionState } from '../selection.js';
-import { normalizeSelectionState } from '../selection.js';
+import { areaContainsCell, MAX_SELECTION_AREAS, normalizeSelectionState } from '../selection.js';
 import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
@@ -288,6 +288,55 @@ export class SelectionController {
     });
   }
 
+  /** Add one Ctrl/Cmd-started selection area and make it active. A coordinate
+   * already covered by a same-kind area activates that area without duplicating
+   * it. Subsequent drag/Shift extension changes only a newly appended range.
+   * Returns whether pointer drag may extend a new area. */
+  add(cell: CellAddress, mode: SheetSelectionMode = 'cells'): boolean {
+    if (!this.state) {
+      this.select(cell, mode);
+      return true;
+    }
+    const existingIndex = this.state.areas.findIndex((area) => {
+      const sameMode = mode === 'rows'
+        ? area.kind === 'rows'
+        : mode === 'cols'
+          ? area.kind === 'columns'
+          : mode === 'all'
+            ? area.kind === 'sheet'
+            : area.kind === 'cells';
+      return sameMode && areaContainsCell(area, cell);
+    });
+    if (existingIndex >= 0) {
+      // A selected coordinate is already represented by this area. Keep one
+      // canonical area instead of appending duplicates until the resource cap;
+      // make it active so activeCell/activeAreaIndex still follow the pointer.
+      this.state = normalizeSelectionState({
+        ...this.state,
+        activeAreaIndex: existingIndex,
+        activeCell: cell,
+        extensionAnchor: cell,
+      });
+      return false;
+    }
+    if (this.state.areas.length >= MAX_SELECTION_AREAS) return false;
+    const area: XlsxSelectionArea = mode === 'rows'
+      ? { kind: 'rows', firstRow: cell.row, lastRow: cell.row }
+      : mode === 'cols'
+        ? { kind: 'columns', firstColumn: cell.col, lastColumn: cell.col }
+        : mode === 'all'
+          ? { kind: 'sheet' }
+          : { kind: 'cells', top: cell.row, left: cell.col, bottom: cell.row, right: cell.col };
+    const areas = [...this.state.areas, area];
+    this.state = normalizeSelectionState({
+      areas,
+      activeAreaIndex: areas.length - 1,
+      activeCell: cell,
+      extensionAnchor: cell,
+    });
+    return true;
+  }
+
   extend(cell: CellAddress): void {
     if (!this.state) { this.select(cell); return; }
     const anchor = this.state.extensionAnchor;
@@ -306,14 +355,11 @@ export class SelectionController {
             };
     const areas = [...this.state.areas];
     areas[this.state.activeAreaIndex] = extended;
-    const activeCell = area.kind === 'rows'
-      ? { row: cell.row, col: this.state.activeCell.col }
-      : area.kind === 'columns'
-        ? { row: this.state.activeCell.row, col: cell.col }
-        : area.kind === 'sheet'
-          ? this.state.activeCell
-          : cell;
-    this.state = normalizeSelectionState({ ...this.state, areas, activeCell });
+    // Excel keeps the ActiveCell at the drag/Shift origin while only the Area
+    // extent follows the pointer. The opposite corner is already encoded by
+    // the normalized Area, so moving activeCell here would conflate focus with
+    // the range endpoint and paint the focus border on the wrong cell.
+    this.state = normalizeSelectionState({ ...this.state, areas });
   }
 
   snapshot(): XlsxSelectionState | null {

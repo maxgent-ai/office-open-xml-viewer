@@ -126,7 +126,7 @@ function makeRecordingCtx(): RecordingCtx & CanvasRenderingContext2D {
         case 'setLineDash':
           return (d: number[]) => {
             state.__dash = d;
-            log.push(`setLineDash ${d.join(',')}`);
+            log.push(d.length ? `setLineDash ${d.join(',')}` : 'setLineDash');
           };
         case 'translate':
           return (x: number, y: number) => log.push(`translate ${r(x)},${r(y)}`);

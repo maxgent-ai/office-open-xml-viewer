@@ -608,6 +608,9 @@ pub struct DefinedName {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartAnchor {
+    /// Document-order byte position of the `<xdr:graphicFrame>` in its drawing
+    /// part. DrawingML uses element order as z-order (§20.5.2.35).
+    pub z_order: u64,
     pub from_col: u32,
     pub from_col_off: i64,
     pub from_row: u32,
@@ -656,6 +659,8 @@ pub struct ShapeAnchor {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeInfo {
+    /// Document-order byte position of this leaf in the drawing part.
+    pub z_order: u64,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -1090,6 +1095,8 @@ pub struct SlicerElementStyle {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnchor {
+    /// Document-order byte position of the `<xdr:pic>` in its drawing part.
+    pub z_order: u64,
     pub from_col: u32,
     pub from_col_off: i64,
     pub from_row: u32,

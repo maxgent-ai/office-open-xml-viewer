@@ -63,7 +63,15 @@ function series(over: Partial<ChartSeries>): ChartSeries {
   return { name: '', color: null, values: [], ...over };
 }
 
-interface TextCall { text: string; fillStyle: string; x: number; y: number }
+interface TextCall {
+  text: string;
+  fillStyle: string;
+  x: number;
+  y: number;
+  font: string;
+  textAlign: CanvasTextAlign;
+  textBaseline: CanvasTextBaseline;
+}
 
 /** Recording context that captures: (a) `stroke()` calls that follow a
  *  `moveTo`/`lineTo` path with ≥2 vertices AND whose strokeStyle is `matchColor`
@@ -77,11 +85,14 @@ function recordingCtx(matchColor = '#4f81bd'): {
   counts: { polylineStrokes: number };
   texts: TextCall[];
   arcs: ArcCall[];
+  markerStrokes: Array<{ color: string; width: number }>;
 } {
   const texts: TextCall[] = [];
   const arcs: ArcCall[] = [];
+  const markerStrokes: Array<{ color: string; width: number }> = [];
   const counts = { polylineStrokes: 0 };
   let pathVerts = 0;
+  let pathHasArc = false;
   const state: Record<string, unknown> = {
     font: '10px sans-serif',
     fillStyle: '#000',
@@ -109,13 +120,16 @@ function recordingCtx(matchColor = '#4f81bd'): {
             return { width: w };
           };
         case 'beginPath':
-          return () => { pathVerts = 0; };
+          return () => { pathVerts = 0; pathHasArc = false; };
         // Pie/doughnut slices are drawn with `arc(cx, cy, r, …)`; recording the
         // centre + radius lets a test recover the exact pie geometry the renderer
         // used (the outermost rim is the max-radius arc) without duplicating the
         // frame math.
         case 'arc':
-          return (cx: number, cy: number, r: number) => { arcs.push({ cx, cy, r }); };
+          return (cx: number, cy: number, r: number) => {
+            pathHasArc = true;
+            arcs.push({ cx, cy, r });
+          };
         case 'moveTo':
         case 'lineTo':
         case 'bezierCurveTo':
@@ -126,13 +140,24 @@ function recordingCtx(matchColor = '#4f81bd'): {
         // is a connecting line (gridlines/axes stroke grey → excluded).
         case 'stroke':
           return () => {
+            if (pathHasArc) {
+              markerStrokes.push({ color: String(state.strokeStyle), width: Number(state.lineWidth) });
+            }
             if (pathVerts >= 2 && String(state.strokeStyle).toLowerCase() === matchColor.toLowerCase()) {
               counts.polylineStrokes += 1;
             }
           };
         case 'fillText':
           return (text: string, x: number, y: number) =>
-            texts.push({ text, fillStyle: String(state.fillStyle), x, y });
+            texts.push({
+              text,
+              fillStyle: String(state.fillStyle),
+              x,
+              y,
+              font: String(state.font),
+              textAlign: state.textAlign as CanvasTextAlign,
+              textBaseline: state.textBaseline as CanvasTextBaseline,
+            });
         case 'createLinearGradient':
         case 'createRadialGradient':
           return () => ({ addColorStop() {} });
@@ -147,6 +172,7 @@ function recordingCtx(matchColor = '#4f81bd'): {
     counts,
     texts,
     arcs,
+    markerStrokes,
   };
 }
 
@@ -188,6 +214,26 @@ describe('scatter series-line noFill overrides scatterStyle (§21.2.2.198)', () 
     const rec = recordingCtx();
     renderChart(rec.ctx, scatterModel(null), RECT, 1);
     expect(rec.counts.polylineStrokes).toBeGreaterThan(0);
+  });
+});
+
+describe('bubble series shape outline (§21.2.2.198)', () => {
+  it('uses the series spPr line color and authored EMU width', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['1'],
+      series: [series({
+        color: '4F81BD66',
+        lineColor: '4F81BD',
+        lineWidthEmu: 9525,
+        categories: ['1'],
+        values: [2],
+        bubbleSizes: [100],
+      })],
+    }), RECT, 4 / 3);
+
+    expect(rec.markerStrokes).toContainEqual({ color: '#4F81BD', width: 1 });
   });
 });
 
@@ -329,5 +375,98 @@ describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)'
       const ratio = Math.hypot(l.x - cx, l.y - cy) / outerR;
       expect(ratio).toBeGreaterThan(1.0);
     }
+  });
+
+  it('keeps the complete outEnd text boxes outside the pie, not only their centers', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Long right-side category', 'Long left-side category'],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.3, y: 0.15, w: 0.4, h: 0.7,
+      },
+      series: [series({
+        name: 'Share',
+        values: [50, 50],
+        categories: ['Long right-side category', 'Long left-side category'],
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', separator: '\n', fontSizeHpt: 1200,
+        },
+      })],
+    }), RECT, 1);
+
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const categoryLabels = rec.texts.filter(t => t.text.startsWith('Long '));
+    expect(categoryLabels).toHaveLength(2);
+    for (const label of categoryLabels) {
+      const fontPx = Number(/(\d+(?:\.\d+)?)px/.exec(label.font)?.[1] ?? 12);
+      const halfW = label.text.length * fontPx * 0.6 / 2;
+      const halfH = fontPx / 2;
+      const dx = Math.max(Math.abs(label.x - cx) - halfW, 0);
+      const dy = Math.max(Math.abs(label.y - cy) - halfH, 0);
+      expect(Math.hypot(dx, dy)).toBeGreaterThanOrEqual(outerR);
+    }
+  });
+
+  it('draws authored leader lines when outEnd labels are displaced to avoid overlap', () => {
+    const rec = recordingCtx('#777777');
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['First narrow slice', 'Second narrow slice', 'Remainder'],
+      series: [series({
+        name: 'Share',
+        values: [1, 1, 98],
+        categories: ['First narrow slice', 'Second narrow slice', 'Remainder'],
+        seriesDataLabels: {
+          showVal: false, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', fontSizeHpt: 1200,
+          showLeaderLines: true, leaderLineColor: '777777', leaderLineWidthEmu: 12700,
+        },
+      })],
+    }), RECT, 1);
+
+    expect(rec.counts.polylineStrokes).toBeGreaterThan(0);
+  });
+});
+
+describe('authored radial and bubble geometry', () => {
+  it('honors plotArea manualLayout for pie center and radius', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['A', 'B'],
+      series: [series({ values: [60, 40] })],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.1, y: 0.2, w: 0.4, h: 0.6,
+      },
+    }), RECT, 1);
+
+    const geometry = pieGeometry(rec.arcs);
+    expect(geometry.cx).toBeCloseTo(RECT.w * 0.3);
+    expect(geometry.cy).toBeCloseTo(RECT.h * 0.5);
+    expect(geometry.outerR).toBeCloseTo(Math.min(RECT.w * 0.4, RECT.h * 0.6) * 0.42);
+  });
+
+  it('applies Office\'s bounded bubbleScale curve to the shorter plot dimension', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0'],
+      series: [series({ values: [0], bubbleSizes: [100] })],
+      bubbleScale: 40,
+      catAxisMin: -1,
+      catAxisMax: 1,
+      valMin: -1,
+      valMax: 1,
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.25, y: 0.25, w: 0.5, h: 0.5,
+      },
+    }), RECT, 1);
+
+    const marker = rec.arcs.at(-1);
+    // Plot is 320×180. Excel's curve is shortSide*scale/(300+scale), so an
+    // authored bubbleScale=40 gives a 21.176px diameter / 10.588px radius.
+    expect(marker?.r).toBeCloseTo(10.588235, 4);
   });
 });

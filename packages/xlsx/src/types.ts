@@ -440,6 +440,8 @@ export type {
   LegendManualLayout,
 } from '@silurus/ooxml-core';
 export interface ChartAnchor {
+  /** DrawingML document order; higher values paint above lower values. */
+  zOrder?: number;
   fromCol: number; fromColOff: number;
   fromRow: number; fromRowOff: number;
   toCol: number;   toColOff: number;
@@ -469,6 +471,8 @@ export interface ShapeAnchor {
 }
 
 export interface ShapeInfo {
+  /** DrawingML document order of this leaf within the drawing part. */
+  zOrder?: number;
   /** Normalized [0,1] position/size relative to the anchor rect. */
   x: number; y: number; w: number; h: number;
   /** Rotation in degrees, clockwise. */
@@ -662,6 +666,8 @@ export type PathCmd =
  * 914400 EMU = 1 inch, 9525 EMU = 1 px @ 96 DPI.
  */
 export interface ImageAnchor {
+  /** DrawingML document order; higher values paint above lower values. */
+  zOrder?: number;
   fromCol: number;
   fromColOff: number;
   fromRow: number;

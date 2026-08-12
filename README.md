@@ -79,7 +79,7 @@ pnpm add @silurus/ooxml
 > **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
 > Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
 > asset, so the reported figure is much larger than any single app build. For
-> v0.77.1, the complete npm package is approximately 11.3 MB unpacked (3.8 MB
+> v0.78.0, the complete npm package is approximately 12.0 MB unpacked (4.0 MB
 > as the downloaded tarball), while a format-specific application graph is
 > approximately:
 >
@@ -654,7 +654,7 @@ file without uploading it.
 | | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table) | ✅ |
 | **Interaction** | Cell selection (single / range / row / column / all / multiple areas; `setSelection('B2:D5')` or canonical structured state) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
-| | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
+| | Shift+click to extend, Ctrl/⌘+drag to add another area, Ctrl+C to copy as TSV | ✅ |
 | | Text selection inside cells (transparent overlay) | ✅ |
 | | `onSelectionStateChange`, bounded range/element `getSelectionContext()` / `copySelection()`, chart/picture/shape selection, `getCellAt(x, y)` | ✅ |
 | | Zoom slider (Excel-style, right of the tab bar, 10–400% with 100% centered; `showZoomSlider` option) | ✅ |

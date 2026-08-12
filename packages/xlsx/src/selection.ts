@@ -213,17 +213,37 @@ export function normalizeSelectionState(state: XlsxSelectionState): XlsxSelectio
       state.activeAreaIndex < 0 || state.activeAreaIndex >= state.areas.length) {
     throw new RangeError('activeAreaIndex must identify an area in the selection.');
   }
-  const areas = state.areas.map(normalizeArea);
+  const normalizedAreas = state.areas.map(normalizeArea);
+  const areas: XlsxSelectionArea[] = [];
+  const areaIndices = new Map<string, number>();
+  let activeAreaIndex = 0;
+  for (let index = 0; index < normalizedAreas.length; index++) {
+    const area = normalizedAreas[index];
+    const key = area.kind === 'cells'
+      ? `c:${area.top}:${area.left}:${area.bottom}:${area.right}`
+      : area.kind === 'rows'
+        ? `r:${area.firstRow}:${area.lastRow}`
+        : area.kind === 'columns'
+          ? `k:${area.firstColumn}:${area.lastColumn}`
+          : 's';
+    let canonicalIndex = areaIndices.get(key);
+    if (canonicalIndex === undefined) {
+      canonicalIndex = areas.length;
+      areaIndices.set(key, canonicalIndex);
+      areas.push(area);
+    }
+    if (index === state.activeAreaIndex) activeAreaIndex = canonicalIndex;
+  }
   const activeCell = normalizeCell(state.activeCell, 'activeCell');
   const extensionAnchor = normalizeCell(state.extensionAnchor, 'extensionAnchor');
-  const activeArea = areas[state.activeAreaIndex];
+  const activeArea = areas[activeAreaIndex];
   if (!areaContainsCell(activeArea, activeCell)) {
     throw new RangeError('activeCell must be inside the active selection area.');
   }
   if (!areaContainsCell(activeArea, extensionAnchor)) {
     throw new RangeError('extensionAnchor must be inside the active selection area.');
   }
-  return { areas, activeAreaIndex: state.activeAreaIndex, activeCell, extensionAnchor };
+  return { areas, activeAreaIndex, activeCell, extensionAnchor };
 }
 
 function columnNumber(letters: string): number | null {

@@ -105,4 +105,18 @@ describe('XLSX header frame ownership', () => {
     // The row-header/data divider remains part of the spreadsheet grid.
     expect(headerSegments.some(({ x1, x2 }) => x1 === dividerX && x2 === dividerX)).toBe(true);
   });
+
+  it.each([
+    { direction: 'LTR', rtl: false },
+    { direction: 'RTL', rtl: true },
+  ])('draws the $direction frozen-row separator through the row-number header', ({ rtl }) => {
+    const ws = worksheet(rtl);
+    ws.freezeRows = 1;
+    const { ctx, segments } = recordingCtx();
+    renderViewport(ctx, ws, STYLES, { row: 2, col: 1, rows: 2, cols: 2 }, { freezeRows: 1 });
+
+    expect(segments.some(segment =>
+      segment.stroke === '#7a7a7a' && segment.x1 === 0 && segment.x2 === 300,
+    )).toBe(true);
+  });
 });

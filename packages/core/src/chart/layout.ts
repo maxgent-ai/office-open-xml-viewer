@@ -21,7 +21,7 @@
 // The per-family MARK drawing (bars, lines, slices, points) stays in
 // renderer.ts; only the frame is shared.
 
-import type { ChartModel } from '../types/chart';
+import type { ChartManualLayout, ChartModel } from '../types/chart';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -138,7 +138,7 @@ export function chartTitleBand(
   topPadFrac: number,
   bottomPadFrac: number,
 ): ChartTitleBand {
-  if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
+  if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
   // Total band height is preserved verbatim from the family fractions so the
   // plot rectangle below stays put.
@@ -274,7 +274,7 @@ export function cartesianTitleBand(
   h: number,
   ptToPx: number,
 ): ChartTitleBand {
-  if (!chart.title) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
+  if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
   const bandH = fontPx * TITLE_BAND_FONT_FRAC;
   const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);
@@ -330,6 +330,58 @@ export interface FrameParams {
   pad?: ChartPad;
   radialGapFrac?: number;
   honorPlotAreaManualLayout?: boolean;
+  /** Insets from an authored `layoutTarget="outer"` rectangle to its inner
+   * data region. The caller measures the real axis-label/tick bands and passes
+   * them here; `layoutTarget="inner"` ignores these insets. ECMA-376
+   * §21.2.2.89 defines the outer target as including tick marks and axis
+   * labels, while CT_LayoutTarget defaults an omitted `val` to `outer`. */
+  manualOuterInsets?: ChartPad;
+}
+
+export interface ManualLayoutRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/**
+ * Resolve CT_ManualLayout against an element's automatic position.
+ *
+ * ECMA-376 §21.2.2.229/232/235 and CT_LayoutMode define factor dimensions as
+ * chart-space fractions and edge dimensions as right/bottom coordinates.
+ * MS-OI29500 §2.1.1587 further defines factor x/y as offsets from the default
+ * element position, again in chart-space fractions. CT_LayoutMode@val defaults
+ * to factor, including a present mode element with an omitted val attribute.
+ */
+export function resolveManualLayoutRect(
+  manual: ChartManualLayout,
+  chartRect: ManualLayoutRect,
+  defaultRect: ManualLayoutRect,
+): ManualLayoutRect | null {
+  const xMode = manual.xMode || 'factor';
+  const yMode = manual.yMode || 'factor';
+  const wMode = manual.wMode || 'factor';
+  const hMode = manual.hMode || 'factor';
+  const x = xMode === 'edge'
+    ? chartRect.x + manual.x * chartRect.w
+    : defaultRect.x + manual.x * chartRect.w;
+  const y = yMode === 'edge'
+    ? chartRect.y + manual.y * chartRect.h
+    : defaultRect.y + manual.y * chartRect.h;
+  const rightOrWidth = manual.w == null
+    ? defaultRect.w
+    : wMode === 'edge'
+      ? chartRect.x + manual.w * chartRect.w - x
+      : manual.w * chartRect.w;
+  const bottomOrHeight = manual.h == null
+    ? defaultRect.h
+    : hMode === 'edge'
+      ? chartRect.y + manual.h * chartRect.h - y
+      : manual.h * chartRect.h;
+  if (![x, y, rightOrWidth, bottomOrHeight].every(Number.isFinite) ||
+      rightOrWidth <= 0 || bottomOrHeight <= 0) return null;
+  return { x, y, w: rightOrWidth, h: bottomOrHeight };
 }
 
 /**
@@ -370,6 +422,9 @@ export function computeChartFrame(
 
   let px0: number, py0: number, pw: number, ph: number;
 
+  // First compute the automatic inner plot rectangle. Factor-mode x/y are
+  // offsets from this default position, so manual layout cannot be resolved
+  // correctly before the automatic frame exists.
   if (params.radialGapFrac != null) {
     // Radial (pie/radar): centre the plot in the leftover space. Verbatim from
     // the pie/radar inline math.
@@ -383,25 +438,35 @@ export function computeChartFrame(
     if (!pad) {
       throw new Error('computeChartFrame: cartesian frame requires params.pad');
     }
-    const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
-    if (pml && pml.w != null && pml.h != null) {
-      const manualLeft = x + pml.x * w;
-      const manualTop = y + pml.y * h;
-      // ECMA-376 §21.2.2.89: layoutTarget="inner" means the authored
-      // rectangle is the plot area excluding axes and labels; "outer" includes
-      // them. In either case the manual rectangle is authoritative. The
-      // auto-layout pads describe a different layout mode and must not clamp
-      // or move an explicitly authored edge. Clamping an inner rectangle can
-      // shift stacked bars away from separately authored overlay labels.
-      px0 = manualLeft;
-      py0 = manualTop;
-      pw = pml.w * w;
-      ph = pml.h * h;
-    } else {
-      px0 = x + pad.l;
-      py0 = y + pad.t;
-      pw = w - pad.l - pad.r;
-      ph = h - pad.t - pad.b;
+    px0 = x + pad.l;
+    py0 = y + pad.t;
+    pw = w - pad.l - pad.r;
+    ph = h - pad.t - pad.b;
+  }
+
+  const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
+  if (pml) {
+    const inset = pml.layoutTarget === 'inner'
+      ? { t: 0, r: 0, b: 0, l: 0 }
+      : (params.manualOuterInsets ?? { t: 0, r: 0, b: 0, l: 0 });
+    const defaultTarget = pml.layoutTarget === 'inner'
+      ? { x: px0, y: py0, w: pw, h: ph }
+      : {
+          x: px0 - inset.l,
+          y: py0 - inset.t,
+          w: pw + inset.l + inset.r,
+          h: ph + inset.t + inset.b,
+        };
+    const resolved = resolveManualLayoutRect(
+      pml,
+      { x, y, w, h },
+      defaultTarget,
+    );
+    if (resolved && resolved.w > inset.l + inset.r && resolved.h > inset.t + inset.b) {
+      px0 = resolved.x + inset.l;
+      py0 = resolved.y + inset.t;
+      pw = resolved.w - inset.l - inset.r;
+      ph = resolved.h - inset.t - inset.b;
     }
   }
 

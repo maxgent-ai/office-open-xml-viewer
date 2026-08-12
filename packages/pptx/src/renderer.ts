@@ -6357,6 +6357,7 @@ async function renderSlideLeased(
           h: emuToPx(el.height, scale),
         },
         chartPtToPx,
+        el.rotation,
       );
       ctx.restore();
     }

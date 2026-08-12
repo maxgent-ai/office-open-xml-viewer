@@ -7,7 +7,12 @@ import {
   colBands,
   summaryAfterFor,
   gutterExtentPx,
+  OUTLINE_BUTTON_GAP_PX,
+  OUTLINE_BUTTON_PX,
   OUTLINE_LANE_PX,
+  outlineBracketSegments,
+  outlineLevelButtonCenterPx,
+  outlinePaneClipRect,
   type BandOutline,
   type OutlineWorksheetLike,
 } from './outline.js';
@@ -88,6 +93,45 @@ describe('buildOutlineLayout', () => {
     expect(l1).toHaveLength(2);
     expect(l1[0]).toMatchObject({ start: 2, end: 3, summary: 4 });
     expect(l1[1]).toMatchObject({ start: 5, end: 6, summary: 7 });
+  });
+});
+
+describe('outlineBracketSegments', () => {
+  it('hooks a row bracket toward the grid at the first detail row only', () => {
+    expect(outlineBracketSegments('row', 10, 40, 100, 20)).toEqual([
+      { x1: 10, y1: 40, x2: 10, y2: 100 },
+      { x1: 10, y1: 40, x2: 20, y2: 40 },
+    ]);
+  });
+
+  it('keeps the logical first column as the hook under reversed screen order', () => {
+    expect(outlineBracketSegments('col', 10, 100, 40, 20)).toEqual([
+      { x1: 40, y1: 10, x2: 100, y2: 10 },
+      { x1: 100, y1: 10, x2: 100, y2: 20 },
+    ]);
+  });
+});
+
+describe('outlinePaneClipRect', () => {
+  it('clips a scrollable row group below the frozen-row separator', () => {
+    expect(outlinePaneClipRect('row', 8, 20, 7, 24, 105, 76, 500)).toEqual({
+      x: 0, y: 129, w: 76, h: 371,
+    });
+  });
+
+  it('keeps a frozen row group between the column header and separator', () => {
+    expect(outlinePaneClipRect('row', 2, 6, 7, 24, 105, 76, 500)).toEqual({
+      x: 0, y: 24, w: 76, h: 105,
+    });
+  });
+
+  it('mirrors frozen and scrollable column clips in RTL', () => {
+    expect(outlinePaneClipRect('col', 1, 2, 2, 48, 120, 600, 57, true)).toEqual({
+      x: 432, y: 0, w: 120, h: 57,
+    });
+    expect(outlinePaneClipRect('col', 3, 9, 2, 48, 120, 600, 57, true)).toEqual({
+      x: 0, y: 0, w: 432, h: 57,
+    });
   });
 });
 
@@ -216,5 +260,17 @@ describe('gutterExtentPx', () => {
     expect(gutterExtentPx(0)).toBe(0);
     expect(gutterExtentPx(1)).toBe(2 * OUTLINE_LANE_PX);
     expect(gutterExtentPx(3)).toBe(4 * OUTLINE_LANE_PX);
+  });
+});
+
+describe('outlineLevelButtonCenterPx', () => {
+  it('packs adjacent level buttons with the compact button-bank gap', () => {
+    const first = outlineLevelButtonCenterPx(1);
+    const second = outlineLevelButtonCenterPx(2);
+
+    expect(second - first).toBe(OUTLINE_BUTTON_PX + OUTLINE_BUTTON_GAP_PX);
+    expect(
+      (second - OUTLINE_BUTTON_PX / 2) - (first + OUTLINE_BUTTON_PX / 2),
+    ).toBe(OUTLINE_BUTTON_GAP_PX);
   });
 });

@@ -139,12 +139,48 @@ describe('XLSX viewer composition roles', () => {
     expect(selection.snapshot()).toEqual({
       areas: [{ kind: 'rows', firstRow: 2, lastRow: 5 }],
       activeAreaIndex: 0,
-      activeCell: { row: 5, col: 1 },
+      activeCell: { row: 2, col: 1 },
       extensionAnchor: { row: 2, col: 1 },
     });
     expect(selection.headerHighlight()).toEqual({
       selectedRowRange: { start: 2, end: 5, strong: true },
       selectedColRange: { start: 1, end: Number.MAX_SAFE_INTEGER, strong: false },
+    });
+  });
+
+  it('SelectionController appends a new active area and extends only that area', () => {
+    const selection = new SelectionController();
+    selection.select({ row: 1, col: 1 });
+
+    expect(selection.add({ row: 3, col: 4 })).toBe(true);
+    selection.extend({ row: 5, col: 6 });
+
+    expect(selection.snapshot()).toEqual({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 1, right: 1 },
+        { kind: 'cells', top: 3, left: 4, bottom: 5, right: 6 },
+      ],
+      activeAreaIndex: 1,
+      activeCell: { row: 3, col: 4 },
+      extensionAnchor: { row: 3, col: 4 },
+    });
+  });
+
+  it('SelectionController activates an existing area without accumulating duplicates', () => {
+    const selection = new SelectionController();
+    selection.select({ row: 1, col: 1 });
+    expect(selection.add({ row: 3, col: 4 })).toBe(true);
+    selection.extend({ row: 5, col: 6 });
+
+    expect(selection.add({ row: 4, col: 5 })).toBe(false);
+    expect(selection.snapshot()).toEqual({
+      areas: [
+        { kind: 'cells', top: 1, left: 1, bottom: 1, right: 1 },
+        { kind: 'cells', top: 3, left: 4, bottom: 5, right: 6 },
+      ],
+      activeAreaIndex: 1,
+      activeCell: { row: 4, col: 5 },
+      extensionAnchor: { row: 4, col: 5 },
     });
   });
 

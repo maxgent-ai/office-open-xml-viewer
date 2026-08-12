@@ -266,3 +266,17 @@ export function refForElementId(presentation: Presentation, elementId: string): 
   if (index < 0) throw new Error(`No element with id ${elementId} on the first slide`);
   return createElementRef(slide, slide.elements[index], index);
 }
+
+/** Reads a zip-internal part from a flushed .pptx (e.g. `ppt/slides/slide1.xml`). */
+export function readPptxPart(pptxPath: string, partName: string): string {
+  const result = spawnSync('unzip', ['-p', pptxPath, partName], { encoding: 'utf8' });
+  if (result.error) {
+    throw new Error(`unzip -p failed to spawn: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `unzip -p ${pptxPath} ${partName} failed (exit ${result.status}): ${result.stderr}`,
+    );
+  }
+  return result.stdout;
+}

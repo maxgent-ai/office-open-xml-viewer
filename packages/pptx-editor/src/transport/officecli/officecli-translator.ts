@@ -13,6 +13,7 @@ import type { OfficeCliBatch, OfficeCliCommand } from './types';
  *
  * 与 `applyCommand` 一致：按 mutation 顺序先翻译、再应用到临时 presentation，
  * 使后续 mutation（尤其是连续 Add / Remove→Add）看到的索引与 zorder 基于前序变更后的状态。
+ * 单个 mutation 若展开为多条 OfficeCLI 命令（如多样式选区），会按序全部写入 batch。
  */
 export function toOfficeCliBatch(
   presentation: Presentation,
@@ -22,9 +23,13 @@ export function toOfficeCliBatch(
   const translated: OfficeCliCommand[] = [];
 
   for (const [mutationIndex, mutation] of command.mutations.entries()) {
-    translated.push(
-      translateMutation(nextPresentation, command.id, mutation, mutationIndex),
+    const translatedMutation = translateMutation(
+      nextPresentation,
+      command.id,
+      mutation,
+      mutationIndex,
     );
+    translated.push(...flattenOfficeCliCommands(translatedMutation));
     nextPresentation = mutation.apply(nextPresentation).presentation;
   }
 
@@ -47,6 +52,14 @@ function translateMutation(
   commandId: string,
   mutation: Mutation,
   mutationIndex: number,
-): OfficeCliCommand {
+): OfficeCliCommand | NonEmptyReadonlyArray<OfficeCliCommand> {
   return mutation.toOfficeCli(presentation, { commandId, mutationIndex });
+}
+
+function flattenOfficeCliCommands(
+  value: OfficeCliCommand | NonEmptyReadonlyArray<OfficeCliCommand>,
+): readonly OfficeCliCommand[] {
+  // 单条命令带 `command` 字段；多条结果是数组本身没有该字段。
+  if (!Array.isArray(value) && 'command' in value) return [value];
+  return value;
 }

@@ -4,7 +4,11 @@ import type { ElementRef, ElementTransform, Mutation } from '../domain/mutation'
 import { MUTATION_TYPES } from '../domain/mutation-types';
 import { AddElementMutation } from './add-element-mutation';
 import { RemoveElementMutation } from './remove-element-mutation';
-import { UpdateTextMutation } from './update-text-mutation';
+import {
+  UpdateTextMutation,
+  type TextStyleEdit,
+  type TextStylePatch,
+} from './update-text-mutation';
 import { UpdateTransformMutation } from './update-transform-mutation';
 
 export interface AddElementMutationJson {
@@ -23,7 +27,9 @@ export interface UpdateTransformMutationJson {
 export interface UpdateTextMutationJson {
   readonly type: typeof MUTATION_TYPES.UPDATE_TEXT;
   readonly target: ElementRef;
-  readonly value: string;
+  readonly value?: string;
+  readonly style?: TextStylePatch;
+  readonly edits?: readonly TextStyleEdit[];
 }
 
 export interface RemoveElementMutationJson {

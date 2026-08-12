@@ -263,6 +263,263 @@ describe('toOfficeCliBatch', () => {
     }));
   });
 
+  it('translates text style patches into OfficeCLI set props', () => {
+    const target = shape('7', 'before');
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'text-style-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        value: 'after',
+        style: {
+          bold: true,
+          italic: false,
+          underline: 'double',
+          strikethrough: 'single',
+          fontSize: 18,
+          color: 'FF0000AA',
+          fontFamily: 'Arial',
+          fontFamilyEa: '微软雅黑',
+          caps: 'small',
+          letterSpacing: 1.2,
+          highlight: 'FFFF00',
+          align: 'ctr',
+          verticalAlign: 'b',
+        },
+      })],
+    });
+
+    expect(batch.commands[0]).toEqual({
+      command: 'set',
+      path: '/slide[1]/shape[@id=7]',
+      props: {
+        text: 'after',
+        bold: 'true',
+        italic: 'false',
+        underline: 'double',
+        strike: 'single',
+        size: '18pt',
+        color: 'FF0000',
+        font: 'Arial',
+        'font.ea': '微软雅黑',
+        cap: 'small',
+        spacing: '1.2',
+        highlight: 'FFFF00',
+        align: 'center',
+        valign: 'bottom',
+      },
+    });
+  });
+
+  it('resolve-then-sets clear-to-inherit bold using paragraph/body defaults', () => {
+    const target = shape('7', 'before');
+    target.textBody!.paragraphs[0].defBold = true;
+    const run = target.textBody!.paragraphs[0].runs[0];
+    if (run.type === 'text') run.bold = false;
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'text-style-clear-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        style: { bold: null },
+      })],
+    });
+
+    expect(batch.commands[0]).toEqual({
+      command: 'set',
+      path: '/slide[1]/shape[@id=7]',
+      props: { bold: 'true' },
+    });
+  });
+
+  it('splits clear-to-inherit whole-shape style when paragraph inheritance differs', () => {
+    const first = shape('7', 'Hello');
+    const second = shape('8', 'World');
+    first.textBody!.paragraphs[0].defBold = true;
+    second.textBody!.paragraphs[0].defBold = false;
+    const target = shape('7', 'Hello');
+    target.textBody = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'text-style-clear-split-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        style: { bold: null },
+      })],
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[1]',
+        props: { bold: 'true' },
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[2]',
+        props: { bold: 'false' },
+      },
+    ]);
+  });
+
+  it('resolves value+null style against post-replace paragraphs, not pre-replace paths', () => {
+    const first = shape('7', 'Hello');
+    const second = shape('8', 'World');
+    first.textBody!.paragraphs[0].defBold = true;
+    second.textBody!.paragraphs[0].defBold = false;
+    const target = shape('7', 'Hello');
+    target.textBody = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'text-value-style-clear-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        value: 'one line',
+        style: { bold: null },
+      })],
+    });
+
+    // 替换后只剩一段（继承自原 p0），不应再生成旧的 /p[2]。
+    expect(batch.commands).toEqual([
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]',
+        props: { text: 'one line', bold: 'true' },
+      },
+    ]);
+  });
+
+  it('emits post-replace paragraph style commands when value expands lines with mixed defs', () => {
+    const first = shape('7', 'Hello');
+    const second = shape('8', 'World');
+    first.textBody!.paragraphs[0].defBold = true;
+    second.textBody!.paragraphs[0].defBold = false;
+    const target = shape('7', 'Hello');
+    target.textBody = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    // 替换后 3 段：继承模板为 p0/p1/p1 → bold true/false/false，路径对应当前结构。
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'text-value-style-expand-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        value: 'a\nb\nc',
+        style: { bold: null },
+      })],
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]',
+        props: { text: 'a\nb\nc' },
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[1]',
+        props: { bold: 'true' },
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[2]',
+        props: { bold: 'false' },
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[3]',
+        props: { bold: 'false' },
+      },
+    ]);
+  });
+
+  it('rejects clear-to-inherit fontFamily when no inherited font is available', () => {
+    const target = shape('7', 'before');
+    target.textBody!.paragraphs[0].defFontFamily = null;
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    expect(() => toOfficeCliBatch(presentation, {
+      id: 'text-style-clear-font-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        style: { fontFamily: null },
+      })],
+    })).toThrowError(expect.objectContaining<Partial<OfficeCliTranslatorError>>({
+      code: 'value.unsupportedFidelity',
+    }));
+  });
+
+  it('expands multi-span style edits into multiple OfficeCLI set commands with range', () => {
+    const target = shape('7', 'Hello World');
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'text-edits-1',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        edits: [
+          {
+            scope: { kind: 'spans', spans: [{ start: 0, end: 5 }] },
+            style: { bold: true, color: 'FF0000' },
+          },
+          {
+            scope: { kind: 'paragraph', paragraphIndex: 0, spans: [{ start: 6, end: 11 }] },
+            style: { italic: true, color: '0000FF' },
+          },
+        ],
+      })],
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]',
+        props: {
+          range: '0:5',
+          bold: 'true',
+          color: 'FF0000',
+        },
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[1]',
+        props: {
+          range: '6:11',
+          italic: 'true',
+          color: '0000FF',
+        },
+      },
+    ]);
+  });
+
   it('preserves mutation order in a native OfficeCLI batch command array', () => {
     const target = shape('7', 'before');
     const presentation = deck([target]);

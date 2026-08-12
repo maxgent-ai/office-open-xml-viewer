@@ -1,5 +1,6 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
+import type { NonEmptyReadonlyArray } from './command';
 import type { MutationExecutionResult } from '../engine/types';
 import type { OfficeCliCommand } from '../transport/officecli/types';
 import type { ElementOrigin } from './element-origin';
@@ -43,8 +44,11 @@ export abstract class Mutation {
 
   abstract inverse(presentation: Presentation): Mutation | undefined;
 
+  /**
+   * 翻译为一条或多条 OfficeCLI 命令（例如一次多样式选区编辑会展开为多条 set）。
+   */
   abstract toOfficeCli(
     presentation: Presentation,
     context: MutationCommandContext,
-  ): OfficeCliCommand;
+  ): OfficeCliCommand | NonEmptyReadonlyArray<OfficeCliCommand>;
 }

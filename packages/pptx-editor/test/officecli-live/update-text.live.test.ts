@@ -17,6 +17,7 @@ import {
   flushDeck,
   getNode,
   parseDeck,
+  readPptxPart,
   refForElementId,
   runBatch,
 } from './harness';
@@ -27,6 +28,7 @@ describe('UpdateTextMutation × OfficeCLI 真实执行', () => {
   let presentation: Presentation;
   let plainShapePath: string;
   let multilineShapePath: string;
+  let spacingShapePath: string;
 
   beforeAll(() => {
     assertLiveOfficeCli();
@@ -45,6 +47,13 @@ describe('UpdateTextMutation × OfficeCLI 真实执行', () => {
       text: 'before-multiline',
       x: '914400emu',
       y: '1828800emu',
+      width: '1828800emu',
+      height: '914400emu',
+    });
+    spacingShapePath = addShape(pptxPath, '/slide[1]', {
+      text: 'spacing',
+      x: '914400emu',
+      y: '3200400emu',
       width: '1828800emu',
       height: '914400emu',
     });
@@ -95,5 +104,48 @@ describe('UpdateTextMutation × OfficeCLI 真实执行', () => {
         (paragraph) => paragraph.runs.map((run) => (run.type === 'text' ? run.text : '')).join(''),
       ),
     ).toEqual(['第一行', '第二行']);
+  });
+
+  it('letterSpacing（pt）经 OfficeCLI 写入后，乐观模型与重解析均为 pt，OOXML spc 为 ×100', () => {
+    const ref = refForElementId(presentation, elementIdOfPath(spacingShapePath));
+    const mutation = new UpdateTextMutation({
+      target: ref,
+      style: { letterSpacing: 1.2 },
+    });
+
+    expect(toOfficeCliBatch(presentation, {
+      id: 'live-update-text-spacing-props',
+      mutations: [mutation],
+    }).commands[0]).toMatchObject({
+      props: { spacing: '1.2' },
+    });
+
+    const optimistic = mutation.apply(presentation).presentation;
+    const optimisticShape = optimistic.slides[0].elements.find(
+      (element) => (element as { id?: string }).id === ref.elementId,
+    ) as ShapeElement;
+    const optimisticRun = optimisticShape.textBody?.paragraphs[0]?.runs.find(
+      (candidate) => candidate.type === 'text',
+    );
+    expect(optimisticRun).toMatchObject({ letterSpacing: 1.2 });
+
+    runBatch(pptxPath, toOfficeCliBatch(presentation, {
+      id: 'live-update-text-spacing',
+      mutations: [mutation],
+    }));
+
+    const slideXml = readPptxPart(pptxPath, 'ppt/slides/slide1.xml');
+    expect(slideXml).toMatch(/\bspc="120"/);
+    expect(slideXml).not.toMatch(/\bspc="12000"/);
+
+    // Parser stores letterSpacing in points (spc/100); must match optimistic model.
+    const reparsed = parseDeck(pptxPath);
+    const shape = reparsed.slides[0].elements.find(
+      (element) => (element as { id?: string }).id === ref.elementId,
+    ) as ShapeElement;
+    const run = shape.textBody?.paragraphs[0]?.runs.find(
+      (candidate) => candidate.type === 'text',
+    );
+    expect(run).toMatchObject({ letterSpacing: 1.2 });
   });
 });

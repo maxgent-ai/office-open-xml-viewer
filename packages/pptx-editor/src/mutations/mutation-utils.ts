@@ -132,6 +132,44 @@ export function resolveStableShapePath(
   return `/slide[${resolved.slideIndex + 1}]/shape[@id=${resolved.element.id}]`;
 }
 
+/** 0-based paragraphIndex → OfficeCLI 1-based `/p[N]` under the stable shape path. */
+export function resolveStableParagraphPath(
+  presentation: Presentation,
+  mutation: Mutation,
+  context: MutationCommandContext,
+  paragraphIndex: number,
+  /**
+   * 当同一次 mutation 先改写了 text（段落数变化）时，用替换后的段落数做边界检查，
+   * 而不是修改前 presentation 上的旧结构。
+   */
+  paragraphCountOverride?: number,
+): string {
+  if (!Number.isInteger(paragraphIndex) || paragraphIndex < 0) {
+    throw officeCliError(
+      'value.invalidText',
+      context,
+      mutation,
+      `Invalid paragraphIndex ${paragraphIndex}`,
+    );
+  }
+  const shapePath = resolveStableShapePath(presentation, mutation, context);
+  const resolved = resolveElementRef(presentation, mutation.target);
+  const paragraphCount = paragraphCountOverride ?? (
+    resolved?.element.type === 'shape'
+      ? resolved.element.textBody?.paragraphs.length ?? 0
+      : 0
+  );
+  if (paragraphIndex >= paragraphCount) {
+    throw officeCliError(
+      'value.invalidText',
+      context,
+      mutation,
+      `paragraphIndex ${paragraphIndex} is out of range for ${paragraphCount} paragraphs`,
+    );
+  }
+  return `${shapePath}/p[${paragraphIndex + 1}]`;
+}
+
 export function resolveStableSlidePath(
   presentation: Presentation,
   mutation: Mutation,

@@ -232,7 +232,7 @@ Built-in mutations:
 
 | Class | Effect | OfficeCLI |
 | --- | --- | --- |
-| `UpdateTextMutation` | Replace shape plain text | `set` path + `{ text }` |
+| `UpdateTextMutation` | Replace shape plain text, whole-shape styles, or multi-span style edits | `set` path + `{ text, bold, … }` and/or `range=` |
 | `UpdateTransformMutation` | Position / size / rotation / flips (EMU + degrees) | `set` path + transform props |
 | `AddElementMutation` | Insert a slide element at indexes | `add` under slide path |
 | `RemoveElementMutation` | Remove a slide element | `remove` path |
@@ -522,6 +522,12 @@ Document these in product code rather than papering over them:
    OfficeCLI `zorder` is derived from `origin: 'slide'` ordinals before
    `presentationElementIndex`; this matches spTree position for top-level 1:1
    shapes, not for groups / hidden nodes that expand or skip.
+   `UpdateTextMutation` can patch whole-shape text styles and multi-span
+   `edits` (each with its own `scope` + `style`); selection-scoped text
+   replacement remains out of scope. Clear-to-inherit (`null`) style keys are
+   resolve-then-set for OfficeCLI using paragraph/body/presentation defaults
+   (explicit values, not true OOXML attribute removal).
+   Character offsets use run-concatenated plain text (OfficeCLI `range` rules).
 5. **Complete `elementSources` required** for any editable slide.
 6. **Bootstrap `Presentation`.** The viewer does not yet export a ready-made
    editor `Presentation` from a loaded package. Supply parser JSON (or an

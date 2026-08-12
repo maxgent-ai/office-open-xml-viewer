@@ -15,7 +15,18 @@ export type { AddElementMutationParams } from './mutations/add-element-mutation'
 export { RemoveElementMutation } from './mutations/remove-element-mutation';
 export type { RemoveElementMutationParams } from './mutations/remove-element-mutation';
 export { UpdateTextMutation } from './mutations/update-text-mutation';
-export type { UpdateTextMutationParams } from './mutations/update-text-mutation';
+export type {
+  TextScope,
+  TextSpan,
+  TextStyleEdit,
+  TextStylePatch,
+  UpdateTextMutationParams,
+} from './mutations/update-text-mutation';
+export {
+  formatOfficeCliRange,
+  paragraphRunPlainText,
+  runPlainText,
+} from './mutations/text-editing';
 export { UpdateTransformMutation } from './mutations/update-transform-mutation';
 export type {
   UpdateTransformMutationParams,

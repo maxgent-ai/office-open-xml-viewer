@@ -1,4 +1,4 @@
-import type { Mutation } from './mutation';
+import type { Mutation } from './mutation.js';
 
 export type NonEmptyReadonlyArray<T> = readonly [T, ...T[]];
 

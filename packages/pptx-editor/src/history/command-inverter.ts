@@ -1,8 +1,8 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command, NonEmptyReadonlyArray } from '../domain/command';
-import type { Mutation } from '../domain/mutation';
-import { UndoRedoStackError } from './errors';
+import type { Command, NonEmptyReadonlyArray } from '../domain/command.js';
+import type { Mutation } from '../domain/mutation.js';
+import { UndoRedoStackError } from './errors.js';
 
 export interface UndoRedoEntry {
   readonly forwardCommand: Command;

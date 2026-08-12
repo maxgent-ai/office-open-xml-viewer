@@ -1,14 +1,14 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command } from '../domain/command';
-import type { ElementRef, Mutation } from '../domain/mutation';
-import { CommandExecutionError, MutationExecutionError } from './errors';
-import { elementRefKey } from './mutation-engine-utils';
-import type { CommandExecutionResult, MutationExecutionResult } from './types';
+import type { Command } from '../domain/command.js';
+import type { ElementRef, Mutation } from '../domain/mutation.js';
+import { CommandExecutionError, MutationExecutionError } from './errors.js';
+import { elementRefKey } from './mutation-engine-utils.js';
+import type { CommandExecutionResult, MutationExecutionResult } from './types.js';
 
-export { CommandExecutionError, MutationExecutionError } from './errors';
-export type { MutationExecutionErrorCode } from './errors';
-export type { CommandExecutionResult, MutationExecutionResult } from './types';
+export { CommandExecutionError, MutationExecutionError } from './errors.js';
+export type { MutationExecutionErrorCode } from './errors.js';
+export type { CommandExecutionResult, MutationExecutionResult } from './types.js';
 
 /** Applies one mutation immutably to the parser's existing Presentation JSON. */
 export function applyMutation(

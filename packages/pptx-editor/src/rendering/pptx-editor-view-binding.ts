@@ -1,12 +1,12 @@
-import { getSlideMutationId } from '../adapters/pptx-json-adapter';
-import type { PptxEditorSession } from '../session/pptx-editor-session';
-import type { PptxEditorSessionChange } from '../session/types';
-import { PptxEditorViewBindingError } from './errors';
+import { getSlideMutationId } from '../adapters/pptx-json-adapter.js';
+import type { PptxEditorSession } from '../session/pptx-editor-session.js';
+import type { PptxEditorSessionChange } from '../session/types.js';
+import { PptxEditorViewBindingError } from './errors.js';
 import type {
   PptxEditorViewBindingOptions,
   PptxEditorViewErrorHandler,
   PptxEditorViewHost,
-} from './types';
+} from './types.js';
 
 /**
  * Binds a {@link PptxEditorSession} to a single paint host. Session

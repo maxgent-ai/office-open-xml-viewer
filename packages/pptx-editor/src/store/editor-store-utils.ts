@@ -1,5 +1,5 @@
-import type { Command } from '../domain/command';
-import type { ElementRef } from '../domain/mutation';
+import type { Command } from '../domain/command.js';
+import type { ElementRef } from '../domain/mutation.js';
 
 export interface CommandInvalidations {
   readonly changedSlideIds: readonly string[];

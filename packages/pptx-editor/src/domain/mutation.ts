@@ -1,10 +1,10 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { NonEmptyReadonlyArray } from './command';
-import type { MutationExecutionResult } from '../engine/types';
-import type { OfficeCliCommand } from '../transport/officecli/types';
-import type { ElementOrigin } from './element-origin';
-import type { MutationType } from './mutation-types';
+import type { NonEmptyReadonlyArray } from './command.js';
+import type { MutationExecutionResult } from '../engine/types.js';
+import type { OfficeCliCommand } from '../transport/officecli/types.js';
+import type { ElementOrigin } from './element-origin.js';
+import type { MutationType } from './mutation-types.js';
 
 export interface ElementRef {
   readonly origin: ElementOrigin;

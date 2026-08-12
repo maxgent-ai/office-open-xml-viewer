@@ -1,13 +1,13 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command } from '../domain/command';
-import { UndoRedoStack } from '../history/undo-redo-stack';
-import { PptxEditorStore } from '../store/editor-store';
-import type { EditorStoreChange } from '../store/types';
-import { SerialOfficeCliSubmitter } from '../submission/serial-officecli-submitter';
-import type { CommandSubmission } from '../submission/types';
-import { EDITOR_SESSION_CHANGE_REASONS } from './constants';
-import { PptxEditorSessionError } from './errors';
+import type { Command } from '../domain/command.js';
+import { UndoRedoStack } from '../history/undo-redo-stack.js';
+import { PptxEditorStore } from '../store/editor-store.js';
+import type { EditorStoreChange } from '../store/types.js';
+import { SerialOfficeCliSubmitter } from '../submission/serial-officecli-submitter.js';
+import type { CommandSubmission } from '../submission/types.js';
+import { EDITOR_SESSION_CHANGE_REASONS } from './constants.js';
+import { PptxEditorSessionError } from './errors.js';
 import type {
   PptxEditorSessionChange,
   PptxEditorSessionListener,
@@ -15,7 +15,7 @@ import type {
   PptxEditorSessionOptions,
   PptxEditorSessionSnapshot,
   PptxEditorSessionSubmission,
-} from './types';
+} from './types.js';
 
 export class PptxEditorSession {
   readonly #store: PptxEditorStore;

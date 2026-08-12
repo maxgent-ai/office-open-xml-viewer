@@ -1,4 +1,4 @@
-import type { Mutation } from '../domain/mutation';
+import type { Mutation } from '../domain/mutation.js';
 
 export type MutationExecutionErrorCode =
   | 'slide.notFound'

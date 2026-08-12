@@ -1,6 +1,6 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { PptxEditorSession } from '../session/pptx-editor-session';
+import type { PptxEditorSession } from '../session/pptx-editor-session.js';
 
 /** Paint host that installs editor snapshots and redraws affected slides. */
 export interface PptxEditorViewHost {

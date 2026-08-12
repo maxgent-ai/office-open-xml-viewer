@@ -7,30 +7,30 @@ import {
   insertSlideElement,
   isSlideRegionInsertIndex,
   resolveElementRef,
-} from '../../adapters/pptx-json-adapter';
-import { ELEMENT_ORIGINS } from '../../domain/element-origin';
+} from '../../adapters/pptx-json-adapter.js';
+import { ELEMENT_ORIGINS } from '../../domain/element-origin.js';
 import {
   Mutation,
   type ElementRef,
   type MutationCommandContext,
-} from '../../domain/mutation';
-import { MUTATION_TYPES } from '../../domain/mutation-types';
-import { MutationExecutionError } from '../../engine/errors';
-import type { OfficeCliTranslatorError } from '../../transport/officecli/errors';
-import type { MutationExecutionResult } from '../../engine/types';
+} from '../../domain/mutation.js';
+import { MUTATION_TYPES } from '../../domain/mutation-types.js';
+import { MutationExecutionError } from '../../engine/errors.js';
+import type { OfficeCliTranslatorError } from '../../transport/officecli/errors.js';
+import type { MutationExecutionResult } from '../../engine/types.js';
 import {
   OFFICECLI_COMMAND_TYPES,
   OFFICECLI_ELEMENT_TYPES,
-} from '../../transport/officecli/constants';
-import type { OfficeCliCommand } from '../../transport/officecli/types';
+} from '../../transport/officecli/constants.js';
+import type { OfficeCliCommand } from '../../transport/officecli/types.js';
 import {
   freezeProps,
   freezeTarget,
   officeCliError,
   plainTextOf,
   resolveStableSlidePath,
-} from '../mutation-utils';
-import { RemoveElementMutation } from '../remove-element';
+} from '../mutation-utils.js';
+import { RemoveElementMutation } from '../remove-element/index.js';
 
 export interface AddElementMutationParams {
   readonly target: ElementRef;

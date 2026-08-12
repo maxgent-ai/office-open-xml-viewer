@@ -1,10 +1,10 @@
-import type { EditorStoreChange } from '../store/types';
-import type { OfficeCliBatch } from '../transport/officecli/types';
+import type { EditorStoreChange } from '../store/types.js';
+import type { OfficeCliBatch } from '../transport/officecli/types.js';
 import type {
   COMMAND_SUBMISSION_STATUSES,
   OFFICECLI_BATCH_SEND_STATUSES,
-} from './constants';
-import type { CommandSubmitterError } from './errors';
+} from './constants.js';
+import type { CommandSubmitterError } from './errors.js';
 
 export type CommandSubmissionStatus =
   (typeof COMMAND_SUBMISSION_STATUSES)[keyof typeof COMMAND_SUBMISSION_STATUSES];

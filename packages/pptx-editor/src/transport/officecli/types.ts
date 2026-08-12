@@ -1,10 +1,10 @@
-import type { NonEmptyReadonlyArray } from '../../domain/command';
+import type { NonEmptyReadonlyArray } from '../../domain/command.js';
 import type {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_COMMAND_TYPES,
   OFFICECLI_ELEMENT_TYPES,
   OFFICECLI_VERSION,
-} from './constants';
+} from './constants.js';
 
 export type OfficeCliCommandType =
   (typeof OFFICECLI_COMMAND_TYPES)[keyof typeof OFFICECLI_COMMAND_TYPES];

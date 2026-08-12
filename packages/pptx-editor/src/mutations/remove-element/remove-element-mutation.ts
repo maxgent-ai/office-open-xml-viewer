@@ -1,21 +1,21 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import { replaceResolvedElement } from '../../adapters/pptx-json-adapter';
+import { replaceResolvedElement } from '../../adapters/pptx-json-adapter.js';
 import {
   Mutation,
   type ElementRef,
   type MutationCommandContext,
-} from '../../domain/mutation';
-import { MUTATION_TYPES } from '../../domain/mutation-types';
-import type { MutationExecutionResult } from '../../engine/types';
-import { OFFICECLI_COMMAND_TYPES } from '../../transport/officecli/constants';
-import type { OfficeCliCommand } from '../../transport/officecli/types';
-import { AddElementMutation } from '../add-element';
+} from '../../domain/mutation.js';
+import { MUTATION_TYPES } from '../../domain/mutation-types.js';
+import type { MutationExecutionResult } from '../../engine/types.js';
+import { OFFICECLI_COMMAND_TYPES } from '../../transport/officecli/constants.js';
+import type { OfficeCliCommand } from '../../transport/officecli/types.js';
+import { AddElementMutation } from '../add-element/index.js';
 import {
   freezeTarget,
   resolveMutationTarget,
   resolveStableShapePath,
-} from '../mutation-utils';
+} from '../mutation-utils.js';
 
 export interface RemoveElementMutationParams {
   readonly target: ElementRef;

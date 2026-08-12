@@ -1,4 +1,4 @@
-import type { UNDO_REDO_DIRECTIONS } from './constants';
+import type { UNDO_REDO_DIRECTIONS } from './constants.js';
 
 export type UndoRedoDirection =
   (typeof UNDO_REDO_DIRECTIONS)[keyof typeof UNDO_REDO_DIRECTIONS];

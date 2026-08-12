@@ -1,8 +1,8 @@
 import type { Presentation, SlideElement } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef, ElementTransform, Mutation } from '../domain/mutation';
-import { MutationExecutionError } from './errors';
-import type { MutationExecutionResult } from './types';
+import type { ElementRef, ElementTransform, Mutation } from '../domain/mutation.js';
+import { MutationExecutionError } from './errors.js';
+import type { MutationExecutionResult } from './types.js';
 
 export function hasSameTransform(
   element: SlideElement,

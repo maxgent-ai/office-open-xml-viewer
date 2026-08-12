@@ -1,13 +1,13 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef } from '../domain/mutation';
-import type { UndoRedoCommandIdFactory } from '../history/types';
-import type { EditorSyncState } from '../store/sync-state';
+import type { ElementRef } from '../domain/mutation.js';
+import type { UndoRedoCommandIdFactory } from '../history/types.js';
+import type { EditorSyncState } from '../store/sync-state.js';
 import type {
   CommandSubmissionResult,
   OfficeCliBatchSender,
-} from '../submission/types';
-import type { EDITOR_SESSION_CHANGE_REASONS } from './constants';
+} from '../submission/types.js';
+import type { EDITOR_SESSION_CHANGE_REASONS } from './constants.js';
 
 export type PptxEditorSessionChangeReason =
   (typeof EDITOR_SESSION_CHANGE_REASONS)[keyof typeof EDITOR_SESSION_CHANGE_REASONS];

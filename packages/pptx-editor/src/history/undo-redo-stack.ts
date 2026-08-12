@@ -1,20 +1,20 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command } from '../domain/command';
-import { EDITOR_SYNC_STATUSES } from '../store/sync-state';
-import type { EditorStoreChange } from '../store/types';
-import { COMMAND_SUBMISSION_STATUSES } from '../submission/constants';
-import type { SerialOfficeCliSubmitter } from '../submission/serial-officecli-submitter';
-import type { CommandSubmission } from '../submission/types';
-import { createUndoRedoEntry } from './command-inverter';
-import type { UndoRedoEntry } from './command-inverter';
-import { UNDO_REDO_DIRECTIONS } from './constants';
-import { UndoRedoStackError } from './errors';
+import type { Command } from '../domain/command.js';
+import { EDITOR_SYNC_STATUSES } from '../store/sync-state.js';
+import type { EditorStoreChange } from '../store/types.js';
+import { COMMAND_SUBMISSION_STATUSES } from '../submission/constants.js';
+import type { SerialOfficeCliSubmitter } from '../submission/serial-officecli-submitter.js';
+import type { CommandSubmission } from '../submission/types.js';
+import { createUndoRedoEntry } from './command-inverter.js';
+import type { UndoRedoEntry } from './command-inverter.js';
+import { UNDO_REDO_DIRECTIONS } from './constants.js';
+import { UndoRedoStackError } from './errors.js';
 import type {
   UndoRedoCommandIdFactory,
   UndoRedoStackListener,
   UndoRedoStackSnapshot,
-} from './types';
+} from './types.js';
 
 export class UndoRedoStack {
   readonly #listeners = new Set<UndoRedoStackListener>();

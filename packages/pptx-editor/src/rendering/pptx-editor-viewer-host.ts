@@ -3,7 +3,7 @@ import type {
   Slide,
 } from '@maxgent/ooxml/pptx';
 
-import type { PptxEditorViewHost } from './types';
+import type { PptxEditorViewHost } from './types.js';
 
 export interface PptxEditorBorrowedViewer {
   readonly slideCount: number;

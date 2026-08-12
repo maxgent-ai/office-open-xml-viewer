@@ -1,8 +1,8 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { Command } from '../domain/command';
-import type { ElementRef } from '../domain/mutation';
-import type { EditorSyncState } from './sync-state';
+import type { Command } from '../domain/command.js';
+import type { ElementRef } from '../domain/mutation.js';
+import type { EditorSyncState } from './sync-state.js';
 
 export const EDITOR_STORE_CHANGE_REASONS = Object.freeze({
   COMMAND_DISPATCHED: 'command.dispatched',

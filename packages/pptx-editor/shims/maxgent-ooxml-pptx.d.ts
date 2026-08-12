@@ -13,6 +13,7 @@ declare module '@maxgent/ooxml/pptx' {
   export type PictureElement = import('../../pptx/dist/types/types').PictureElement;
   export type Paragraph = import('../../pptx/dist/types/types').Paragraph;
   export type TextBody = import('../../pptx/dist/types/types').TextBody;
+  export type TextRun = import('../../pptx/dist/types/types').TextRun;
   export type TextRunData = import('../../pptx/dist/types/types').TextRunData;
   export type SlideElementSource = import('../../pptx/dist/types/types').SlideElementSource;
 }

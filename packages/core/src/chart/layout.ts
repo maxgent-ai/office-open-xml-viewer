@@ -37,6 +37,46 @@ export interface ChartLegendReserve {
   reserveH: number;
 }
 
+/** Canvas-measured legend entry widths used by automatic packing. The renderer
+ * resolves the authored/theme font and swatch geometry, while this module owns
+ * the pure reserve calculation shared by every chart family. */
+export interface ChartLegendMetrics {
+  itemWidths: readonly number[];
+  rowHeight: number;
+  itemGap: number;
+  horizontalPadding: number;
+  verticalPadding: number;
+}
+
+/** Greedily pack source-order legend items into rows that fit `maxWidth`.
+ * A single over-wide item owns its row and is width-capped by the painter. */
+export function packLegendRows(
+  itemWidths: readonly number[],
+  maxWidth: number,
+  itemGap: number,
+): number[][] {
+  const availableWidth = Math.max(1, maxWidth);
+  const rows: number[][] = [];
+  let row: number[] = [];
+  let rowWidth = 0;
+  for (let index = 0; index < itemWidths.length; index++) {
+    const itemWidth = Math.min(availableWidth, Math.max(0, itemWidths[index]));
+    const nextWidth = row.length === 0
+      ? itemWidth
+      : rowWidth + itemGap + itemWidth;
+    if (row.length > 0 && nextWidth > availableWidth) {
+      rows.push(row);
+      row = [index];
+      rowWidth = itemWidth;
+    } else {
+      row.push(index);
+      rowWidth = nextWidth;
+    }
+  }
+  if (row.length > 0) rows.push(row);
+  return rows;
+}
+
 /** Per-side reserved legend widths/heights, split out of a
  *  {@link ChartLegendReserve} for convenient consumption. Exactly one of the
  *  four is non-zero (or all zero when there is no legend). */
@@ -91,12 +131,16 @@ export interface ChartFrame {
 
 // ─── Title band ──────────────────────────────────────────────────────────────
 
-/** Chart title font size (px). Verbatim from renderer.ts `chartTitleFontPx`:
- *  honor the XML `<c:title>…@sz` (hundredths of a point, scaled by ptToPx),
- *  else the proportional `max(10, h*0.085)` fallback. */
-export function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
+/** Product fallback for a chart title whose authored rich text and linked
+ *  Chart Style both omit a size. OOXML does not define an automatic size. */
+const DEFAULT_CHART_TITLE_SIZE_PT = 14;
+
+/** Chart title font size (px). Honor the parser-resolved size first (authored
+ *  rich text, then linked Chart Style); otherwise use one deterministic 14pt
+ *  fallback across classic and ChartEx chart families. */
+export function chartTitleFontPx(chart: ChartModel, _h: number, ptToPx: number): number {
   if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
-  return Math.max(10, h * 0.085);
+  return DEFAULT_CHART_TITLE_SIZE_PT * ptToPx;
 }
 
 /** Fraction of the title font size used as the band's TOP pad — the gap from
@@ -112,15 +156,17 @@ export function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): 
  *  places the cap-top at ~0.81×font from the band top, matching PowerPoint's
  *  rendered chart titles (measured against the demo sample-1 line chart PDF).
  *
- *  The band's TOTAL height (`bandH`) is unchanged — see {@link chartTitleBand};
- *  only the split between top and bottom pad moves, so the plot rectangle below
- *  the title does not shift by a single pixel. */
+ *  For an already-resolved `fontPx`, the band's TOTAL height (`bandH`) is
+ *  unchanged by this top/bottom-pad redistribution — see
+ *  {@link chartTitleBand}. A different resolved title size may still change the
+ *  band and therefore the plot rectangle below it. */
 export const TITLE_TOP_PAD_FONT_FRAC = 0.62;
 
 /** Resolve the title band from the family's top/bottom pad FRACTIONS (of `h`).
  *  These fractions still set the band's TOTAL height (`bandH = fontPx +
- *  h*topPadFrac + h*bottomPadFrac`), which every family's plot layout depends on
- *  — that value is byte-identical to before, so the plot area never moves.
+ *  h*topPadFrac + h*bottomPadFrac`), which every family's plot layout depends on.
+ *  Given the same resolved `fontPx`, changing only the top/bottom-pad split keeps
+ *  that total byte-identical; resolving a different font size changes `bandH`.
  *
  *  What changed: the title's vertical placement WITHIN the band. `topPad` (the
  *  draw offset) is now a FONT-proportional inset ({@link TITLE_TOP_PAD_FONT_FRAC}
@@ -140,8 +186,8 @@ export function chartTitleBand(
 ): ChartTitleBand {
   if (!chart.title && !chart.titlePresent) return { fontPx: 0, topPad: 0, bottomPad: 0, bandH: 0 };
   const fontPx = chartTitleFontPx(chart, h, ptToPx);
-  // Total band height is preserved verbatim from the family fractions so the
-  // plot rectangle below stays put.
+  // For a given resolved font size, the family fractions preserve the total
+  // band height while only the top/bottom-pad split changes.
   const bandH = fontPx + h * topPadFrac + h * bottomPadFrac;
   // Font-proportional top inset, clamped so the title never overflows the band.
   const topPad = Math.min(Math.max(0, bandH - fontPx), fontPx * TITLE_TOP_PAD_FONT_FRAC);
@@ -154,19 +200,45 @@ export function chartTitleBand(
 /** Resolve legend placement from `<c:legendPos>`. Returns null when hidden.
  *  Verbatim from renderer.ts `legendLayout`, except the side reserve FRACTION
  *  is a parameter (`sideReserveFrac`) so pie can request its wider 0.28 band
- *  while every other family keeps 0.22. Top/bottom always reserve `max(18,
- *  h*0.08)`. */
+ *  while every other family keeps 0.22. When measured metrics are supplied,
+ *  top/bottom reserve complete packed rows (bounded to 30% of chart height)
+ *  and sides reserve the measured entry width within the same 30% bound. */
 export function chartLegendReserve(
   chart: ChartModel,
   w: number,
   h: number,
   sideReserveFrac: number,
+  metrics?: ChartLegendMetrics,
 ): ChartLegendReserve | null {
   if (!chart.showLegend) return null;
   const pos = chart.legendPos ?? 'r';
   const side: ChartLegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
   if (side === 'r' || side === 'l') {
+    if (metrics) {
+      const minWidth = Math.min(80, w * 0.3);
+      const maxWidth = Math.max(minWidth, Math.min(w * 0.3, Math.max(80, w * sideReserveFrac)));
+      const measuredWidth = Math.max(0, ...metrics.itemWidths) + metrics.horizontalPadding;
+      return {
+        side,
+        reserveW: Math.min(maxWidth, Math.max(minWidth, measuredWidth)),
+        reserveH: 0,
+      };
+    }
     return { side, reserveW: Math.max(80, w * sideReserveFrac), reserveH: 0 };
+  }
+  if (metrics) {
+    const availableWidth = Math.max(1, w - metrics.horizontalPadding);
+    const rowCount = packLegendRows(
+      metrics.itemWidths,
+      availableWidth,
+      metrics.itemGap,
+    ).length;
+    const desiredHeight = rowCount * metrics.rowHeight + metrics.verticalPadding;
+    return {
+      side,
+      reserveW: 0,
+      reserveH: Math.min(h * 0.3, desiredHeight),
+    };
   }
   return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
 }
@@ -184,14 +256,76 @@ export function chartLegendBands(leg: ChartLegendReserve | null): ChartLegendBan
 
 // ─── Axis-title bands ────────────────────────────────────────────────────────
 
-/** Axis-title font size (px). Verbatim from renderer.ts `axisTitleFontPx`. */
+/** Product fallback for an axis title whose run/style omits `a:rPr@sz`.
+ *  OOXML does not define application auto-layout text metrics; the fixed 10pt
+ *  value is the intentionally small compatibility policy recorded in #1228. */
+export const AXIS_TITLE_FALLBACK_PT = 10;
+
+/** Axis-title font size (px). Authored/style size is authoritative; omission
+ *  is fixed at 10pt and therefore invariant across chart dimensions. */
 export function axisTitleFontPx(
   sizeHpt: number | null | undefined,
-  h: number,
   ptToPx: number,
 ): number {
-  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
-  return Math.max(8, Math.min(10, h * 0.045));
+  // ST_TextFontSize is 100..400000 hundredths of a point. Keep non-conforming
+  // parser output and direct public-model inputs from creating negative or
+  // unbounded layout bands; invalid values use the same product fallback as
+  // omission. `ptToPx` is a host scale and is validated by the host renderer.
+  if (
+    typeof sizeHpt === 'number' &&
+    Number.isFinite(sizeHpt) &&
+    sizeHpt >= 100 &&
+    sizeHpt <= 400_000
+  ) {
+    return (sizeHpt / 100) * ptToPx;
+  }
+  return AXIS_TITLE_FALLBACK_PT * ptToPx;
+}
+
+export type ChartAxisTitleSide = 'left' | 'right' | 'horizontal';
+
+/** Resolve the title's paint rotation. DrawingML `ST_Angle` is expressed in
+ *  60000ths of a degree; any explicit `bodyPr@rot`/`bodyPr@vert` value has
+ *  priority. With no authoring, left reads bottom-to-top, right top-to-bottom,
+ *  and a top/bottom value axis stays horizontal. */
+export function axisTitleRotationRad(
+  side: ChartAxisTitleSide,
+  authoredRotation: number | null | undefined,
+  authoredVerticalMode?: ChartModel['catAxisTitleVerticalMode'],
+): number {
+  let authoredDegrees = 0;
+  let hasAuthoredOrientation = false;
+  if (authoredVerticalMode != null) {
+    hasAuthoredOrientation = true;
+    // Canvas cannot reproduce East-Asian upright-glyph or WordArt stacking in
+    // this single-line chart-title painter. Preserve those modes in the model
+    // and approximate their vertical flow explicitly instead of silently
+    // treating them as horizontal or applying the automatic side fallback.
+    switch (authoredVerticalMode) {
+      case 'horz':
+        break;
+      case 'vert270':
+        authoredDegrees -= 90;
+        break;
+      case 'vert':
+      case 'wordArtVert':
+      case 'eaVert':
+      case 'mongolianVert':
+      case 'wordArtVertRtl':
+        authoredDegrees += 90;
+        break;
+    }
+  }
+  if (authoredRotation != null && Number.isFinite(authoredRotation)) {
+    authoredDegrees += authoredRotation / 60_000;
+    hasAuthoredOrientation = true;
+  }
+  if (hasAuthoredOrientation) {
+    return authoredDegrees * Math.PI / 180;
+  }
+  if (side === 'left') return -Math.PI / 2;
+  if (side === 'right') return Math.PI / 2;
+  return 0;
 }
 
 /** Margin (px) between the chart's outer edge and an axis title. Verbatim from
@@ -209,8 +343,8 @@ export function chartAxisTitleBands(
   h: number,
   ptToPx: number,
 ): ChartAxisTitleBands {
-  const catFontPx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
-  const valFontPx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  const catFontPx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, ptToPx);
+  const valFontPx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, ptToPx);
   return {
     catFontPx,
     valFontPx,
@@ -290,6 +424,63 @@ export function catAxisLabelBandH(catAxFontPx: number): number {
   return catAxFontPx * CAT_AXIS_LABEL_BAND_FONT_FRAC;
 }
 
+/** Office's default distance from an axis rule to one line of tick-label text,
+ * expressed relative to the resolved label font. These are paint metrics, not
+ * chart-size percentages, so the authored point size remains stable at zoom. */
+export function categoryTickLabelGapPx(fontPx: number): number {
+  return fontPx * (5 / 6);
+}
+
+export function valueTickLabelGapPx(fontPx: number): number {
+  return fontPx;
+}
+
+/** Excel/PowerPoint keep 1.5 pt of clear chart space outside the tick-label
+ * ink when resolving an authored outer plot rectangle. This is distinct from
+ * the rule-to-label gap. The value is consistent across the horizontal and
+ * vertical axes in the Office vector exports used to verify outer layouts. */
+export const AXIS_OUTER_TEXT_MARGIN_PT = 1.5;
+
+/** Measured conversion from a `layoutTarget="outer"` plot-area rectangle to
+ * its inner data rectangle (ECMA-376 §21.2.2.89). The outer rectangle includes
+ * tick marks, tick labels, axis titles, and Office's outer text clearance.
+ * Keeping this one-line label geometry shared prevents the
+ * bar, line, and area families from assigning different inner plot rectangles
+ * to the same authored layout. */
+export function chartManualOuterAxisInsets(metrics: Readonly<{
+  valAxisHidden: boolean;
+  catAxisHidden: boolean;
+  valLabelWidth: number;
+  valLabelFontPx: number;
+  catLabelFontPx: number;
+  valLabelGapPx?: number;
+  catLabelGapPx?: number;
+  outerTextMarginPx?: number;
+  valTitleBandW: number;
+  catTitleBandH: number;
+  secondaryBandW?: number;
+}>): ChartPad {
+  const outerMargin = metrics.outerTextMarginPx ?? 0;
+  return {
+    t: metrics.valAxisHidden ? 0 : metrics.valLabelFontPx / 2 + outerMargin,
+    r: (metrics.secondaryBandW ?? 0) > 0
+      ? (metrics.secondaryBandW ?? 0) + outerMargin
+      : 0,
+    b: metrics.catAxisHidden
+      ? 0
+      : metrics.catLabelFontPx
+        + (metrics.catLabelGapPx ?? categoryTickLabelGapPx(metrics.catLabelFontPx))
+        + metrics.catTitleBandH
+        + outerMargin,
+    l: metrics.valAxisHidden
+      ? 0
+      : metrics.valLabelWidth
+        + (metrics.valLabelGapPx ?? valueTickLabelGapPx(metrics.valLabelFontPx))
+        + metrics.valTitleBandW
+        + outerMargin,
+  };
+}
+
 // ─── Frame parameters + computeChartFrame ────────────────────────────────────
 
 /** A resolved `{t,r,b,l}` plot pad (canvas px). The caller builds this from the
@@ -327,6 +518,9 @@ export interface FrameParams {
   titleTopPadFrac?: number;
   titleBottomPadFrac?: number;
   legendSideReserveFrac: number;
+  /** Pre-measured automatic legend reserve. Canvas callers pass this so the
+   * pure frame uses the same measured bands the painter consumes. */
+  legendReserve?: ChartLegendReserve | null;
   pad?: ChartPad;
   radialGapFrac?: number;
   honorPlotAreaManualLayout?: boolean;
@@ -416,7 +610,9 @@ export function computeChartFrame(
   const title =
     params.titleBand ??
     chartTitleBand(chart, h, ptToPx, params.titleTopPadFrac ?? 0, params.titleBottomPadFrac ?? 0);
-  const legend = chartLegendReserve(chart, w, h, params.legendSideReserveFrac);
+  const legend = params.legendReserve !== undefined
+    ? params.legendReserve
+    : chartLegendReserve(chart, w, h, params.legendSideReserveFrac);
   const legendBands = chartLegendBands(legend);
   const axisTitles = chartAxisTitleBands(chart, w, h, ptToPx);
 

@@ -29,6 +29,8 @@ export function fitCjkLine(
   startWidth: number,
   maxWidth: number,
   rules: KinsokuRules,
+  letterSpacingPx: number = 0,
+  leadingBoundary: boolean = false,
 ): number {
   if (chars.length === 0) return 0;
   const lineEmpty = startWidth === 0;
@@ -37,14 +39,15 @@ export function fitCjkLine(
   let raw = 0;
   let w = startWidth;
   for (const c of chars) {
-    if (w + c.w > maxWidth) {
+    const boundary = raw > 0 || leadingBoundary ? letterSpacingPx : 0;
+    if (w + boundary + c.w > maxWidth) {
       if (raw > 0) break; // already have content on this line
       if (!lineEmpty) break; // non-empty line, nothing fits → caller breaks
-      w += c.w; // empty line: force the first char so wrapping advances
+      w += boundary + c.w; // empty line: force the first char so wrapping advances
       raw++;
       break;
     }
-    w += c.w;
+    w += boundary + c.w;
     raw++;
   }
 

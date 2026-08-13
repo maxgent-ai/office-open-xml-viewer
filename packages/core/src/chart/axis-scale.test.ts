@@ -7,7 +7,32 @@ import {
   axisFraction,
   logAxisScale,
   fitTrendline,
+  linearTrendlineStats,
+  planLinearValueAxis,
+  MAX_AXIS_TICKS,
+  ceilingNiceStep,
 } from './axis-scale.js';
+
+const nextUp = (value: number): number => {
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  view.setFloat64(0, value, false);
+  let bits = view.getBigUint64(0, false);
+  bits += value >= 0 ? 1n : -1n;
+  view.setBigUint64(0, bits, false);
+  return view.getFloat64(0, false);
+};
+
+describe('ceilingNiceStep', () => {
+  it('advances to the next ladder step immediately above exact 1/2/5 boundaries', () => {
+    expect(ceilingNiceStep(1)).toBe(1);
+    expect(ceilingNiceStep(nextUp(1))).toBe(2);
+    expect(ceilingNiceStep(2)).toBe(2);
+    expect(ceilingNiceStep(nextUp(2))).toBe(5);
+    expect(ceilingNiceStep(5)).toBe(5);
+    expect(ceilingNiceStep(nextUp(5))).toBe(10);
+  });
+});
 
 describe('niceStep', () => {
   it('picks 1/2/5 × 10ⁿ for ~5 gridlines', () => {
@@ -53,18 +78,14 @@ describe('niceAxisMin', () => {
   });
 });
 
-describe('valueAxisScale (one niceStep drives min, max and gridline step)', () => {
+describe('valueAxisScale (shared linear compatibility policy)', () => {
   it('positive data anchored at 0 (bar/area/radar style)', () => {
-    // step = niceStep(41-0) = niceStep(41) = 10; min = 0; max = niceAxisMax(41,10,0) = 50
     expect(valueAxisScale(0, 41)).toEqual({ min: 0, max: 50, step: 10 });
   });
   it('negative data floors the min and widens the max with the niced min', () => {
-    // step = niceStep(100-(-15)) = niceStep(115) = 20;
-    // min = niceAxisMin(-15,20) = -20; max = niceAxisMax(100,20,-20) = ceil((100+6)/20)*20 = 120
-    expect(valueAxisScale(-15, 100)).toEqual({ min: -20, max: 120, step: 20 });
+    expect(valueAxisScale(-15, 100)).toEqual({ min: -50, max: 150, step: 50 });
   });
   it('explicit min/max override the computed bounds (step still from data range)', () => {
-    // step = niceStep(41-0) = 10; explicit min -5, max 60 win
     expect(valueAxisScale(0, 41, -5, 60)).toEqual({ min: -5, max: 60, step: 10 });
   });
   it('a null explicit bound falls back to the auto value', () => {
@@ -72,41 +93,24 @@ describe('valueAxisScale (one niceStep drives min, max and gridline step)', () =
     expect(valueAxisScale(0, 41, -5, null)).toEqual({ min: -5, max: 50, step: 10 });
   });
   it('a longer value axis gets a finer major unit (Excel axis-length model)', () => {
-    // Excel's auto major unit targets ~1 gridline per GRIDLINE_SPACING_PT (42),
-    // so the SAME data range yields more, finer gridlines on a longer axis.
-    // range 44: default target (5) → step 10 (0–50, 5 intervals); a 380pt axis
-    // (target round(380/42)=9) → step 5 (0–50, 10 intervals) — matching the
-    // horizontal-bar value axis (sample-14 slide-9) vs PowerPoint.
-    expect(valueAxisScale(0, 44)).toEqual({ min: 0, max: 50, step: 10 });
-    expect(valueAxisScale(0, 44, undefined, undefined, 380)).toEqual({ min: 0, max: 50, step: 5 });
+    expect(valueAxisScale(0, 40)).toEqual({ min: 0, max: 50, step: 10 });
+    expect(valueAxisScale(0, 40, undefined, undefined, 380)).toEqual({ min: 0, max: 45, step: 5 });
   });
-  it('a short axis keeps a fine step via the target floor of 4', () => {
-    // Regression: the demo/sample-1 line chart pins the value axis to an
-    // explicit 60–72 (ECMA-376 §21.2.2.90 min/max, range 12) on a ~124pt plot.
-    // round(124/42)=3 would niceStep(12,3)→step 5 (60,65,70). PowerPoint draws
-    // step 2 (60,62,…,72); the floor of 4 gives niceStep(12,4)→step 2. Without
-    // the floor this axis silently coarsens by one major unit.
-    expect(valueAxisScale(60, 72, 60, 72, 124.1)).toEqual({ min: 60, max: 72, step: 2 });
+  it('a short axis uses the target floor of four', () => {
+    expect(valueAxisScale(60, 72, 60, 72, 124.1)).toEqual({ min: 60, max: 72, step: 5 });
   });
   it('a medium axis is not over-refined (42pt/gridline density)', () => {
-    // Regression: sample-14 slide-6's area axis is range 48.6 on a ~263pt plot.
-    // At 40pt/gridline round(263/40)=7 → niceStep(48.6,7)→step 5, but PowerPoint
-    // draws step 10 (0,10,…,60). At 42pt/gridline round(263/42)=6 → step 10.
     const { step } = valueAxisScale(0, 48.6, undefined, undefined, 263.2);
     expect(step).toBe(10);
   });
-  it('data 3.5 → max 4 with step 0.5 (fine-grained positive range)', () => {
-    // step = niceStep(3.5) = 0.5; min = 0; max = niceAxisMax(3.5,0.5,0):
-    //   3.5 + 3.5/20 = 3.675 → ceil(3.675/0.5)*0.5 = 4
-    expect(valueAxisScale(0, 3.5)).toEqual({ min: 0, max: 4, step: 0.5 });
+  it('rounds a fine-grained positive range with a ceiling ladder step', () => {
+    expect(valueAxisScale(0, 3.5)).toEqual({ min: 0, max: 4, step: 1 });
   });
-  it('data 0.1129 → max 0.12 with step 0.02 (sub-unit range)', () => {
-    // step = niceStep(0.1129) = 0.02; min = 0;
-    //   0.1129 + 0.1129/20 = 0.118545 → ceil(0.118545/0.02)*0.02 = 0.12
+  it('keeps the 1/2/5 ladder below one', () => {
     const { min, max, step } = valueAxisScale(0, 0.1129);
     expect(min).toBe(0);
-    expect(step).toBeCloseTo(0.02, 12);
-    expect(max).toBeCloseTo(0.12, 12);
+    expect(step).toBeCloseTo(0.05, 12);
+    expect(max).toBeCloseTo(0.15, 12);
   });
 
   it('an explicit majorUnit overrides the auto step (min/max still auto)', () => {
@@ -132,6 +136,119 @@ describe('valueAxisScale (one niceStep drives min, max and gridline step)', () =
     expect(valueAxisScale(0, 41, undefined, undefined, undefined, -5)).toEqual(
       valueAxisScale(0, 41),
     );
+  });
+});
+
+describe('planLinearValueAxis (bounded automatic value-axis policy)', () => {
+  it('keeps automatic major units on the 1/2/5 × 10ⁿ ladder', () => {
+    for (const dataMax of [1.1e-12, 3.7e-6, 8.4, 173, 9.9e11]) {
+      const { majorUnit } = planLinearValueAxis({ dataMin: 0, dataMax });
+      const magnitude = 10 ** Math.floor(Math.log10(majorUnit));
+      expect([1, 2, 5].some(value => Math.abs(majorUnit / magnitude - value) < 1e-12))
+        .toBe(true);
+    }
+  });
+
+  it('switches to a zero minimum only above the positive 1.2 boundary', () => {
+    const boundary = 1.2 * 10;
+    expect(planLinearValueAxis({ dataMin: 10, dataMax: boundary }).min).toBeGreaterThan(0);
+    expect(planLinearValueAxis({ dataMin: 10, dataMax: nextUp(boundary) }).min).toBe(0);
+    expect(planLinearValueAxis({ dataMin: -nextUp(boundary), dataMax: -10 }).max).toBe(0);
+  });
+
+  it('mirrors negative-only data with the same major and minor units', () => {
+    const positive = planLinearValueAxis({ dataMin: 10, dataMax: 12.000_001, needMinor: true });
+    const negative = planLinearValueAxis({ dataMin: -12.000_001, dataMax: -10, needMinor: true });
+    expect(negative.min).toBe(-positive.max);
+    expect(negative.max).toBeCloseTo(-positive.min, 12);
+    expect(negative.majorUnit).toBe(positive.majorUnit);
+    expect(negative.minorUnit).toBe(positive.minorUnit);
+  });
+
+  it('uses symmetric 5% padding for offset and zero-crossing ranges', () => {
+    const offset = planLinearValueAxis({ dataMin: 10, dataMax: 12 });
+    expect(offset.min).toBeLessThanOrEqual(9.9);
+    expect(offset.max).toBeGreaterThanOrEqual(12.1);
+    const crossing = planLinearValueAxis({ dataMin: -4, dataMax: 6 });
+    expect(crossing.min).toBeLessThanOrEqual(-4.5);
+    expect(crossing.max).toBeGreaterThanOrEqual(6.5);
+  });
+
+  it('handles zero and non-zero degenerate ranges without non-finite values', () => {
+    expect(planLinearValueAxis({ dataMin: 0, dataMax: 0, needMinor: true })).toMatchObject({
+      min: 0, max: 1, majorUnit: 0.1, minorUnit: 0.02,
+    });
+    for (const value of [5, -5]) {
+      const plan = planLinearValueAxis({ dataMin: value, dataMax: value, needMinor: true });
+      expect(plan.min).toBeLessThanOrEqual(value);
+      expect(plan.max).toBeGreaterThanOrEqual(value);
+      expect([plan.min, plan.max, plan.majorUnit, plan.minorUnit]
+        .every((item: number | null) => item != null && Number.isFinite(item))).toBe(true);
+    }
+  });
+
+  it('is scale invariant across powers of ten', () => {
+    const base = planLinearValueAxis({ dataMin: 10, dataMax: 11.9, needMinor: true });
+    for (const factor of [1e-9, 1e9]) {
+      const scaled = planLinearValueAxis({
+        dataMin: 10 * factor, dataMax: 11.9 * factor, needMinor: true,
+      });
+      expect(scaled.min / factor).toBeCloseTo(base.min, 9);
+      expect(scaled.max / factor).toBeCloseTo(base.max, 9);
+      expect(scaled.majorUnit / factor).toBeCloseTo(base.majorUnit, 9);
+      expect((scaled.minorUnit as number) / factor).toBeCloseTo(base.minorUnit as number, 9);
+    }
+  });
+
+  it('preserves authored bounds and units, and resolves omitted minor as major/5 on demand', () => {
+    const explicit = planLinearValueAxis({
+      dataMin: 10, dataMax: 12,
+      explicitMin: -7, explicitMax: 77, majorUnit: 7, minorUnit: 3,
+      needMinor: true,
+    });
+    expect(explicit).toMatchObject({ min: -7, max: 77, majorUnit: 7, minorUnit: 3 });
+    expect(planLinearValueAxis({ dataMin: 0, dataMax: 10 }).minorUnit).toBeNull();
+    const automatic = planLinearValueAxis({ dataMin: 0, dataMax: 10, needMinor: true });
+    expect(automatic.minorUnit).toBe(automatic.majorUnit / 5);
+  });
+
+  it('generates minor positions only when requested, independently of their paint consumer', () => {
+    const withoutMinor = planLinearValueAxis({ dataMin: 0, dataMax: 10 });
+    const withMinor = planLinearValueAxis({ dataMin: 0, dataMax: 10, needMinor: true });
+    expect(withoutMinor.minorTicks).toEqual([]);
+    expect(withMinor.minorTicks.length).toBeGreaterThan(0);
+    expect(withMinor.majorTicks.length).toBeGreaterThan(0);
+  });
+
+  it('bounds huge and tiny authored units before allocation', () => {
+    const tinyOffset = planLinearValueAxis({
+      dataMin: 1e12, dataMax: 1e12 + 1e-3, needMinor: true,
+    });
+    expect(tinyOffset.majorTicks.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+    expect(tinyOffset.minorTicks.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+    expect(tinyOffset.majorTicks.every(Number.isFinite)).toBe(true);
+
+    const huge = planLinearValueAxis({ dataMin: -1e308, dataMax: 1e308, needMinor: true });
+    expect([huge.min, huge.max, huge.majorUnit].every(Number.isFinite)).toBe(true);
+    expect(huge.majorTicks.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+    expect(huge.minorTicks.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+
+    const hostile = planLinearValueAxis({
+      dataMin: 0, dataMax: 1, explicitMin: 0, explicitMax: 1,
+      majorUnit: 1e-12, minorUnit: Number.MIN_VALUE, needMinor: true,
+    });
+    expect(hostile.majorTicks).toHaveLength(MAX_AXIS_TICKS);
+    expect(hostile.minorTicks).toEqual([]);
+
+    const coarsened = planLinearValueAxis({
+      dataMin: 0, dataMax: 1, explicitMin: 0, explicitMax: 1e12, needMinor: true,
+    });
+    expect(coarsened.majorUnit).toBeGreaterThan(1);
+    expect(coarsened.majorTicks.length).toBeGreaterThan(0);
+    expect(coarsened.majorTicks.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+    expect(coarsened.minorTicks.length).toBeGreaterThan(0);
+    expect(coarsened.minorTicks.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+    expect(coarsened.minorTicks.at(-1) as number).toBeGreaterThan(9.8e11);
   });
 });
 
@@ -182,9 +299,33 @@ describe('logAxisScale (power-of-base bounds + gridline exponents)', () => {
     expect(s.min).toBeGreaterThan(0);
     expect(s.max).toBe(1000);
   });
+
+  it('preflights extreme base-2 and base-10 exponent ranges', () => {
+    for (const base of [2, 10]) {
+      const scale = logAxisScale(Number.MIN_VALUE, Number.MAX_VALUE, base);
+      expect(scale.min).toBeGreaterThan(0);
+      expect(scale.max).toBeLessThanOrEqual(Number.MAX_VALUE);
+      expect(scale.lines.length).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+      expect(scale.lines.every(Number.isFinite)).toBe(true);
+    }
+  });
 });
 
 describe('fitTrendline', () => {
+  it('reports the fitted coefficients and R² used by equation labels', () => {
+    const stats = linearTrendlineStats([0, 1, 2, 3], [1, 3, 5, 7]);
+    expect(stats?.slope).toBeCloseTo(2, 9);
+    expect(stats?.intercept).toBeCloseTo(1, 9);
+    expect(stats?.rSquared).toBeCloseTo(1, 9);
+  });
+
+  it('computes R² from the authored forced-intercept fit', () => {
+    const stats = linearTrendlineStats([0, 1, 2, 3], [1, 2, 2, 5], 0);
+    expect(stats?.slope).toBeCloseTo(1.5, 9);
+    expect(stats?.intercept).toBe(0);
+    expect(stats?.rSquared).toBeLessThan(1);
+  });
+
   it('linear least squares recovers a perfect line', () => {
     // y = 2x + 1 at x = 0,1,2,3
     const t = fitTrendline([0, 1, 2, 3], [1, 3, 5, 7], 'linear');

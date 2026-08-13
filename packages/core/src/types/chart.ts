@@ -10,6 +10,10 @@ import type { GradientFill, PatternFill, SolidFill } from './common';
 
 export interface ChartSeries {
   name: string;
+  /** Effective ChartEx `CT_Series@formatIdx` used to select linked Chart Style
+   * formatting. When the attribute is omitted the parser stores the series'
+   * original document-order index, before hidden series are removed. */
+  chartexFormatIdx?: number | null;
   /** Hex without '#'. null = fall back to palette. */
   color: string | null;
   /**
@@ -18,6 +22,10 @@ export interface ChartSeries {
    * solid/fallback series colour.
    */
   fillPattern?: PatternFill | null;
+  /** ChartEx `<cx:series><cx:spPr>` local shape paint. Positive fill/line
+   * properties override linked style roles; series noFill remains distinct
+   * from a data-point noFill. */
+  chartexStyle?: ChartExElementStyle | null;
   /** `<c:ser><c:spPr><a:ln><a:solidFill>` series outline/stroke color (hex,
    * no '#'). For bar/column charts this is the border around each bar. */
   lineColor?: string | null;
@@ -180,21 +188,46 @@ export interface ChartTrendline {
   backward?: number | null;
   /** `<c:intercept val>` — forced y-intercept (linear/exp). null = free fit. */
   intercept?: number | null;
-  /** `<c:dispRSqr val="1">` — show the R² value (label; not yet rendered). */
+  /** `<c:dispRSqr val="1">` — show the R² value. */
   dispRSqr?: boolean | null;
-  /** `<c:dispEq val="1">` — show the fit equation (label; not yet rendered). */
+  /** `<c:dispEq val="1">` — show the fit equation. */
   dispEq?: boolean | null;
+  /** `<c:trendlineLbl><c:layout><c:manualLayout>` authored label placement. */
+  labelManualLayout?: ChartManualLayout | null;
+  /** Explicit `<c:trendlineLbl><c:tx>` text, when present. */
+  labelText?: string | null;
+  /** Trendline-label `<c:txPr>` run properties. */
+  labelFontSizeHpt?: number | null;
+  labelFontBold?: boolean | null;
+  labelFontColor?: string | null;
+  labelFontFace?: string | null;
+  /** First authored paragraph alignment from `<c:trendlineLbl><c:txPr>`. */
+  labelTextAlign?: string | null;
   /** `<c:spPr><a:ln><a:solidFill>` trendline color (hex without '#'). null =
    *  inherit the series color. */
   lineColor?: string | null;
   /** `<c:spPr><a:ln w>` trendline width in EMU. */
   lineWidthEmu?: number | null;
+  /** `<c:spPr><a:ln><a:prstDash val>` DrawingML dash preset. */
+  lineDash?: string | null;
+  /** `<c:spPr><a:ln><a:noFill/>` — suppress the trendline stroke. */
+  lineHidden?: boolean | null;
 }
 
 export interface ChartDataPointOverride {
   idx: number;
   /** Resolved fill hex (no `#`). */
   color?: string;
+  /** Direct point `<a:noFill/>`; suppresses series/style fill fallback. */
+  fillHidden?: boolean;
+  /** Direct point outline color (no `#`). */
+  lineColor?: string;
+  /** Direct point outline width in EMU. */
+  lineWidthEmu?: number;
+  /** Direct point DrawingML preset dash. */
+  lineDash?: string;
+  /** Direct point `<a:ln><a:noFill/>`; suppresses outline fallback. */
+  lineHidden?: boolean;
   markerSymbol?: string;
   markerSize?: number;
   markerFill?: string;
@@ -223,6 +256,13 @@ export interface ChartDataLabelOverride {
   fontSizeHpt?: number;
   /** `<a:defRPr b="1">` inside the per-idx rich text. */
   fontBold?: boolean;
+  /** Per-point number format; undefined inherits the series default. */
+  formatCode?: string;
+  /** Per-point component separator; undefined inherits the series default. */
+  separator?: string;
+  /** Authored `<c:dLbl><c:layout><c:manualLayout>` geometry. Automatic label
+   *  placement is used when absent; explicit layout takes precedence when set. */
+  manualLayout?: ChartManualLayout;
   /** Per-point callout box (`<c:dLbl><c:spPr>`, ECMA-376 §21.2.2.47/§21.2.2.197):
    *  overrides the series-default box for this one slice. */
   labelBox?: ChartLabelBox;
@@ -335,10 +375,14 @@ export interface ChartExElementStyle {
   /** Per-color-style-index fills after `phClr` substitution and transforms. */
   fillColors?: Array<string | null> | null;
   fillHidden?: boolean | null;
+  /** Linked Chart Style uses `NoStyle`, not an authored no-fill paint. */
+  fillNoStyle?: boolean | null;
   /** Per-color-style-index outlines after `phClr` substitution/transforms. */
   lineColors?: Array<string | null> | null;
   lineWidthEmu?: number | null;
   lineHidden?: boolean | null;
+  /** Linked Chart Style uses `NoStyle`, not an authored no-fill outline. */
+  lineNoStyle?: boolean | null;
   lineDash?: string | null;
   lineCap?: string | null;
   lineJoin?: string | null;
@@ -378,12 +422,13 @@ export interface ChartModel {
   catAxisHidden: boolean;
   /** `<c:valAx><c:delete val="1"/>`. */
   valAxisHidden: boolean;
-  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
-   *  and tick marks still render. Distinct from `catAxisHidden` (which
-   *  removes everything via `<c:delete val="1"/>`). */
+  /** `<c:catAx><c:spPr><a:ln><a:noFill>` — Office-compatible suppression of
+   *  the axis rule and tick marks. Labels and gridlines remain independent.
+   *  Distinct from `catAxisHidden` (which removes everything via
+   *  `<c:delete val="1"/>`). */
   catAxisLineHidden: boolean;
-  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — hide just the axis LINE; labels
-   *  and tick marks still render. */
+  /** `<c:valAx><c:spPr><a:ln><a:noFill>` — Office-compatible suppression of
+   *  the axis rule and tick marks; labels and gridlines remain independent. */
   valAxisLineHidden: boolean;
   /** Hex without '#'. From `<c:plotArea><c:spPr><a:solidFill>`. */
   plotAreaBg: string | null;
@@ -472,12 +517,43 @@ export interface ChartModel {
   catAxisTitleFontBold?: boolean | null;
   /** `<c:catAx><c:title>` run-prop color (hex without '#'). null = default. */
   catAxisTitleFontColor?: string | null;
+  /** Authored `<c:catAx><c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle`
+   *  units (60000ths of a degree). Applied independently from `vert`. */
+  catAxisTitleRotation?: number | null;
+  /** Authored DrawingML `bodyPr@vert`. Omission uses the side-based product
+   *  fallback; explicit modes remain distinguishable from horizontal text. */
+  catAxisTitleVerticalMode?:
+    | 'horz'
+    | 'vert'
+    | 'vert270'
+    | 'wordArtVert'
+    | 'eaVert'
+    | 'mongolianVert'
+    | 'wordArtVertRtl'
+    | null;
+  /** `<c:catAx><c:title><c:layout><c:manualLayout>`. */
+  catAxisTitleManualLayout?: ChartManualLayout | null;
   /** `<c:valAx><c:title>` run-prop font size (hpt). null = renderer default. */
   valAxisTitleFontSizeHpt?: number | null;
   /** `<c:valAx><c:title>` run-prop bold flag. null = not bold. */
   valAxisTitleFontBold?: boolean | null;
   /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
   valAxisTitleFontColor?: string | null;
+  /** Authored `<c:valAx><c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle`
+   *  units (60000ths of a degree). */
+  valAxisTitleRotation?: number | null;
+  /** Authored DrawingML `bodyPr@vert`. */
+  valAxisTitleVerticalMode?:
+    | 'horz'
+    | 'vert'
+    | 'vert270'
+    | 'wordArtVert'
+    | 'eaVert'
+    | 'mongolianVert'
+    | 'wordArtVertRtl'
+    | null;
+  /** `<c:valAx><c:title><c:layout><c:manualLayout>`. */
+  valAxisTitleManualLayout?: ChartManualLayout | null;
   // ── Chart text font faces (CH10) ─────────────────────────────────────────
   // Each is the `<a:latin typeface>` (ECMA-376 §20.1.4.2.24) resolved from the
   // element's `<c:txPr>`. When absent the renderer falls back to the theme
@@ -681,6 +757,8 @@ export interface ChartModel {
    * hairline stays visible). null/absent ⇒ the renderer's 0.5 px default.
    */
   valAxisGridlineWidthEmu?: number | null;
+  /** `<c:valAx><c:majorGridlines>...<a:prstDash val>` dash preset. */
+  valAxisGridlineDash?: string | null;
   /**
    * `<c:catAx><c:majorGridlines><c:spPr><a:ln><a:solidFill>` resolved gridline
    * color (hex without `#`). Only meaningful when {@link catAxisMajorGridlines}
@@ -689,9 +767,21 @@ export interface ChartModel {
   catAxisGridlineColor?: string | null;
   /** `<c:catAx><c:majorGridlines><c:spPr><a:ln w>` gridline width in EMU. */
   catAxisGridlineWidthEmu?: number | null;
+  /** `<c:catAx><c:majorGridlines>...<a:prstDash val>` dash preset. */
+  catAxisGridlineDash?: string | null;
   /** `<c:valAx><c:minorGridlines>` presence (§21.2.2.109). Only drawn when a
    *  minor step is resolvable (see {@link valAxisMinorUnit}). */
   valAxisMinorGridlines?: boolean | null;
+  /** Authored value-axis minor-gridline paint. */
+  valAxisMinorGridlineColor?: string | null;
+  valAxisMinorGridlineWidthEmu?: number | null;
+  valAxisMinorGridlineDash?: string | null;
+  /** `<c:catAx|valAx><c:minorGridlines>` on the horizontal/scatter axis. */
+  catAxisMinorGridlines?: boolean | null;
+  /** Authored horizontal-axis minor-gridline paint. */
+  catAxisMinorGridlineColor?: string | null;
+  catAxisMinorGridlineWidthEmu?: number | null;
+  catAxisMinorGridlineDash?: string | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between major
    * gridlines/ticks, overriding the Excel-style auto "nice" step. null/undefined
@@ -699,8 +789,13 @@ export interface ChartModel {
    */
   valAxisMajorUnit?: number | null;
   /** `<c:valAx><c:minorUnit val>` (§21.2.2.112) — explicit minor step. Drives
-   *  minor gridlines/ticks when present. null ⇒ no minor divisions. */
+   *  minor gridlines/ticks when present. When omitted but either feature is
+   *  requested, the renderer uses the automatic major unit divided by five. */
   valAxisMinorUnit?: number | null;
+  /** Numeric horizontal-axis major step (scatter/bubble `<c:valAx>`). */
+  catAxisMajorUnit?: number | null;
+  /** Numeric horizontal-axis minor step (scatter/bubble `<c:valAx>`). */
+  catAxisMinorUnit?: number | null;
   /**
    * `<c:valAx><c:scaling><c:logBase val>` (§21.2.2.98, `ST_LogBase` §21.2.3.25)
    * — logarithmic value-axis base (>= 2). When set, values map to pixels in log
@@ -772,6 +867,8 @@ export interface ChartModel {
    * for treemap charts; null/absent otherwise.
    */
   chartexTreemap?: ChartexTreemap | null;
+  /** ChartEx histogram controls; raw observations remain in `series[0]`. */
+  chartexHistogramBinning?: ChartexHistogramBinning | null;
   /**
    * Theme accent palette (`accent1..6`, hex without '#') for chartEx charts
    * that color by branch/series index (boxWhisker series and
@@ -790,6 +887,12 @@ export interface ChartModel {
   chartexDataPointLineStyle?: ChartExElementStyle | null;
   /** Effective `<cs:dataPointMarker>` style for raw/outlier/mean markers. */
   chartexDataPointMarkerStyle?: ChartExElementStyle | null;
+  /** Chart Style `dataPointMarkerLayout@size`, in points (2..72). */
+  chartexMarkerSizePt?: number | null;
+  /** Chart Style `dataPointMarkerLayout@symbol`. */
+  chartexMarkerSymbol?: string | null;
+  /** `<cx:series><cx:layoutPr><cx:visibility connectorLines>` for waterfall. */
+  chartexConnectorLines?: boolean | null;
 }
 
 /** A formatted DrawingML run inside a chart-relative text box. */
@@ -817,6 +920,12 @@ export interface ChartTextBox {
   verticalAnchor?: 't' | 'ctr' | 'b' | 'just' | 'dist' | string | null;
   /** DrawingML `<a:bodyPr wrap>`; absent uses the application-default square wrap. */
   wrap?: 'none' | 'square' | string | null;
+  /** DrawingML text-body insets in EMU. Omitted wire values use the
+   * ECMA-376 defaults: lIns/rIns=91440, tIns/bIns=45720. */
+  lIns?: number;
+  tIns?: number;
+  rIns?: number;
+  bIns?: number;
 }
 
 /**
@@ -828,6 +937,9 @@ export interface ChartTextBox {
 export interface ChartexBoxSeries {
   /** Series display name (`<cx:tx><cx:v>`). */
   name: string;
+  /** Effective ChartEx `CT_Series@formatIdx`; omitted authoring resolves to
+   * the original document-order series index. */
+  chartexFormatIdx?: number | null;
   /** Explicit `<cx:series><cx:spPr>` fill (hex, no '#'). null = resolve the
    *  Chart Style / linked Chart Colors, then fall back to the theme palette. */
   color?: string | null;
@@ -835,6 +947,8 @@ export interface ChartexBoxSeries {
   lineColor?: string | null;
   /** Explicit series outline width from `<a:ln@w>` (EMU). */
   lineWidthEmu?: number | null;
+  /** Lossless ChartEx series-local `<cx:spPr>` paint. */
+  chartexStyle?: ChartExElementStyle | null;
   /** Raw sample values grouped by category (outer = category index parallel to
    *  {@link ChartexBoxWhisker.categories}, inner = the points in that group). */
   valuesByCategory: number[][];
@@ -882,6 +996,15 @@ export interface ChartexTreemap {
   parentLabelLayout?: string | null;
 }
 
+/** ChartEx `CT_Binning` controls retained for histogram aggregation. */
+export interface ChartexHistogramBinning {
+  binSize?: number | null;
+  binCount?: number | null;
+  intervalClosed?: 'l' | 'r' | null;
+  underflow?: number | null;
+  overflow?: number | null;
+}
+
 /**
  * A secondary value axis (combo charts). Mirrors the primary value-axis
  * properties but lives in its own object so the flat primary-axis fields stay
@@ -903,14 +1026,24 @@ export interface SecondaryValueAxis {
   fontColor?: string | null;
   /** `<c:txPr>` tick-label font size (hpt). */
   fontSizeHpt?: number | null;
+  /** `<c:txPr>…<a:latin typeface>` tick-label font face. */
+  fontFace?: string | null;
   /** `<c:spPr><a:ln><a:solidFill>` axis-line color (hex without '#'). */
   lineColor?: string | null;
   /** `<c:spPr><a:ln w>` axis-line width in EMU. */
   lineWidthEmu?: number | null;
-  /** `<c:spPr><a:ln><a:noFill>` — hide just the axis rule. */
+  /** `<c:spPr><a:ln><a:noFill>` — Office-compatible suppression of the
+   *  secondary axis rule and tick marks; labels and gridlines remain. */
   lineHidden: boolean;
   /** `<c:majorTickMark>` — "cross" (default) | "out" | "in" | "none". */
   majorTickMark: string;
+  /** `<c:minorTickMark>` — omitted means no minor ticks. */
+  minorTickMark?: string | null;
+  /** `<c:minorGridlines>` independently requests plot-area lines. */
+  minorGridlines?: boolean;
+  minorGridlineColor?: string | null;
+  minorGridlineWidthEmu?: number | null;
+  minorGridlineDash?: string | null;
   /**
    * `<c:valAx><c:majorUnit val>` (§21.2.2.103) — explicit distance between
    * major ticks/gridlines on THIS secondary axis, overriding the Excel-style
@@ -918,12 +1051,30 @@ export interface SecondaryValueAxis {
    * {@link ChartModel.valAxisMajorUnit} on the primary axis.
    */
   majorUnit?: number | null;
+  /** `<c:valAx><c:minorUnit val>` explicit minor-tick step; omitted minor ticks
+   *  use this axis's automatic major unit divided by five. */
+  minorUnit?: number | null;
   /** `<c:title>` run-prop font size (hpt). */
   titleFontSizeHpt?: number | null;
   /** `<c:title>` run-prop bold flag. */
   titleFontBold?: boolean | null;
   /** `<c:title>` run-prop color (hex without '#'). */
   titleFontColor?: string | null;
+  titleFontFace?: string | null;
+  /** Authored `<c:title>` DrawingML `bodyPr@rot` in raw `ST_Angle` units. */
+  titleRotation?: number | null;
+  /** Authored `<c:title>` DrawingML `bodyPr@vert`. */
+  titleVerticalMode?:
+    | 'horz'
+    | 'vert'
+    | 'vert270'
+    | 'wordArtVert'
+    | 'eaVert'
+    | 'mongolianVert'
+    | 'wordArtVertRtl'
+    | null;
+  /** `<c:title><c:layout><c:manualLayout>` for this auxiliary axis. */
+  titleManualLayout?: ChartManualLayout | null;
 }
 
 /**

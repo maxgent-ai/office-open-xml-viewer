@@ -5,6 +5,19 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.78.1 — 2026-08-12
+
+Patch. Fixes a DOCX pagination regression introduced in v0.78.0 without
+changing the 0.78 public API.
+
+- **Word table pagination:** keep text in narrow table cells on the same pages
+  as Word when full-width spaces participate in East Asian line layout. This
+  prevents the end of a label from moving unexpectedly to the next page.
+- **authored paragraph spacing:** preserve intentional blank space created by
+  consecutive full-width spaces instead of collapsing it during line layout.
+- **compatibility:** no migration or application changes are required when
+  upgrading from v0.78.0. (#1226)
+
 ## 0.78.0 — 2026-08-12
 
 Compatible minor release. Improves chart rendering across Office formats and

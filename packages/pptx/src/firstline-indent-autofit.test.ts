@@ -48,10 +48,11 @@ function mockCtx() {
   return { ctx: ctx as unknown as CanvasRenderingContext2D, texts };
 }
 
-function run(text: string): TextRunData {
+function run(text: string, letterSpacing?: number): TextRunData {
   return {
     type: 'text', text, bold: null, italic: null, underline: false,
     strikethrough: false, fontSize: 20, color: '000000', fontFamily: 'Arial',
+    ...(letterSpacing != null ? { letterSpacing } : {}),
   };
 }
 
@@ -103,6 +104,28 @@ describe('pptx first-line indent: the measurement path ignores indent for a bull
     // 180px > 135.6px ⇒ overflows (so the bullet — not a blanket "never
     // overflows" — is the discriminator).
     expect(measure(makePara({ runs: [run(TEXT18)], indent: INDENT_50, bullet: noBullet }))).toBe(true);
+  });
+});
+
+describe('pptx spAutoFit measurement includes DrawingML rPr@spc (§21.1.2.3.9)', () => {
+  const measure = (textRun: TextRunData) => {
+    const { ctx } = mockCtx();
+    return naturalWidthExceedsBbox(
+      ctx,
+      makeBody(makePara({ runs: [textRun] })),
+      200,
+      7.2,
+      7.2,
+      SCALE,
+      RC,
+    );
+  };
+
+  it('counts positive and negative spacing in the natural line width', () => {
+    expect(measure(run('A'.repeat(16)))).toBe(false);
+    expect(measure(run('A'.repeat(16), 2))).toBe(true);
+    expect(measure(run('A'.repeat(19)))).toBe(true);
+    expect(measure(run('A'.repeat(19), -1))).toBe(false);
   });
 });
 

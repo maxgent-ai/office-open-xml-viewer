@@ -25,7 +25,9 @@ function mockCtx() {
     get letterSpacing() { return letterSpacing; }, set letterSpacing(v: string) { letterSpacing = v; },
     // 10px advance per glyph (font size ignored) → predictable line widths.
     measureText: (s: string) => ({
-      width: [...s].length * 10, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
+      width: [...s].length * (10 + (parseFloat(letterSpacing) || 0)),
+      actualBoundingBoxAscent: 8,
+      actualBoundingBoxDescent: 2,
     }),
     fillText: (t: string, x: number, y: number) => texts.push({ text: t, x, y, letterSpacing }),
     fillRect: () => {}, drawImage: () => {}, save: () => {}, restore: () => {},

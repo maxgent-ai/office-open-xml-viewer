@@ -12,6 +12,7 @@ use crate::{attr, attr_f64, attr_i64, attr_r, child, children_vec, resolve_path,
 use ooxml_common::blip::mime_from_ext;
 use ooxml_common::math::parse_omath_nodes;
 use ooxml_common::text::{parse_lnspc, SpaceLine};
+use ooxml_common::units::text_point_to_pt;
 use std::collections::HashMap;
 
 /// Extract the lvl1pPr defRPr font size from a txBody node.
@@ -645,8 +646,9 @@ pub(crate) fn parse_text_body(
         })
         .collect();
 
-    // ECMA-376 §21.1.2.3.13 cap: a run inherits cap="all"/"small" from the
-    // shape's own lstStyle defRPr, else from the layout/master placeholder
+    // ECMA-376 §21.1.2.3.9, ST_TextCapsType §20.1.10.64: a run inherits
+    // cap="all"/"small" from the shape's own lstStyle defRPr, else from the
+    // layout/master placeholder
     // style (e.g. a template's titleStyle cap="all" upper-cases the title even
     // though the run's text is stored mixed-case). Run-level rPr/paragraph
     // defRPr already won via parse_run; fill the remainder here.
@@ -1272,7 +1274,8 @@ fn parse_run_with_reflection(
         .and_then(|n| attr(&n, "i"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "i")))
         .map(|v| v == "1" || v == "true");
-    // ECMA-376 §21.1.2.3.16 — underline style enum: none/sng/dbl/heavy/dotted/
+    // ECMA-376 §21.1.2.3.9, ST_TextUnderlineType §20.1.10.82 — underline
+    // style enum: none/sng/dbl/heavy/dotted/
     // dash/dashLong/dotDash/dotDotDash/wavy plus *Heavy variants. Carry the
     // exact value through for the renderer to dispatch on; the bool stays
     // true for any non-"none" value so existing code paths keep working.
@@ -1285,7 +1288,7 @@ fn parse_run_with_reflection(
         .unwrap_or(false);
     let underline_style = underline_attr.filter(|v| v != "none" && v != "sng");
 
-    // ECMA-376 §21.1.2.3.20 — uFill specifies a per-underline colour that
+    // ECMA-376 §21.1.2.3.12 — uFill specifies a per-underline colour that
     // overrides the text colour. uFillTx (or absence) means "follow text".
     let underline_color = r_pr
         .and_then(|n| child(n, "uFill"))
@@ -1303,19 +1306,21 @@ fn parse_run_with_reflection(
         .unwrap_or(false);
     let strike_double = strike_attr.as_deref() == Some("dblStrike");
 
-    // ECMA-376 §21.1.2.3.13 ST_TextCapsType: "none" | "small" | "all". Treat
+    // ECMA-376 §21.1.2.3.9, ST_TextCapsType §20.1.10.64: "none" | "small" |
+    // "all". Treat
     // "none" as not set (no transform) so the field stays absent in JSON.
     let caps = r_pr
         .and_then(|n| attr(&n, "cap"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "cap")))
         .filter(|v| v == "small" || v == "all");
 
-    // ECMA-376 §21.1.2.3.5 rPr @spc — letter spacing in 100ths of a point.
-    // Negative values are valid (tightening). Non-zero only.
+    // ECMA-376 §21.1.2.3.9, ST_TextPoint §20.1.10.74: unitless `rPr@spc`
+    // values are hundredths of a point; ST_UniversalMeasure suffixes are also
+    // valid. Normalize both forms to points. Negative values tighten.
     let letter_spacing = r_pr
-        .and_then(|n| attr_f64(&n, "spc"))
-        .or_else(|| def_rpr.and_then(|n| attr_f64(&n, "spc")))
-        .map(|v| v / 100.0)
+        .and_then(|n| attr(&n, "spc"))
+        .or_else(|| def_rpr.and_then(|n| attr(&n, "spc")))
+        .and_then(|value| text_point_to_pt(&value))
         .filter(|v| v.abs() > f64::EPSILON);
 
     // sz in hundredths of a point
@@ -1342,7 +1347,7 @@ fn parse_run_with_reflection(
                 .and_then(|n| attr(&n, "typeface"))
         })
         .map(|tf| resolve_theme_typeface(&tf, theme));
-    // ECMA-376 §21.1.2.3.7 — <a:ea typeface="..."/> sets a separate font for
+    // ECMA-376 §21.1.2.3.3 — <a:ea typeface="..."/> sets a separate font for
     // East Asian glyphs (CJK). Defaults to the theme's +mn-ea slot when the
     // run doesn't specify one explicitly.
     let font_family_ea = r_pr

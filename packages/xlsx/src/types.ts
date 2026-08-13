@@ -62,6 +62,10 @@ export interface Worksheet {
   name: string;
   rows: Row[];
   colWidths: Record<number, number>;
+  /** Compact `<col min max width>` declarations in document order. The parser
+   *  normalizes overlapping legacy point entries in `colWidths` to the final
+   *  effective width; later live point edits can therefore override ranges. */
+  colWidthRanges?: Array<{ min: number; max: number; width: number }>;
   rowHeights: Record<number, number>;
   /** Per-column outline (grouping) depth 0-7 (ECMA-376 §18.3.1.13
    *  `<col outlineLevel>`), keyed by 1-based column index. Present only for

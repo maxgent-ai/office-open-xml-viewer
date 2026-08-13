@@ -358,6 +358,27 @@ export const WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA = defineCompatibilityRule(
   description: 'With balanceSingleByteDoubleByteWidth enabled on linesAndChars, Word applies half of the authored charSpace delta to ASCII SBCS text and to U+0020/U+3000 space characters, while applying the full delta to CJK ideographs and full-width ASCII forms. The Word-output evidence covers ASCII digits, letters, punctuation, spaces, CJK, full-width ASCII, mixed text, proportional/fixed-pitch faces, negative/zero/positive charSpace, and line-only controls. Non-ASCII high-ANSI and complex-script text are outside the observed matrix and retain the preexisting grid behavior.',
 });
 
+export const WORD_IDEOGRAPHIC_SPACE_LINE_END_ALLOWANCE = defineCompatibilityRule({
+  id: 'word-ideographic-space-line-end-allowance',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'ideographic-space-line-end-count-and-run-boundary-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'Word keeps a single U+3000 immediately following visible East-Asian text on that line when the visible glyph is force-fitted into a narrow table cell. A paragraph-final sequence of two or more U+3000 characters remains authored width-bearing content and may form blank continuation lines. The observed matrix covers single and trailing multiple spaces, linesAndChars with negative/positive charSpace, line-only grids, and snapToGrid opt-out.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_IDEOGRAPHIC_SPACE_LINE_END_ALLOWANCE}. */
+export function wordIdeographicSpaceLineEndAllowanceCount(
+  hasEastAsianVisiblePredecessor: boolean,
+  consecutiveSpaceCount: number,
+): 0 | 1 {
+  return hasEastAsianVisiblePredecessor && consecutiveSpaceCount === 1 ? 1 : 0;
+}
+
 /** Compatibility projection governed by
  * {@link WORD_BALANCED_LINES_AND_CHARS_GRID_DELTA}. Script-slot acquisition
  * has already separated ordinary East-Asian and ASCII SBCS text; the explicit

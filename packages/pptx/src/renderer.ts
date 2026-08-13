@@ -408,6 +408,10 @@ type LayoutSegment = {
   strikeDouble?: boolean;
   /** Extra inter-character spacing in px (already scaled). */
   letterSpacingPx?: number;
+  /** Internal identity of the authored run; keeps rPr@spc within that run. */
+  sourceRunId?: number;
+  /** Spacing boundary before this segment when one authored run changed font. */
+  leadingLetterSpacingPx?: number;
   baseline?: number;
   /** Run-level glyph drop shadow (rPr > effectLst > outerShdw). */
   shadow?: import('@silurus/ooxml-core').Shadow;
@@ -823,7 +827,8 @@ export function naturalWidthExceedsBbox(
       const isBold = run.bold ?? para.defBold ?? body.defaultBold ?? false;
       const isItalic = run.italic ?? para.defItalic ?? body.defaultItalic ?? false;
       ctx.font = buildFont(isBold, isItalic, sizePx, family, rc);
-      lineW += ctx.measureText(run.text).width;
+      const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
+      lineW += measureTextAdvance(ctx, run.text, letterSpacingPx);
       if (lineW > textMaxW) return true;
     }
   }
@@ -839,17 +844,76 @@ function tokenHasCjk(s: string): boolean {
   return false;
 }
 
-/** Number of Unicode code points in `s` (NOT UTF-16 code units). OOXML letter
- *  spacing (rPr @spc) adds advance per GLYPH, and a supplementary-plane CJK
- *  ideograph (e.g. 𠮟 U+20B9F) is one glyph encoded as a surrogate pair. The
- *  per-glyph draw loops (`for (const ch of text)`) and core's
- *  `justifiedPiecePositions` both iterate code points, so the letter-spacing
- *  width math must count code points too — using `text.length` (code units)
- *  would over-count by one per surrogate pair and drift the pen. */
+/** Number of Unicode code points in `s` (NOT UTF-16 code units). Used only by
+ *  text paths that deliberately paint per code point (WordArt / vertical text)
+ *  and by the fallback for Canvas implementations without native
+ *  `letterSpacing`. Native horizontal text uses {@link measureTextAdvance} so
+ *  the browser's shaping-cluster boundaries remain authoritative. */
 function codePointCount(s: string): number {
   let n = 0;
   for (const _ of s) n++;
   return n;
+}
+
+const nativeLetterSpacingSupport = new WeakMap<CanvasRenderingContext2D, boolean>();
+
+/** Detect real Canvas letter-spacing support, rather than accepting an expando
+ * or an inert test-double property. The result is stable for a context and is
+ * shared by measurement and paint so their fallback choice cannot diverge. */
+function hasNativeLetterSpacing(ctx: CanvasRenderingContext2D): boolean {
+  const cached = nativeLetterSpacingSupport.get(ctx);
+  if (cached != null) return cached;
+
+  const spacingCtx = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+  const previous = spacingCtx.letterSpacing;
+  if (typeof previous !== 'string') {
+    nativeLetterSpacingSupport.set(ctx, false);
+    return false;
+  }
+
+  let supported = false;
+  try {
+    spacingCtx.letterSpacing = '0px';
+    const natural = ctx.measureText('ii').width;
+    spacingCtx.letterSpacing = '1px';
+    const tracked = ctx.measureText('ii').width;
+    supported = Number.isFinite(natural) && Number.isFinite(tracked) && tracked !== natural;
+  } catch {
+    supported = false;
+  } finally {
+    try { spacingCtx.letterSpacing = previous; } catch { /* inert implementation */ }
+  }
+  nativeLetterSpacingSupport.set(ctx, supported);
+  return supported;
+}
+
+/** Measure the Canvas advance with the tracking derived from DrawingML
+ * `rPr@spc`. Native `measureText()` uses the same shaping clusters as paint,
+ * which matters for combining sequences, emoji ZWJ runs, flags, and Indic
+ * conjuncts. Canvas includes one trailing spacing unit in its reported width;
+ * DrawingML spacing is only between characters in the run, so remove that
+ * terminal unit. Older/inert implementations use the same n-1 code-point
+ * approximation as the manual paint fallback. */
+function measureTextAdvance(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  letterSpacingPx: number,
+): number {
+  const spacingCtx = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+  const previous = spacingCtx.letterSpacing;
+  if (letterSpacingPx !== 0 && hasNativeLetterSpacing(ctx)) {
+    try {
+      spacingCtx.letterSpacing = `${letterSpacingPx}px`;
+      const tracked = ctx.measureText(text).width;
+      if (Number.isFinite(tracked)) {
+        return text.length > 0 ? tracked - letterSpacingPx : tracked;
+      }
+    } finally {
+      try { spacingCtx.letterSpacing = previous; } catch { /* inert implementation */ }
+    }
+  }
+  const internalBoundaries = Math.max(0, codePointCount(text) - 1);
+  return ctx.measureText(text).width + letterSpacingPx * internalBoundaries;
 }
 
 export function layoutParagraph(
@@ -985,6 +1049,27 @@ export function layoutParagraph(
     hasWhitespaceOnLine = false;
   };
 
+  /** Width contributed if `text` is appended now. OOXML spacing is present at
+   * a fragment seam only when both fragments came from the same authored run. */
+  const incomingTextAdvance = (
+    text: string,
+    font: string,
+    letterSpacingPx: number,
+    sourceRunId: number,
+  ): number => {
+    ctx.font = font;
+    const own = measureTextAdvance(ctx, text, letterSpacingPx);
+    const last = currentLine.segments.at(-1);
+    if (
+      !last || last.isTab || last.math || last.sourceRunId !== sourceRunId
+    ) return own;
+    if (last.font === font && (last.letterSpacingPx ?? 0) === letterSpacingPx) {
+      return measureTextAdvance(ctx, last.text + text, letterSpacingPx)
+        - measureTextAdvance(ctx, last.text, letterSpacingPx);
+    }
+    return own + letterSpacingPx;
+  };
+
   const push = (
     text: string,
     font: string,
@@ -1006,17 +1091,17 @@ export function layoutParagraph(
       fontFamily?: string;
       /** Resolved hyperlink target (IX1) — passed through to the overlay span. */
       hyperlink?: HyperlinkTarget;
+      sourceRunId?: number;
     },
   ) => {
     if (!text) return;
     ctx.font = font;
     const lsPx = extras?.letterSpacingPx ?? 0;
-    const baseW = ctx.measureText(text).width;
-    // Letter spacing adds an extra gap between every character, including
-    // after the last one — matches the "advance width" semantics of OOXML
-    // spc (each glyph's advance grows by spc points). Tab stops measure the
-    // same way so this stays consistent with measureText below.
-    const w = baseW + lsPx * codePointCount(text);
+    // Measure with the same native Canvas tracking state used by paint so wrap,
+    // tabs, alignment, combining sequences, and emoji clusters stay consistent.
+    // The value comes from DrawingML rPr@spc (§21.1.2.3.9; ST_TextPoint
+    // §20.1.10.74).
+    const sourceRunId = extras?.sourceRunId;
     const strikeDouble = extras?.strikeDouble;
     const underlineStyle = extras?.underlineStyle;
     const underlineColor = extras?.underlineColor;
@@ -1046,17 +1131,37 @@ export function layoutParagraph(
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
       (a.fontFamily ?? '') === (fontFamily ?? '') &&
-      hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink);
+      hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink) &&
+      (lsPx === 0 || a.sourceRunId === sourceRunId);
+    const last = currentLine.segments.at(-1);
+    let w = measureTextAdvance(ctx, text, lsPx);
+    if (last && sameMeta(last)) {
+      // Token/CJK/SEA splitting is a layout concern, not an authored run
+      // boundary. Re-measure the merged string so contextual shaping and the
+      // single spacing boundary between the fragments are retained exactly.
+      w = measureTextAdvance(ctx, last.text + text, lsPx)
+        - measureTextAdvance(ctx, last.text, lsPx);
+    } else if (
+      last && !last.isTab && !last.math
+      && sourceRunId != null && last.sourceRunId === sourceRunId
+    ) {
+      // A font/style split inside one authored run still has one character
+      // boundary between its adjacent fragments.
+      w += lsPx;
+    }
     lineW += w;
     // Mirror the paint-side item sequence so a tabbed line's wrap budget resolves
     // identically (issue #1006). One item per push call; consecutive content
     // items simply sum inside resolveTabWidths.
     lineItems.push({ isTab: false, width: w });
-    const last = currentLine.segments.at(-1);
     if (last && sameMeta(last)) {
       last.text += text;
     } else {
-      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
+      const leadingLetterSpacingPx = last && !last.isTab && !last.math
+        && sourceRunId != null && last.sourceRunId === sourceRunId
+        ? lsPx
+        : 0;
+      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
     }
   };
 
@@ -1099,11 +1204,12 @@ export function layoutParagraph(
       outline: seg.outline,
       highlight: seg.highlight,
       fontFamily: seg.fontFamily,
+      sourceRunId: seg.sourceRunId,
     });
     return true;
   };
 
-  for (const run of para.runs) {
+  for (const [sourceRunId, run] of para.runs.entries()) {
     if (run.type === 'break') {
       // The line being closed ends at a MANUAL break (§21.1.2.2.1) — mark it so
       // a `just` paragraph left-aligns it like its last line (§20.1.10.59).
@@ -1173,7 +1279,8 @@ export function layoutParagraph(
       : font;
     ctx.font = font;
 
-    // ECMA-376 §21.1.2.3.13 — caps transforms the rendered glyphs without
+    // ECMA-376 §21.1.2.3.9; ST_TextCapsType §20.1.10.64 — caps transforms
+    // the rendered glyphs without
     // changing the underlying text. "small" emulated as upper-case glyphs at
     // ~80% size is the long-established Office fallback when the font lacks
     // smcp; we just upper-case for now and rely on the configured size.
@@ -1216,6 +1323,7 @@ export function layoutParagraph(
       // alone drives classification: a ppaction://… or a scheme-less internal
       // part name is treated as internal. Overlay-only; does not affect glyphs.
       hyperlink: classifyPptxHyperlink(run.hyperlink),
+      sourceRunId,
     };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
@@ -1253,7 +1361,7 @@ export function layoutParagraph(
       }
 
       ctx.font = font;
-      const tokW = ctx.measureText(token).width;
+      const tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
       const isWhitespace = /^\s+$/.test(token);
 
       // ── Symbol-font characters (Wingdings/Webdings/Symbol) ───────────────
@@ -1284,7 +1392,7 @@ export function layoutParagraph(
             }
           }
           ctx.font = chFont;
-          const chW = ctx.measureText(drawCh).width;
+          const chW = incomingTextAdvance(drawCh, chFont, lsPx, sourceRunId);
           if (!fitsW(chW) && lineW > 0) newLine();
           push(drawCh, chFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
@@ -1332,13 +1440,19 @@ export function layoutParagraph(
           // CJK when an East Asian typeface was declared, else the latin family.
           const chFamily = isEa ? (familyEa as string) : family;
           ctx.font = chFont;
-          measured.push({ ch, w: ctx.measureText(ch).width, font: chFont, family: chFamily });
+          measured.push({ ch, w: measureTextAdvance(ctx, ch, 0), font: chFont, family: chFamily });
         }
         if (para.eaLnBrk === false) {
           // Keep the East Asian word whole. If the current line already has
           // content and the token would overflow, wrap once before placing it;
           // never break mid-token (an over-wide token simply overflows).
-          const tokenW = measured.reduce((acc, m) => acc + m.w, 0);
+          const previous = currentLine.segments.at(-1);
+          const leadingBoundary = !!previous
+            && !previous.isTab && !previous.math
+            && previous.sourceRunId === sourceRunId;
+          const tokenW = measured.reduce((acc, m) => acc + m.w, 0)
+            + Math.max(0, measured.length - 1) * lsPx
+            + (leadingBoundary && measured.length > 0 ? lsPx : 0);
           if (lineW > 0 && !fitsW(tokenW)) newLine();
           for (const m of measured) {
             push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
@@ -1352,7 +1466,18 @@ export function layoutParagraph(
           // slack-adjusted pen (right / centre tab). Equivalent to lineW when no
           // tab, so tab-free CJK is byte-identical.
           const cjkPen = Number.isFinite(lineMaxW()) ? lineMaxW() - availW() : lineW;
-          let n = fitCjkLine(rest, cjkPen, lineMaxW(), DEFAULT_KINSOKU_RULES);
+          const previous = currentLine.segments.at(-1);
+          const leadingBoundary = !!previous
+            && !previous.isTab && !previous.math
+            && previous.sourceRunId === sourceRunId;
+          let n = fitCjkLine(
+            rest,
+            cjkPen,
+            lineMaxW(),
+            DEFAULT_KINSOKU_RULES,
+            lsPx,
+            leadingBoundary,
+          );
           if (n === 0) {
             // A non-empty line can't take the run head → break and retry empty.
             // But a line holding ONLY a tab (lineW===0, tab jump consumed the
@@ -1392,13 +1517,19 @@ export function layoutParagraph(
         const eaDiffers = familyEa != null && fontEa !== font;
         const isEaCh = (ch: string): boolean => eaDiffers && isCjkBreakChar(ch.codePointAt(0) ?? 0);
         const measureSub = (sub: string): number => {
-          let w = lsPx * codePointCount(sub);
+          let w = 0;
+          const previous = currentLine.segments.at(-1);
+          let hasBoundary = !!previous
+            && !previous.isTab && !previous.math
+            && previous.sourceRunId === sourceRunId;
           let runText = '';
           let runEa: boolean | null = null;
           const flush = (): void => {
             if (runText === '') return;
             ctx.font = runEa ? (fontEa as string) : font;
-            w += ctx.measureText(runText).width;
+            w += measureTextAdvance(ctx, runText, lsPx);
+            if (hasBoundary) w += lsPx;
+            hasBoundary = true;
             runText = '';
           };
           for (const ch of sub) {
@@ -1461,7 +1592,7 @@ export function layoutParagraph(
         if (lineW > 0) newLine();
         for (const ch of token) {
           ctx.font = font;
-          const chW = ctx.measureText(ch).width;
+          const chW = incomingTextAdvance(ch, font, lsPx, sourceRunId);
           if (!fitsW(chW) && lineW > 0) newLine();
           push(ch, font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
         }
@@ -4088,7 +4219,7 @@ export function renderTextBody(
         return {
           isTab: false,
           width: seg.text
-            ? ctx.measureText(seg.text).width + ls * codePointCount(seg.text)
+            ? (seg.leadingLetterSpacingPx ?? 0) + measureTextAdvance(ctx, seg.text, ls)
             : 0,
         };
       });
@@ -4125,7 +4256,8 @@ export function renderTextBody(
       ctx.font = seg.font;
       const m = ctx.measureText(seg.text || 'M');
       const ls = seg.letterSpacingPx ?? 0;
-      lineWidth += seg.text ? m.width + ls * codePointCount(seg.text) : 0;
+      lineWidth += seg.leadingLetterSpacingPx ?? 0;
+      lineWidth += seg.text ? measureTextAdvance(ctx, seg.text, ls) : 0;
       if (m.actualBoundingBoxAscent > 0) {
         maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
       }
@@ -4259,12 +4391,29 @@ export function renderTextBody(
     const visual: LineVisualOrder | null = paraNeedsBidi
       ? computeLineVisualOrder(line.segments, baseRtl)
       : null;
+    const visualBoundarySpacing = (previousLi: number, currentLi: number): number => {
+      if (Math.abs(previousLi - currentLi) !== 1) return 0;
+      const before = line.segments[Math.min(previousLi, currentLi)];
+      const after = line.segments[Math.max(previousLi, currentLi)];
+      if (
+        before.isTab || before.math || after.isTab || after.math
+        || before.sourceRunId == null
+        || before.sourceRunId !== after.sourceRunId
+      ) return 0;
+      // `after` owns the logical boundary metadata. Place that advance between
+      // the two segments in VISUAL order, even when bidi reverses them.
+      return after.leadingLetterSpacingPx ?? 0;
+    };
     const segCount = segs.length;
     for (let vi = 0; vi < segCount; vi++) {
       const li = visual ? visual.order[vi] : vi;
       const seg = segs[li];
       const segRtl = visual ? visual.rtl[li] : false;
       if (paraNeedsBidi) ctx.direction = segRtl ? 'rtl' : 'ltr';
+      if (vi > 0) {
+        const previousLi = visual ? visual.order[vi - 1] : vi - 1;
+        penX += visualBoundarySpacing(previousLi, li);
+      }
       if (seg.isTab) {
         penX += seg.tabWidthPx ?? 0;
         continue;
@@ -4305,8 +4454,7 @@ export function renderTextBody(
       // Box advance = glyph measure + letter spacing + justification stretch
       // (internal CJK pitch + trailing `jext`).
       if (seg.highlight && seg.text) {
-        const hlW = ctx.measureText(seg.text).width
-          + (ls > 0 ? ls * codePointCount(seg.text) : 0)
+        const hlW = measureTextAdvance(ctx, seg.text, ls)
           + internalStretch
           + jext;
         paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
@@ -4324,23 +4472,36 @@ export function renderTextBody(
         op: 'fill' | 'stroke',
       ): void => {
         const paint = op === 'fill' ? target.fillText.bind(target) : target.strokeText.bind(target);
-        if (ls > 0 && text.length > 1) {
-          // rPr @spc (§21.1.2.3.x): distribute the per-glyph advance via canvas
-          // letterSpacing and draw the whole CONTEXTUALLY-shaped string in ONE
-          // paint. This keeps the drawn advance == the layout's contextual
-          // measure + n·ls (約物半角 contextual half-width collapse honoured, so a
+        if (ls !== 0 && codePointCount(text) > 1) {
+          // rPr @spc (§21.1.2.3.9; ST_TextPoint §20.1.10.74): apply the
+          // normalized spacing via Canvas letterSpacing and draw the whole
+          // CONTEXTUALLY-shaped string in ONE paint. The layout measures this
+          // same state via measureTextAdvance, so contextual CJK packing and
+          // multi-code-point shaping clusters use the browser's exact advance.
+          // This keeps 約物半角 contextual half-width collapse honoured, so a
           // piece's glyphs stay aligned with its contextual `dx` origin and the
           // next piece/run never overlaps — the pptx analog of docx PR #626), AND
           // preserves Arabic cursive joining for RTL. (The old LTR branch summed
           // ISOLATED measure(ch)+ls, which overran the contextual box at 約物
-          // punctuation.) Chromium's measureText adds letterSpacing after every
-          // glyph incl. the trailing one (= natural + n·ls), matching
-          // codePointCount(seg.text)·ls used by the layout's segW.
-          const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
+          // punctuation.)
+          const lctx = target as CanvasRenderingContext2D & { letterSpacing?: string };
           const prev = lctx.letterSpacing;
-          try { lctx.letterSpacing = `${ls}px`; } catch { /* older engines */ }
-          paint(text, atX, segBaseline);
-          try { lctx.letterSpacing = prev; } catch { /* ignore */ }
+          if (hasNativeLetterSpacing(target)) {
+            lctx.letterSpacing = `${ls}px`;
+            paint(text, atX, segBaseline);
+            try { lctx.letterSpacing = prev; } catch { /* inert implementation */ }
+          } else {
+            // Pre-letterSpacing Canvas fallback. It cannot preserve contextual
+            // shaping across the split, but its manual advance matches the
+            // code-point approximation in measureTextAdvance.
+            let x = atX;
+            const cps = [...text];
+            for (let index = 0; index < cps.length; index++) {
+              const ch = cps[index];
+              paint(ch, x, segBaseline);
+              if (index < cps.length - 1) x += target.measureText(ch).width + ls;
+            }
+          }
         } else {
           paint(text, atX, segBaseline);
         }
@@ -4350,19 +4511,19 @@ export function renderTextBody(
       // internal CJK gaps. Anchor each piece to the whole-string prefix advance
       // (via core's `justifiedPiecePositions`) to absorb 約物半角 drift — see
       // packages/core/src/text/justify-positions.ts for the invariant proof.
-      const measureCb = (s: string): number => ctx.measureText(s).width;
+      const measureCb = (s: string): number => measureTextAdvance(ctx, s, ls);
       const pieces =
         splitBefore && splitBefore.length > 0
-          ? justifiedPiecePositions([...seg.text], splitBefore, segPerGap, measureCb, ls)
+          ? justifiedPiecePositions([...seg.text], splitBefore, segPerGap, measureCb)
           : null;
 
       // A run is FULLY distributed when justifyLine opened a gap at EVERY internal
       // inter-glyph boundary (splitBefore.length === cps.length - 1) — e.g. a
       // pure-CJK `algn="just"/"dist"` line. Drawing one single-glyph piece per code
       // point (the `pieces` loop) routes through drawWithFont's `else → paint(ch)`:
-      // each piece has text.length === 1, so the `ls > 0 && text.length > 1`
+      // each piece has one code point, so the `ls !== 0 && codePointCount(text) > 1`
       // letterSpacing branch never fires, and every glyph is painted ISOLATED even
-      // when ls > 0. That loses the browser's JIS X 4051 約物連続 packing — a
+      // when ls is non-zero. That loses the browser's JIS X 4051 約物連続 packing — a
       // closing-class punct immediately followed by an opening bracket ("：［",
       // "、［", "）（") packs ~half-em in measureText (a bracket next to a plain
       // kanji/kana does NOT pack). The isolated full-width bracket then overruns its
@@ -4394,15 +4555,26 @@ export function renderTextBody(
           return;
         }
         if (fullyDistributed) {
-          const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
-          const prev = lctx.letterSpacing;
-          try { lctx.letterSpacing = `${ls + segPerGap}px`; } catch { /* older engines */ }
-          (op === 'fill' ? target.fillText.bind(target) : target.strokeText.bind(target))(
-            seg.text,
-            penX,
-            segBaseline,
-          );
-          try { lctx.letterSpacing = prev; } catch { /* ignore */ }
+          const paint = op === 'fill'
+            ? target.fillText.bind(target)
+            : target.strokeText.bind(target);
+          const pitch = ls + segPerGap;
+          if (hasNativeLetterSpacing(target)) {
+            const lctx = target as CanvasRenderingContext2D & { letterSpacing: string };
+            const prev = lctx.letterSpacing;
+            lctx.letterSpacing = `${pitch}px`;
+            paint(seg.text, penX, segBaseline);
+            try { lctx.letterSpacing = prev; } catch { /* inert implementation */ }
+          } else {
+            // Old/inert Canvas: use the same code-point pitch approximation as
+            // measureTextAdvance so distributed layout and paint stay aligned.
+            let x = penX;
+            for (let index = 0; index < cps.length; index++) {
+              const ch = cps[index];
+              paint(ch, x, segBaseline);
+              if (index < cps.length - 1) x += target.measureText(ch).width + pitch;
+            }
+          }
         } else if (pieces) {
           for (const { text: pieceText, dx } of pieces) {
             drawWithFont(target, pieceText, penX + dx, op);
@@ -4504,8 +4676,7 @@ export function renderTextBody(
       }
 
       ctx.font = seg.font;
-      const baseW = ctx.measureText(seg.text).width;
-      const segW = baseW + (ls > 0 ? ls * codePointCount(seg.text) : 0) + internalStretch;
+      const segW = measureTextAdvance(ctx, seg.text, ls) + internalStretch;
 
       if (onTextRun && seg.text) {
         onTextRun({

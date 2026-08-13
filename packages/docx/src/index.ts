@@ -34,6 +34,7 @@ export type {
   ChartTrendline,
   ChartType,
   ChartExElementStyle,
+  ChartexHistogramBinning,
   ChartexBoxSeries,
   ChartexBoxWhisker,
   ChartexSunburst,

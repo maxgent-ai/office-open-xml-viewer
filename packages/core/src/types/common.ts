@@ -366,7 +366,8 @@ export interface TextRunData {
   underline: boolean;
   /**
    * Specific underline style when not the default single line. Values come
-   * from ECMA-376 §21.1.2.3.16 (ST_TextUnderlineType): "dbl", "heavy",
+   * from `rPr@u` (ECMA-376 §21.1.2.3.9; ST_TextUnderlineType
+   * §20.1.10.82): "dbl", "heavy",
    * "dotted", "dottedHeavy", "dash", "dashHeavy", "dashLong",
    * "dashLongHeavy", "dotDash", "dotDashHeavy", "dotDotDash",
    * "dotDotDashHeavy", "wavy", "wavyHeavy", "wavyDbl". Absent means either
@@ -374,7 +375,7 @@ export interface TextRunData {
    */
   underlineStyle?: string;
   /**
-   * Underline-only colour from rPr > uFill (ECMA-376 §21.1.2.3.20). Absent
+   * Underline-only colour from rPr > uFill (ECMA-376 §21.1.2.3.12). Absent
    * means the underline follows the text colour (uFillTx default).
    */
   underlineColor?: string;
@@ -382,7 +383,8 @@ export interface TextRunData {
   strikethrough: boolean;
   /**
    * True only when rPr strike = "dblStrike". Lets the renderer draw two parallel
-   * lines instead of one. ECMA-376 §21.1.2.3.10 (ST_TextStrikeType).
+   * lines instead of one. ECMA-376 §21.1.2.3.9; ST_TextStrikeType
+   * §20.1.10.79.
    */
   strikeDouble?: boolean;
   /** Font size in points */
@@ -390,7 +392,7 @@ export interface TextRunData {
   color: string | null;
   fontFamily: string | null;
   /**
-   * East Asian font family from rPr > a:ea (ECMA-376 §21.1.2.3.7),
+   * East Asian font family from rPr > a:ea (ECMA-376 §21.1.2.3.3),
    * resolved through the theme. Renderer uses this for CJK glyphs when
    * present; absent means CJK falls back to fontFamily.
    */
@@ -405,15 +407,18 @@ export interface TextRunData {
   /** Baseline shift in thousandths of a point. Positive = superscript, negative = subscript. */
   baseline?: number;
   /**
-   * Capitalisation transform — ECMA-376 §21.1.2.3.13 (ST_TextCapsType).
+   * Capitalisation transform from `rPr@cap` — ECMA-376 §21.1.2.3.9;
+   * ST_TextCapsType §20.1.10.64.
    * 'all' renders text in upper case; 'small' uses small caps (rendered as
    * upper case at ~80% size when no smcp font feature is available).
    * 'none' or omitted leaves the text unchanged.
    */
   caps?: 'none' | 'small' | 'all';
   /**
-   * Inter-character spacing in 100ths of a point — ECMA-376 §21.1.2.3.5
-   * (rPr @spc). Positive values add space, negative values tighten.
+   * Inter-character spacing in points. Positive values add space; negative
+   * values tighten. DrawingML `rPr@spc` accepts unitless hundredths of a point
+   * or an `ST_UniversalMeasure` value (ECMA-376 §21.1.2.3.9; ST_TextPoint
+   * §20.1.10.74); the PPTX parser normalizes either form to points.
    */
   letterSpacing?: number;
   /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */

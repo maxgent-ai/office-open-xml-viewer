@@ -40,8 +40,8 @@ export interface JustifiedPiece {
  * is anchored to the whole-string cumulative advance up to its start — via
  * `measure` on the prefix — plus `perGap` for every gap that precedes it, plus
  * `letterSpacingPx` for every code point that precedes it. This keeps the drawn
- * glyphs aligned with the segment's `measureText(whole) + ls·n`-based box (so
- * the final glyph reaches `measure(whole) + ls·n + splitBefore.length·perGap`
+ * glyphs aligned with the segment's `measureText(whole) + ls·(n-1)` box (so
+ * the final glyph reaches `measure(whole) + ls·(n-1) + splitBefore.length·perGap`
  * and the next segment never overlaps), while honouring the contextual CJK
  * metrics baked into `measure`.
  *
@@ -52,8 +52,8 @@ export interface JustifiedPiece {
  * @param measure         Contextual width of a string — `ctx.measureText(s).width`
  *                        with the segment's font already selected on `ctx`. Must
  *                        NOT include letter-spacing (pass that via `letterSpacingPx`).
- * @param letterSpacingPx px added after each code point's glyph advance
- *                        (OOXML `rPr @spc` / `w:spacing` semantics). Default 0.
+ * @param letterSpacingPx spacing at each internal code-point boundary, derived from
+ *                        OOXML `rPr@spc` / `w:spacing`. Default 0.
  * @returns One {@link JustifiedPiece} per slice, in draw order.
  */
 export function justifiedPiecePositions(

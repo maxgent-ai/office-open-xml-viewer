@@ -259,6 +259,16 @@ UPDATE_REFS=1 pnpm vrt:fidelity
 
 Do not automatically update files under `packages/*/tests/visual/references/`.
 
+An exact private self-VRT difference is a detected regression candidate, even
+when every changed document carries the setting being implemented. Enumerate
+every changed page, sheet, or slide and adjudicate each one against an
+Office-produced reference. A manual review counts only when it explicitly
+compares the candidate and previous renderers with that Office output, or when
+the user explicitly adjudicates the difference. Never approve a group of
+differences solely because the affected files share a feature flag or OOXML
+element. If neither an Office reference nor user adjudication is available,
+report that item as unadjudicated rather than calling the VRT successful.
+
 ## Documentation and Public Examples
 
 Public docs and commit messages should be written in English.

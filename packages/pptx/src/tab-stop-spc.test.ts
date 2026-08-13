@@ -3,14 +3,15 @@ import { renderTextBody } from './renderer.js';
 import type { TextBody, Paragraph } from './types';
 import type { TextRunData, TabStop } from '@silurus/ooxml-core';
 
-// ECMA-376 §21.1.2.3.x (rPr @spc, letter-spacing) — 約物半角 bracket overlap on the
+// ECMA-376 §21.1.2.3.9 (rPr @spc; ST_TextPoint §20.1.10.74) — 約物半角
+// bracket overlap on the
 // TAB-STOP draw path, the pptx analog of PR #627 (drawWithFont) and docx #626
 // (docGrid §17.6.5).
 //
 // A right-/centre-aligned tab stop (pPr > tabLst, §21.1.2.1.x) places the text
 // after a `\t` at the stop (since #916, as ordinary inline segments after an
 // inline tab segment). Each segment is measured CONTEXTUALLY:
-// `segW = measureText(seg.text) + ls·codePointCount`. The browser's 約物半角
+// `segW = measureText(seg.text) + ls·(clusterCount-1)`. The browser's 約物半角
 // contextual shaping collapses an opening bracket "［" to half-width when it is
 // FOLLOWED by an East-Asian glyph WITHIN the measured string
 // (`measureText("［あ") < measureText("［") + measureText("あ")`).
@@ -47,11 +48,10 @@ function ctxMeasure(s: string, fontPx: number): number {
   return w;
 }
 
-/** Recording 2D context. `measureText` models 約物半角 contextual collapse and is
- *  agnostic of letterSpacing (the renderer always measures BEFORE it sets
- *  letterSpacing). `fillText` records text + x + y AND the current letterSpacing
- *  at call time, so a test can assert the contiguous-draw fix set
- *  `ctx.letterSpacing = ls`. */
+/** Recording 2D context. `measureText` models 約物半角 contextual collapse plus
+ * native Canvas letterSpacing. `fillText` records text + x + y AND the current
+ * letterSpacing at call time, so a test can assert the contiguous-draw fix set
+ * `ctx.letterSpacing = ls`. */
 function mockCtx(): {
   ctx: CanvasRenderingContext2D;
   texts: { text: string; x: number; y: number; letterSpacing: string }[];
@@ -71,7 +71,7 @@ function mockCtx(): {
     measureText: (s: string) => {
       const p = px();
       return {
-        width: ctxMeasure(s, p),
+        width: ctxMeasure(s, p) + [...s].length * (parseFloat(letterSpacing) || 0),
         actualBoundingBoxAscent: p * 0.8,
         actualBoundingBoxDescent: p * 0.2,
         fontBoundingBoxAscent: p * 0.8,
@@ -152,7 +152,7 @@ const LS = 4; // px of @spc letter-spacing (points == px at SCALE 1/12700)
 // Tab stop at 400px from the text-area left (> the current pen of 0 at the `\t`).
 const TAB_POS_EMU = 400 * 12700;
 
-describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, never overlap (§21.1.2.3.x)', () => {
+describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, never overlap (§21.1.2.3.9)', () => {
   // (1) RED→GREEN core fix: a tab-stop @spc EA segment is painted by EXACTLY ONE
   //     contiguous fillText carrying the whole string, with letterSpacing=ls.
   //     Before the fix: 7 single-code-point fillText calls, letterSpacing '0px'.
@@ -173,7 +173,7 @@ describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, n
   });
 
   // (2) No-overlap / contextual abutment: the EA tab segment is one draw, its
-  //     reported box width is the CONTEXTUAL measure + len·ls (bracket collapsed),
+  //     reported box width is the contextual measure + (len-1)·ls (bracket collapsed),
   //     and the FOLLOWING tab segment abuts that edge (no overlap, no gap). The
   //     buggy per-glyph isolated sum would have overrun by FONT_PX/2 (full−half).
   it('keeps measure==draw so the next tab segment abuts the @spc EA box (no overlap)', () => {
@@ -189,9 +189,9 @@ describe('pptx @spc tab-stop — 約物半角 brackets are drawn contiguously, n
     const eaCalls = texts.filter((c) => c.text === EA_SPC);
     expect(eaCalls.length, 'EA tab segment is a single draw').toBe(1);
 
-    // Reported box width = contextual measure (bracket half) + len·ls = tabSegW.
+    // Reported box width = contextual measure + spacing at len-1 boundaries.
     const len = [...EA_SPC].length;
-    const boxW = ctxMeasure(EA_SPC, FONT_PX) + len * LS;
+    const boxW = ctxMeasure(EA_SPC, FONT_PX) + (len - 1) * LS;
     expect(segEA.w).toBeCloseTo(boxW, 6);
 
     // The next tab segment is drawn at the EA segment's box edge → abuts exactly.

@@ -22,7 +22,7 @@ import {
   setCoordinateIndexValue,
   type CoordinateIndexIdentity,
 } from './renderer-coordinate-index.js';
-import { GridGeometry } from './internal/grid-geometry.js';
+import { GridGeometry, MAX_WORKSHEET_COL } from './internal/grid-geometry.js';
 import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
 import { usesNativeOneCellExtent } from './internal/cell-anchor-geometry.js';
 import {
@@ -3222,7 +3222,7 @@ function virtualizedTextOverflowOverscan(
     const visibleEndCell = cellMap.get(`${row}:${visibleEndCol}`);
     if (
       after != null &&
-      after <= 16_384 &&
+      after <= MAX_WORKSHEET_COL &&
       (!visibleEndCell || visibleEndCell.value.type === 'empty') &&
       !mergeBlocksOverflow(worksheet, row, visibleEndCol, after - 1) &&
       reaches(

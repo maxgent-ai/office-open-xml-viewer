@@ -104,6 +104,7 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordBalancedSpaceCellAdjustmentApplies,
+  wordIdeographicSpaceLineEndAllowanceCount,
   wordUniformRunPositionPaintPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
 } from './layout/line-compatibility.js';
@@ -142,6 +143,15 @@ export interface LayoutTextSeg extends LayoutSegSource {
    * its East-Asian ideographic cell. */
   widthBalanceSpaceSequence?: true;
   widthBalanceSpaceAdjustmentPt?: number;
+  /** Internal marker assigned once after queue construction: this segment is
+   * part of the paragraph-final U+3000-only suffix. */
+  paragraphFinalIdeographicSpaceTail?: true;
+  /** Number of trailing U+3000 characters owned by this segment. Kept
+   * separately from the suffix-wide count so a source seam cannot move visible
+   * text into the tail when the segment is split for line breaking. */
+  paragraphFinalIdeographicSpaceLocalCount?: number;
+  paragraphFinalIdeographicSpaceCount?: number;
+  paragraphFinalIdeographicSpaceTailStart?: true;
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
@@ -2074,11 +2084,32 @@ function rebaseSeaBreaks(offsets: readonly number[] | undefined, cut: number): r
  *  where the band is narrower than a single glyph (a one-glyph-wide form
  *  label column). A zero split (whole-run move / kinsoku retraction) is left
  *  untouched. */
-function extendThroughTrailingIdeographicSpaces(chars: string[], split: number): number {
-  if (split <= 0) return split;
+function extendThroughTrailingIdeographicSpaces(
+  chars: string[],
+  split: number,
+  maximum = Number.POSITIVE_INFINITY,
+): number {
+  if (split <= 0 || maximum <= 0) return split;
+  if (Number.isFinite(maximum) && chars[split - 1] === '\u3000') return split;
   let s = split;
-  while (s < chars.length && chars[s] === '\u3000') s++;
+  let remaining = maximum;
+  while (s < chars.length && chars[s] === '\u3000' && remaining > 0) {
+    s++;
+    remaining--;
+  }
   return s;
+}
+
+/** Project the registered line-end allowance from the immediately preceding
+ * visible East-Asian character, not from another character elsewhere in a
+ * mixed-script segment. */
+function hasEastAsianVisiblePredecessor(text: string): boolean {
+  const characters = [...text];
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    if (characters[index] === '\u3000') continue;
+    return EAST_ASIAN_RE.test(characters[index]);
+  }
+  return false;
 }
 
 export function fitCJKPrefix(
@@ -2106,6 +2137,8 @@ export function fitCJKPrefix(
    * same substring measurement used by whole-segment fit so every prefix uses
    * the canonical selected-face and OOXML pitch model. */
   measureAdvance?: (text: string) => number,
+  /** Maximum trailing U+3000 characters excluded from the fit width. */
+  maximumIdeographicSpaceHang = Number.POSITIVE_INFINITY,
 ): string {
   const chars = [...text]; // spread handles surrogate pairs
   const advanceOf = (prefix: string): number => measureAdvance?.(prefix) ?? (() => {
@@ -2125,7 +2158,7 @@ export function fitCJKPrefix(
     );
   })();
   // Trailing IDEOGRAPHIC SPACE (U+3000) line-end allowance: a candidate that
-  // overflows ONLY because it ends in fullwidth spaces still fits — the spaces
+  // overflows ONLY because it ends in fullwidth spaces still fits — those spaces
   // hang past the line end (JLReq line-end ideographic-space handling; Word
   // does the same, which is what keeps a "char + U+3000" form label at one
   // visible glyph per line instead of alternating glyph/space lines). The
@@ -2138,9 +2171,13 @@ export function fitCJKPrefix(
   // binary search remains valid.
   const fitsWithHang = (endExclusive: number): boolean => {
     let visibleEnd = endExclusive;
-    while (visibleEnd > 0 && chars[visibleEnd - 1] === '\u3000') visibleEnd--;
+    let remainingHang = maximumIdeographicSpaceHang;
+    if (remainingHang > 0) {
+      while (visibleEnd > 0 && chars[visibleEnd - 1] === '\u3000') visibleEnd--;
+      const trailingCount = endExclusive - visibleEnd;
+      visibleEnd += Math.max(0, trailingCount - remainingHang);
+    }
     const prefix = chars.slice(0, visibleEnd).join('');
-    if (prefix.length === 0) return true;
     return advanceOf(prefix) <= maxWidth;
   };
   let lo = 0, hi = chars.length;
@@ -3533,13 +3570,19 @@ export function buildSegments(
     cur.joinPrev = true;
   }
 
-  // UAX #14 LB7 keeps a trailing SP with the preceding text. Script/font
-  // shaping may split that SP into a new segment, so recover the relationship
-  // when both segments came from the same authored run. A real source-run
-  // boundary is delegated to wordSourceRunSpaceContinuesSequence below.
+  // Preserve the established Word/JLReq line-end allowance for U+3000 across
+  // internal script/font/width-balance shaping seams. U+3000 is BA in UAX #14,
+  // so the break opportunity is after the space; splitting the space into its
+  // own internal segment must not invent an opportunity before it. A real
+  // U+0020 source-run boundary is delegated to
+  // wordSourceRunSpaceContinuesSequence below.
   for (let i = 1; i < segs.length; i++) {
     const cur = segs[i];
-    if (!('text' in cur) || cur.joinPrev || !cur.text.startsWith(' ')) continue;
+    if (
+      !('text' in cur)
+      || cur.joinPrev
+      || (cur.text[0] !== ' ' && cur.text[0] !== '\u3000')
+    ) continue;
     const prev = segs[i - 1];
     if (!('text' in prev)) continue;
     const trailingSpaceFromSameRun = cur.sourceRunIndex === prev.sourceRunIndex;
@@ -3547,7 +3590,10 @@ export function buildSegments(
       prev.text,
       cur.text,
     );
-    if (!trailingSpaceFromSameRun && !compatibleSourceBoundary) continue;
+    if (
+      !trailingSpaceFromSameRun
+      && !compatibleSourceBoundary
+    ) continue;
     cur.joinPrev = true;
   }
 
@@ -4440,6 +4486,62 @@ export function layoutLines(
     }
   }
 
+  // Mark the paragraph-final U+3000 suffix once. A backwards pass avoids the
+  // O(N²) suffix rescans that would result from queue.every/reduce per segment.
+  let paragraphFinalIdeographicSpaceCount = 0;
+  let paragraphFinalIdeographicSpaceTailStartIndex = -1;
+  const markedParagraphFinalTail: Array<Readonly<{
+    index: number;
+    segment: LayoutTextSeg;
+  }>> = [];
+  for (let index = queue.length - 1; index >= 0; index -= 1) {
+    const candidate = queue[index];
+    if (!candidate || !('text' in candidate) || candidate.text.length === 0) break;
+    // `fitText` (§17.3.2.14) and tate-chu-yoko (§17.3.2.10) are indivisible
+    // layout cells. Ruby owns one base/guide pair. Paragraph-final whitespace
+    // may affect how those cells measure, but must never split or clone them.
+    if (
+      candidate.fitTextRegionIndex !== undefined
+      || candidate.tateChuYoko === true
+      || candidate.ruby !== undefined
+    ) {
+      // buildSegments can split an atomic source run before its U+3000 tail
+      // (ruby is retained only on the first emitted segment). Undo any markers
+      // already assigned to trailing pieces from that same authored run.
+      if (candidate.sourceRunIndex !== undefined) {
+        for (let markedIndex = markedParagraphFinalTail.length - 1; markedIndex >= 0; markedIndex -= 1) {
+          const marked = markedParagraphFinalTail[markedIndex];
+          if (marked.segment.sourceRunIndex !== candidate.sourceRunIndex) continue;
+          marked.segment.paragraphFinalIdeographicSpaceTail = undefined;
+          marked.segment.paragraphFinalIdeographicSpaceLocalCount = undefined;
+          marked.segment.paragraphFinalIdeographicSpaceCount = undefined;
+          marked.segment.paragraphFinalIdeographicSpaceTailStart = undefined;
+          markedParagraphFinalTail.splice(markedIndex, 1);
+        }
+        paragraphFinalIdeographicSpaceTailStartIndex =
+          markedParagraphFinalTail.at(-1)?.index ?? -1;
+      }
+      break;
+    }
+    const trailingSpaces = /^\u3000+$/u.test(candidate.text);
+    const visibleWithTrailingSpaces = /[^\u3000]\u3000+$/u.test(candidate.text);
+    if (!trailingSpaces && !visibleWithTrailingSpaces) break;
+    const localTrailingCount = trailingSpaces
+      ? [...candidate.text].length
+      : [...candidate.text].reverse().findIndex((character) => character !== '\u3000');
+    paragraphFinalIdeographicSpaceCount += localTrailingCount;
+    candidate.paragraphFinalIdeographicSpaceTail = true;
+    candidate.paragraphFinalIdeographicSpaceLocalCount = localTrailingCount;
+    candidate.paragraphFinalIdeographicSpaceCount = paragraphFinalIdeographicSpaceCount;
+    paragraphFinalIdeographicSpaceTailStartIndex = index;
+    markedParagraphFinalTail.push({ index, segment: candidate });
+    if (visibleWithTrailingSpaces) break;
+  }
+  if (paragraphFinalIdeographicSpaceTailStartIndex >= 0) {
+    const start = queue[paragraphFinalIdeographicSpaceTailStartIndex];
+    if (start && 'text' in start) start.paragraphFinalIdeographicSpaceTailStart = true;
+  }
+
   // Resolve §17.3.2.14 from RAW natural advances at this exact layout scale.
   // The resulting per-gap is folded into segAdvanceWidth below, so the line
   // breaker and paint pen use one width authority. Cached w:spacing is ignored.
@@ -4595,6 +4697,157 @@ export function layoutLines(
       candidate,
       strNaturalAdvance(s, text, retainTrailingPunctuationCompression),
     );
+  };
+
+  /** Measure one text segment's canonical advance and vertical contribution.
+   * Every path that commits a complete text segment to a line must use this
+   * authority so font fallback, small-caps, position, ruby and grid metrics do
+   * not diverge at internal segment seams. */
+  const textSegmentBox = (s: LayoutTextSeg): Readonly<{
+    width: number;
+    height: number;
+    ascent: number;
+    descent: number;
+  }> => {
+    const measured = measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
+    const width = segAdvanceWidth(
+      s,
+      measured.width + verticalInkExtra(s, s.text),
+      characterGrid,
+      scale,
+    );
+    s.snapGridNaturalWidthPx = width;
+
+    const fullPx = s.fontSize * scale;
+    let metricMeasurement = measured;
+    let metricEmPx = effectiveFontPx(s);
+    if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
+      if (s.textLayoutService && s.textShapeRequest) {
+        const shaped = s.textLayoutService.shape({
+          ...s.textShapeRequest,
+          text: s.text || 'X',
+          fontSizePt: fullPx,
+          measure: true,
+          clusterGeometry: false,
+        });
+        metricMeasurement = {
+          width: shaped.advancePt,
+          actualBoundingBoxAscent: shaped.ascentPt,
+          actualBoundingBoxDescent: shaped.descentPt,
+          fontBoundingBoxAscent: shaped.ascentPt,
+          fontBoundingBoxDescent: shaped.descentPt,
+        } as TextMetrics;
+      } else {
+        const previousFont = ctx.font;
+        ctx.font = buildFont(
+          s.bold,
+          s.italic,
+          fullPx,
+          s.fontFamily,
+          fontFamilyClasses,
+          s.fontRoute,
+        );
+        metricMeasurement = ctx.measureText(s.text || 'X');
+        ctx.font = previousFont;
+      }
+      metricEmPx = fullPx;
+    }
+
+    const corrected = correctedLineMetrics(
+      metricMeasurement,
+      s.fontFamily,
+      fullPx,
+      metricEmPx,
+      (s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text)) && !s.ruby,
+    );
+    let ascent = corrected.ascent;
+    let descent = corrected.descent;
+    if (s.positionExtendsLineBox !== false) {
+      const positionPx = (s.position ?? 0) * scale;
+      if (positionPx > 0) ascent += positionPx;
+      else if (positionPx < 0) descent -= positionPx;
+    }
+    if (s.ruby && (!s.textBoxLineFloor || s.textBoxVertical)) {
+      ascent += rubyAscentReservePx(
+        s.ruby.fontSizePt,
+        s.ruby.hpsRaisePt,
+        scale,
+        s,
+        ctx,
+        fontFamilyClasses,
+      );
+    }
+    return { width, height: s.fontSize, ascent, descent };
+  };
+
+  /** Continue the existing U+3000 line-end hanging rule across an internal
+   * width-balance segment seam. The split space keeps its own font/grid advance
+   * for measure == paint. UAX #14 classifies U+3000 as BA, so an internal seam
+   * before it must not become an authored break opportunity. Restrict
+   * consumption to the same authored run; an actual source boundary remains
+   * independently modeled. */
+  const appendQueuedIdeographicSpaceSegment = (
+    source: LayoutTextSeg,
+  ): void => {
+    if (
+      /\s$/u.test(source.text)
+      || source.ruby !== undefined
+      || source.tateChuYoko === true
+      || source.fitTextRegionIndex !== undefined
+    ) return;
+    const follower = queue[0];
+    if (
+      !follower
+      || !('text' in follower)
+      || follower.joinPrev !== true
+      || follower.text.length === 0
+      || [...follower.text].some((character) => character !== '\u3000')
+    ) return;
+    queue.shift();
+    const hangingCount = wordIdeographicSpaceLineEndAllowanceCount(
+      hasEastAsianVisiblePredecessor(source.text),
+      follower.paragraphFinalIdeographicSpaceCount ?? [...follower.text].length,
+    );
+    if (hangingCount === 0) {
+      queue.unshift(follower);
+      return;
+    }
+    const hangingText = follower.text.slice(0, hangingCount);
+    const hangingSegment: LayoutTextSeg = {
+      ...follower,
+      text: hangingText,
+      measuredWidth: 0,
+      punctuationCompressions: slicedPunctuationCompressions(follower, 0, 1),
+    };
+    const followerBox = textSegmentBox(hangingSegment);
+    hangingSegment.measuredWidth = followerBox.width;
+    addToLine(
+      hangingSegment,
+      followerBox.width,
+      followerBox.height,
+      followerBox.ascent,
+      followerBox.descent,
+    );
+    const remainder = follower.text.slice(hangingText.length);
+    if (remainder.length > 0) {
+      queue.unshift({
+        ...follower,
+        text: remainder,
+        measuredWidth: 0,
+        joinPrev: undefined,
+        punctuationCompressions: slicedPunctuationCompressions(
+          follower,
+          hangingText.length,
+          follower.text.length,
+        ),
+        src: follower.src
+          ? {
+              segIndex: follower.src.segIndex,
+              charOffset: follower.src.charOffset + hangingText.length,
+            }
+          : undefined,
+      });
+    }
   };
 
   // Width of a queued segment, for right/center tab look-ahead.
@@ -4928,96 +5181,82 @@ export function layoutLines(
 
     // ── Text segment ─────────────────────────────────────
     const s = seg as LayoutTextSeg;
-    const m = measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
-    // Advance = natural width + character-grid delta (the SINGLE model shared
-    // with the draw paths; 0 unless an active grid AND a pure-EA segment).
-    // #1014 — plus the vo=Tr rotate-fallback ink deficit for a vertical run, so
-    // this MAIN commit path (the segment's stored measuredWidth and the pen advance
-    // to the next segment) matches the ink-sized cell `drawVerticalRun` paints
-    // (measure == paint); 0 for horizontal / non-under-reporting runs.
-    const w = segAdvanceWidth(
-      s,
-      m.width + verticalInkExtra(s, s.text),
-      characterGrid,
-      scale,
-    );
-    s.snapGridNaturalWidthPx = w;
+    const segmentBox = textSegmentBox(s);
+    const w = segmentBox.width;
     const prospectiveWidth = prospectiveSnapAdvance(s, w);
-    // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
-    const h = s.fontSize;
-    // Prefer font-metric ascent/descent (stable per font+size) so baselines and
-    // line boxes do not jitter based on the specific characters on each line.
-    // When the document font is substituted by one with different vertical
-    // metrics, rescale to the document font's design line box so the line
-    // height (and thus baseline centering, row auto-heights, cell vAlign
-    // §17.4.84, and pagination) match Word — see font-metrics.ts.
-    // Fallback box at the run's full size; correction at the effective size
-    // (smallCaps/vertAlign shrink it). See correctedLineMetrics.
-    // §17.3.2.33: a small-caps run's LINE BOX follows the FULL run size, not the
-    // 2pt-reduced glyph size — so a wrapped continuation line carrying only reduced
-    // (all-lowercase) small caps is not short. Measure the box metrics at the full
-    // size (the advance `w` above still uses the reduced glyphs). Super/subscript
-    // is excluded: it intentionally shrinks its line contribution.
-    const fullPx = s.fontSize * scale;
-    let metricM = m;
-    let metricEmPx = effectiveFontPx(s);
-    if (s.smallCaps && !s.vertAlign && metricEmPx !== fullPx) {
-      if (s.textLayoutService && s.textShapeRequest) {
-        const shaped = s.textLayoutService.shape({
-          ...s.textShapeRequest,
-          text: s.text || 'X',
-          fontSizePt: fullPx,
-          measure: true,
-          clusterGeometry: false,
-        });
-        metricM = {
-          width: shaped.advancePt,
-          actualBoundingBoxAscent: shaped.ascentPt,
-          actualBoundingBoxDescent: shaped.descentPt,
-          fontBoundingBoxAscent: shaped.ascentPt,
-          fontBoundingBoxDescent: shaped.descentPt,
-        } as TextMetrics;
-      } else {
-        const prevFont = ctx.font;
-        ctx.font = buildFont(s.bold, s.italic, fullPx, s.fontFamily, fontFamilyClasses, s.fontRoute);
-        metricM = ctx.measureText(s.text || 'X');
-        ctx.font = prevFont;
+    const h = segmentBox.height;
+    const asc = segmentBox.ascent;
+    const desc = segmentBox.descent;
+    const paragraphFinalIdeographicSpaceTail =
+      s.paragraphFinalIdeographicSpaceTail === true;
+    const paragraphFinalIdeographicSpaceCount =
+      s.paragraphFinalIdeographicSpaceCount ?? 0;
+    const paragraphFinalIdeographicSpaceLocalCount =
+      s.paragraphFinalIdeographicSpaceLocalCount ?? 0;
+    const visibleBeforeParagraphFinalTail = paragraphFinalIdeographicSpaceTail
+      ? s.text.slice(0, Math.max(0, s.text.length - paragraphFinalIdeographicSpaceLocalCount))
+      : s.text;
+    if (
+      paragraphFinalIdeographicSpaceTail
+      && paragraphFinalIdeographicSpaceCount > 1
+      && visibleBeforeParagraphFinalTail.length > 0
+    ) {
+      const visibleSegment: LayoutTextSeg = {
+        ...s,
+        text: visibleBeforeParagraphFinalTail,
+        paragraphFinalIdeographicSpaceTail: undefined,
+        paragraphFinalIdeographicSpaceLocalCount: undefined,
+        paragraphFinalIdeographicSpaceCount: undefined,
+        paragraphFinalIdeographicSpaceTailStart: undefined,
+        measuredWidth: 0,
+        punctuationCompressions: slicedPunctuationCompressions(
+          s,
+          0,
+          visibleBeforeParagraphFinalTail.length,
+        ),
+      };
+      const trailingSegment: LayoutTextSeg = {
+        ...s,
+        text: s.text.slice(visibleBeforeParagraphFinalTail.length),
+        paragraphFinalIdeographicSpaceLocalCount,
+        joinPrev: undefined,
+        paragraphFinalIdeographicSpaceTailStart: true,
+        measuredWidth: 0,
+        punctuationCompressions: slicedPunctuationCompressions(
+          s,
+          visibleBeforeParagraphFinalTail.length,
+          s.text.length,
+        ),
+        src: s.src
+          ? {
+              segIndex: s.src.segIndex,
+              charOffset: s.src.charOffset + visibleBeforeParagraphFinalTail.length,
+            }
+          : undefined,
+      };
+      queue.unshift(trailingSegment);
+      queue.unshift(visibleSegment);
+      continue;
+    }
+    if (
+      paragraphFinalIdeographicSpaceTail
+      && /^\u3000+$/u.test(s.text)
+      && s.paragraphFinalIdeographicSpaceTailStart === true
+    ) {
+      const currentLineHasVisibleText = currentLine.some((candidate) =>
+        'text' in candidate && /[^\u3000]/u.test(candidate.text));
+      if (currentLineHasVisibleText) {
+        let trailingTailWidth = w;
+        for (const candidate of queue) {
+          if (!('text' in candidate) || candidate.paragraphFinalIdeographicSpaceTail !== true) break;
+          trailingTailWidth += segAdvance(candidate);
+        }
+        if (currentWidth + trailingTailWidth > availW()) {
+          flush(undefined, false, s.src);
+          queue.unshift(s);
+          continue;
+        }
       }
-      metricEmPx = fullPx;
-    }
-    // FE design correction for EA segments only; ruby keeps its measured box
-    // (see addToLine's segScriptHint note).
-    const corrected = correctedLineMetrics(
-      metricM,
-      s.fontFamily,
-      fullPx,
-      metricEmPx,
-      (s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text)) && !s.ruby,
-    );
-    let asc = corrected.ascent;
-    let desc = corrected.descent;
-    // ECMA-376 §17.3.2.24 positions the run relative to the surrounding
-    // default baseline. Its shifted ink therefore contributes to the line's
-    // visible block extent: a raised run extends the ascent, while a lowered
-    // run extends the descent. Keeping the shift paint-only made an all-raised
-    // paragraph start above its retained line box, so table borders crossed the
-    // glyphs and row/body pagination under-counted the painted extent.
-    if (s.positionExtendsLineBox !== false) {
-      const positionPx = (s.position ?? 0) * scale;
-      if (positionPx > 0) asc += positionPx;
-      else if (positionPx < 0) desc -= positionPx;
-    }
-    // Ruby annotation: reserve exact authored hpsRaise or selected-face
-    // base/guide ink before the paragraph-wide docGrid pitch snap.
-    if (s.ruby && (!s.textBoxLineFloor || s.textBoxVertical)) {
-      asc = asc + rubyAscentReservePx(
-        s.ruby!.fontSizePt,
-        s.ruby!.hpsRaisePt,
-        scale,
-        s,
-        ctx,
-        fontFamilyClasses,
-      );
     }
 
     // ECMA-376 §17.3.2.14: a fit region is an atomic fixed-width cell. The
@@ -5296,9 +5535,11 @@ export function layoutLines(
       // Fits on current line as-is
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
+      appendQueuedIdeographicSpaceSegment(s);
     } else if (admitsTrailingOverflowPunctuation) {
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
+      appendQueuedIdeographicSpaceSegment(s);
     } else if (hasCJKBreakOpportunity(s.text) && s.seaBreaks === undefined) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail.
       // A segment that ALSO contains SEA (a mixed CJK+SEA `<w:cs/>` run) is routed
@@ -5312,6 +5553,12 @@ export function layoutLines(
       setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
       const prevKern = setSegKerning(s);
       let rawPrefix = '';
+      const maximumIdeographicSpaceHang = paragraphFinalIdeographicSpaceTail
+        ? wordIdeographicSpaceLineEndAllowanceCount(
+            hasEastAsianVisiblePredecessor(s.text),
+            s.paragraphFinalIdeographicSpaceCount ?? 0,
+          )
+        : Number.POSITIVE_INFINITY;
       try {
         rawPrefix = available > 0 ? fitCJKPrefix(
           ctx,
@@ -5323,6 +5570,7 @@ export function layoutLines(
           s.verticalRun === true,
           verticalGlyphMeasurement,
           (prefix) => strAdvance(s, prefix),
+          maximumIdeographicSpaceHang,
         ) : '';
       } finally {
         restoreKerning(prevKern);
@@ -5350,6 +5598,9 @@ export function layoutLines(
       const split = extendThroughTrailingIdeographicSpaces(
         allChars,
         hangingSplit ?? kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit),
+        paragraphFinalIdeographicSpaceTail && maximumIdeographicSpaceHang === 0
+          ? 0
+          : maximumIdeographicSpaceHang,
       );
       const prefix = allChars.slice(0, split).join('');
       if (prefix.length > 0) {
@@ -5378,6 +5629,8 @@ export function layoutLines(
               charOffset: s.src!.charOffset + prefix.length,
             },
           });
+        } else {
+          appendQueuedIdeographicSpaceSegment(s);
         }
       } else if (currentLine.length > 0) {
         // No prefix of `s` fits. If `s` would lead the next line with a 行頭禁則
@@ -5440,7 +5693,16 @@ export function layoutLines(
         // Empty line and not even one char fits — force-fit one char to guarantee progress
         const forcedChars = [...s.text];
         const forcedSplit = forcedChars.length > 0
-          ? extendThroughTrailingIdeographicSpaces(forcedChars, 1)
+          ? extendThroughTrailingIdeographicSpaces(
+              forcedChars,
+              1,
+              s.paragraphFinalIdeographicSpaceTail === true
+                ? wordIdeographicSpaceLineEndAllowanceCount(
+                    EAST_ASIAN_RE.test(forcedChars[0] ?? ''),
+                    s.paragraphFinalIdeographicSpaceCount ?? 0,
+                  )
+                : Number.POSITIVE_INFINITY,
+            )
           : 0;
         const firstChar = forcedChars.slice(0, forcedSplit).join('');
         if (firstChar) {
@@ -5468,6 +5730,8 @@ export function layoutLines(
                 charOffset: s.src!.charOffset + firstChar.length,
               },
             });
+          } else {
+            appendQueuedIdeographicSpaceSegment(s);
           }
         }
       }

@@ -160,15 +160,19 @@ function row(
   } as unknown as DocTableRow;
 }
 
-function documentWithRow(tableRow: DocTableRow, pageHeight: number): DocxDocumentModel {
+function documentWithRow(
+  tableRow: DocTableRow,
+  pageHeight: number,
+  pageWidth = 160,
+): DocxDocumentModel {
   const table: DocTable = {
-    colWidths: [160], rows: [tableRow], borders: borders(),
+    colWidths: [pageWidth], rows: [tableRow], borders: borders(),
     cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
     jc: 'left', layout: 'fixed',
   } as unknown as DocTable;
   return {
     section: {
-      pageWidth: 160, pageHeight,
+      pageWidth, pageHeight,
       marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
       headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
     } as SectionProps,
@@ -204,6 +208,33 @@ const splitText =
   '丁'.repeat(16);
 
 describe('table row split fidelity — fragment-owned paint geometry', () => {
+  it('retains width-balanced CJK label lines across table pagination', async () => {
+    const labelRow = row('申　請　事　項　及　び　理　由', 'top');
+    const model = documentWithRow(labelRow, 85, 12);
+    model.settings = { balanceSingleByteDoubleByteWidth: true };
+    model.section.docGridType = 'linesAndChars';
+    model.section.docGridLinePitch = 20;
+    model.section.docGridCharSpace = -4096;
+
+    const layout = layoutDocument(model);
+    const painted = await Promise.all(
+      layout.pages.map((_, pageIndex) => renderPage(layout, pageIndex)),
+    );
+    const visibleByPage = painted.map((page) => page.texts
+      .map((call) => call.text.replaceAll('　', ''))
+      .join(''));
+    expect({
+      pages: layout.pages.length,
+      slices: layout.pages.map((_, i) => firstSliceOnPage(layout, i)),
+      visibleByPage,
+    }).toEqual({
+      pages: 2,
+      slices: [{ start: 0, end: 4 }, { start: 4, end: 8 }],
+      visibleByPage: ['申請事項', '及び理由'],
+    });
+    expect(visibleByPage.join('')).toBe('申請事項及び理由');
+  });
+
   it('paints only the retained continuation [k, n) line window', async () => {
     const model = documentWithRow(row(splitText, 'top'), 60);
     const layout = layoutDocument(model);

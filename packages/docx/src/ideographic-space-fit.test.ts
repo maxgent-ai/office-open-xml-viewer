@@ -89,6 +89,76 @@ describe('trailing U+3000 line-end allowance', () => {
     expect(lineTexts(lines)).toEqual(['　申']);
   });
 
+  it('wraps multiple authored trailing U+3000 onto an intentional blank line', () => {
+    // Heading = 15pt and two spaces = 10pt. A multi-space paragraph-final tail
+    // is width-bearing and therefore moves together to the following line.
+    // Treating all trailing spaces as unbounded hanging content erased it.
+    const heading = { ...textSeg('見出し'), sourceRunIndex: 0 };
+    const spaces = {
+      ...textSeg('　　'), sourceRunIndex: 0, joinPrev: true,
+    };
+    expect(lineTexts(lay([heading, spaces], 20)))
+      .toEqual(['見出し', '　　']);
+    expect(lineTexts(lay([textSeg('見出し　　')], 20)))
+      .toEqual(['見出し', '　　']);
+    expect(lineTexts(lay([textSeg('見出し　'), textSeg('　')], 20)))
+      .toEqual(['見出し', '　　']);
+  });
+
+  it('does not split paragraph-final spaces out of atomic OOXML text cells', () => {
+    const fitText = {
+      ...textSeg('見出し　　'),
+      fitTextRegionIndex: 0,
+      fitTextRegionStart: true,
+      fitTextRegionEnd: true,
+      fitTextVal: 300,
+    };
+    const tateChuYoko = {
+      ...textSeg('12　　'),
+      tateChuYoko: true,
+    };
+    const ruby = {
+      ...textSeg('見出し　　'),
+      ruby: { text: 'みだし', fontSizePt: 5 },
+    };
+
+    const fitTextSegments = lay([fitText], 4).flatMap((line) => line.segments)
+      .filter((segment): segment is LayoutTextSeg => 'text' in segment);
+    expect(fitTextSegments).toHaveLength(1);
+    expect(fitTextSegments[0]?.text).toBe('見出し　　');
+    expect(fitTextSegments[0]?.fitTextRegionIndex).toBe(0);
+
+    const tateChuYokoSegments = lay([tateChuYoko], 20).flatMap((line) => line.segments)
+      .filter((segment): segment is LayoutTextSeg => 'text' in segment);
+    expect(tateChuYokoSegments).toHaveLength(1);
+    expect(tateChuYokoSegments[0]?.text).toBe('12　　');
+    expect(tateChuYokoSegments[0]?.tateChuYoko).toBe(true);
+
+    const rubySegments = lay([ruby], 20).flatMap((line) => line.segments)
+      .filter((segment): segment is LayoutTextSeg => 'text' in segment);
+    expect(rubySegments.filter((segment) => segment.ruby !== undefined)).toHaveLength(1);
+    expect(rubySegments.map((segment) => segment.text).join('')).toBe('見出し　　');
+  });
+
+  it('keeps a paragraph-final U+3000 tail width-bounded beyond one full line', () => {
+    expect(lineTexts(lay([textSeg(`見出し${'　'.repeat(8)}`)], 20)))
+      .toEqual(['見出し', '　　　　', '　　　　']);
+  });
+
+  it('does not extend the East-Asian U+3000 allowance to Latin text', () => {
+    const latin = { ...textSeg('A'), sourceRunIndex: 0 };
+    const ideographicSpace = {
+      ...textSeg('　'), sourceRunIndex: 0, joinPrev: true,
+    };
+    expect(lineTexts(lay([latin, ideographicSpace], 6))).toEqual(['A', '　']);
+
+    const mixed = { ...textSeg('漢A'), sourceRunIndex: 1 };
+    const mixedTail = {
+      ...textSeg('　'), sourceRunIndex: 1, joinPrev: true,
+    };
+    expect(lineTexts(lay([mixed, mixedTail], 10))).toEqual(['漢A', '　']);
+  });
+
   it('does not change ASCII trailing-space behavior', () => {
     const lines = lay([textSeg('ab '), textSeg('cd')], 12); // 'ab ' fit-width 10 (trailing collapse), cd next
     const texts = lineTexts(lines);

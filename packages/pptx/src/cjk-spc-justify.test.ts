@@ -3,12 +3,13 @@ import { renderTextBody } from './renderer.js';
 import type { TextBody, Paragraph } from './types';
 import type { TextRunData } from '@silurus/ooxml-core';
 
-// ECMA-376 §21.1.2.3.x (rPr @spc, letter-spacing) — 約物半角 bracket overlap, the
+// ECMA-376 §21.1.2.3.9 (rPr @spc; ST_TextPoint §20.1.10.74) — 約物半角
+// bracket overlap, the
 // pptx analog of docx PR #626 (docGrid §17.6.5).
 //
 // When a run carries @spc letter-spacing AND its text is East-Asian with an
 // opening bracket adjacent to kana/kanji, the LAYOUT measures the segment box
-// CONTEXTUALLY: `segW = measureText(seg.text) + ls·codePointCount`. The browser's
+// CONTEXTUALLY: `segW = measureText(seg.text) + ls·(clusterCount-1)`. The browser's
 // 約物半角 contextual shaping collapses an opening bracket "［" to half-width when
 // it is FOLLOWED by an East-Asian glyph WITHIN the measured string
 // (`measureText("［あ") < measureText("［") + measureText("あ")`).
@@ -45,11 +46,10 @@ function ctxMeasure(s: string, fontPx: number): number {
   return w;
 }
 
-/** Recording 2D context. `measureText` models 約物半角 contextual collapse and is
- *  agnostic of letterSpacing (the renderer always measures BEFORE it sets
- *  letterSpacing). `fillText` records text + x + y AND the current letterSpacing
- *  at call time, so a test can assert the contiguous-draw fix set
- *  `ctx.letterSpacing = ls`. */
+/** Recording 2D context. `measureText` models 約物半角 contextual collapse plus
+ * native Canvas letterSpacing. `fillText` records text + x + y AND the current
+ * letterSpacing at call time, so a test can assert the contiguous-draw fix set
+ * `ctx.letterSpacing = ls`. */
 function mockCtx(): {
   ctx: CanvasRenderingContext2D;
   texts: { text: string; x: number; y: number; letterSpacing: string }[];
@@ -69,7 +69,7 @@ function mockCtx(): {
     measureText: (s: string) => {
       const p = px();
       return {
-        width: ctxMeasure(s, p),
+        width: ctxMeasure(s, p) + [...s].length * (parseFloat(letterSpacing) || 0),
         actualBoundingBoxAscent: p * 0.8,
         actualBoundingBoxDescent: p * 0.2,
         fontBoundingBoxAscent: p * 0.8,
@@ -144,7 +144,7 @@ function render(
 const EA_SPC = '［あ］いうえお';
 const LS = 4; // px of @spc letter-spacing (points == px at SCALE 1/12700)
 
-describe('pptx @spc CJK — 約物半角 brackets are drawn contiguously, never overlap (§21.1.2.3.x)', () => {
+describe('pptx @spc CJK — 約物半角 brackets are drawn contiguously, never overlap (§21.1.2.3.9)', () => {
   // (1) RED→GREEN core fix: a NON-justified @spc EA segment is painted by EXACTLY
   //     ONE contiguous fillText carrying the whole string, with letterSpacing=ls.
   //     Before the fix: 7 single-code-point fillText calls, letterSpacing '0px'.
@@ -165,7 +165,7 @@ describe('pptx @spc CJK — 約物半角 brackets are drawn contiguously, never 
   });
 
   // (2) No-overlap / contextual abutment: the @spc EA segment is one draw at the
-  //     segment left, its reported box width is the CONTEXTUAL measure + len·ls
+  //     segment left, its reported box width is the contextual measure + (len-1)·ls
   //     (bracket collapsed), and the following run abuts that edge — the bracket
   //     tail is never overrun by the per-glyph isolated sum.
   it('keeps measure==draw so a following run abuts the @spc EA box (no overlap)', () => {
@@ -179,9 +179,9 @@ describe('pptx @spc CJK — 約物半角 brackets are drawn contiguously, never 
     const eaCalls = texts.filter((c) => c.text === EA_SPC);
     expect(eaCalls.length, 'EA segment is a single draw').toBe(1);
 
-    // Reported box width = contextual measure (bracket half) + len·ls.
+    // Reported box width = contextual measure + spacing at len-1 boundaries.
     const len = [...EA_SPC].length;
-    const boxW = ctxMeasure(EA_SPC, FONT_PX) + len * LS;
+    const boxW = ctxMeasure(EA_SPC, FONT_PX) + (len - 1) * LS;
     expect(segEA.w).toBeCloseTo(boxW, 6);
 
     // The drawn EA glyphs start at the segment left and span exactly boxW, so the
@@ -200,6 +200,25 @@ describe('pptx @spc CJK — 約物半角 brackets are drawn contiguously, never 
   it('restores letterSpacing to its initial value after rendering', () => {
     const { finalLetterSpacing } = render(bodyWith('l', [run(EA_SPC, LS)]));
     expect(finalLetterSpacing).toBe('0px');
+  });
+
+  it('applies negative @spc consistently to drawing and the following run position', () => {
+    const text = 'AB';
+    const negativeSpacing = -4;
+    const { texts, runs } = render(bodyWith('l', [
+      run(text, negativeSpacing),
+      run('C', undefined, 'FF0000'),
+    ]));
+
+    const trackedCall = texts.find((call) => call.text === text)!;
+    const followingCall = texts.find((call) => call.text === 'C')!;
+    const trackedRun = runs.find((candidate) => candidate.text === text)!;
+    const expectedWidth = ctxMeasure(text, FONT_PX)
+      + ([...text].length - 1) * negativeSpacing;
+
+    expect(trackedCall.letterSpacing).toBe(`${negativeSpacing}px`);
+    expect(trackedRun.w).toBeCloseTo(expectedWidth, 6);
+    expect(followingCall.x).toBeCloseTo(trackedCall.x + expectedWidth, 6);
   });
 
   // (4a) No-regression — @spc justify multi-glyph piece: a `dist` line whose CJK

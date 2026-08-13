@@ -77,10 +77,10 @@ describe('justifiedPiecePositions', () => {
   });
 
   it('adds letter-spacing × prefix-codepoint-count to each piece offset', () => {
-    // OOXML rPr @spc (§17.3.2.35 docx, §21.1.2.3.7 pptx) widens every code
-    // point's advance by `letterSpacingPx`, including the final one. A split
-    // piece's dx therefore needs `from · letterSpacingPx` on top of the prefix
-    // measure to land on the same x that `fillText(whole)` would draw it at.
+    // The renderer's Canvas spacing advance comes from OOXML w:spacing
+    // (§17.3.2.35) or DrawingML rPr@spc (§21.1.2.3.9; ST_TextPoint
+    // §20.1.10.74). A split piece's dx needs `from · letterSpacingPx` on top
+    // of the prefix measure to match where `fillText(whole)` would draw it.
     const cps = [...'a.bc'];
     const splitBefore = [1, 2, 3];
     const perGap = 2;
@@ -96,20 +96,21 @@ describe('justifiedPiecePositions', () => {
   });
 
   it('lands the final glyph exactly on the box including letter-spacing', () => {
-    // box = measure(whole) + cps.length·ls + nGaps·perGap, and the last piece's
-    // own advance also adds the trailing letter-spacing (rPr @spc is per glyph,
-    // including after the last). So the final piece's drawn end must equal
-    // measure(whole) + cps.length·ls + nGaps·perGap.
+    // box = measure(whole) + (cps.length-1)·ls + nGaps·perGap. The last piece
+    // contributes spacing only at its internal boundaries, never after its final
+    // glyph. So the final piece's drawn end must equal measure(whole) + (n-1)·ls +
+    // nGaps·perGap.
     const cps = [...'a.bc'];
     const splitBefore = [1, 2, 3];
     const perGap = 2;
     const ls = 4;
     const pieces = justifiedPiecePositions(cps, splitBefore, perGap, measure, ls);
     const last = pieces[pieces.length - 1];
-    const box = measure('a.bc') + cps.length * ls + splitBefore.length * perGap;
-    // Drawn end of the last piece: dx + measure(text) + text.length·ls.
-    const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
-    expect(lastEnd).toBe(box); // 44 + 10 + 1·4 = 58, box = 36 + 16 + 6 = 58
+    const box = measure('a.bc') + (cps.length - 1) * ls + splitBefore.length * perGap;
+    // Drawn end: dx + measure(text) + max(0, text.length-1)·ls.
+    const lastEnd = last.dx + measure(last.text)
+      + Math.max(0, [...last.text].length - 1) * ls;
+    expect(lastEnd).toBe(box); // 44 + 10 = 54, box = 36 + 12 + 6 = 54
   });
 
   it('counts letter-spacing per CODE POINT, not UTF-16 code unit (surrogate pair)', () => {
@@ -130,10 +131,11 @@ describe('justifiedPiecePositions', () => {
     //   𠮟: measure('あ')=10        + 1·4 + 1·2 = 16
     //   い: measure('あ𠮟')=20      + 2·4 + 2·2 = 32
     expect(pieces.map((p) => p.dx)).toEqual([0, 16, 32]);
-    // Final glyph lands on the code-point box: measure(whole) + cpLen·ls + nGaps·perGap.
+    // Final glyph lands on the code-point box: measure(whole) + (cpLen-1)·ls + gaps.
     const last = pieces[pieces.length - 1];
-    const box = measure('あ𠮟い') + cps.length * ls + splitBefore.length * perGap;
-    const lastEnd = last.dx + measure(last.text) + [...last.text].length * ls;
-    expect(lastEnd).toBe(box); // 32 + 10 + 4 = 46; box = 30 + 12 + 4 = 46
+    const box = measure('あ𠮟い') + (cps.length - 1) * ls + splitBefore.length * perGap;
+    const lastEnd = last.dx + measure(last.text)
+      + Math.max(0, [...last.text].length - 1) * ls;
+    expect(lastEnd).toBe(box); // 32 + 10 = 42; box = 30 + 8 + 4 = 42
   });
 });

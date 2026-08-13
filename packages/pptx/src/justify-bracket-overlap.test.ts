@@ -54,8 +54,8 @@ const OPEN_BRACKET = '［（「『';
  *  opening bracket (約物連続 packing, e.g. "：［", "、［", "）（"). So
  *  `measure("名：［") < measure("名：") + measure("［")` while `measure("［本")
  *  === measure("［") + measure("本")` (a bracket next to a kanji does NOT pack).
- *  The collapse must NOT include letterSpacing — the renderer sets letterSpacing
- *  AFTER all measureText calls, and the canvas adds it between glyphs. */
+ *  The collapse itself does not include letterSpacing; the recording context
+ *  adds the active Canvas tracking separately. */
 function ctxMeasure(s: string, fontPx: number): number {
   const cps = [...s];
   let w = 0;
@@ -68,11 +68,10 @@ function ctxMeasure(s: string, fontPx: number): number {
   return w;
 }
 
-/** Recording 2D context. `measureText` models 約物連続 contextual packing and is
- *  agnostic of letterSpacing (the renderer always measures BEFORE it sets
- *  letterSpacing). `fillText` records text + x + y AND the current letterSpacing
- *  at call time, so a test can assert the contiguous-draw fix set
- *  `ctx.letterSpacing = ls + segPerGap`. */
+/** Recording 2D context. `measureText` models 約物連続 contextual packing plus
+ * native Canvas letterSpacing. `fillText` records text + x + y AND the current
+ * letterSpacing at call time, so a test can assert the contiguous-draw fix set
+ * `ctx.letterSpacing = ls + segPerGap`. */
 function mockCtx(): {
   ctx: CanvasRenderingContext2D;
   texts: { text: string; x: number; y: number; letterSpacing: string }[];
@@ -92,7 +91,7 @@ function mockCtx(): {
     measureText: (s: string) => {
       const p = px();
       return {
-        width: ctxMeasure(s, p),
+        width: ctxMeasure(s, p) + [...s].length * (parseFloat(letterSpacing) || 0),
         actualBoundingBoxAscent: p * 0.8,
         actualBoundingBoxDescent: p * 0.2,
         fontBoundingBoxAscent: p * 0.8,
@@ -287,7 +286,10 @@ describe('pptx justify CJK — 約物連続 brackets are drawn contiguously, nev
     //     drawWithFont letterSpacing path (text.length > 1), ONE contiguous draw at
     //     letterSpacing === `${ls}px` (NOT ls+segPerGap; this is not a justify line).
     const LS = 4;
-    const spc = render(bodyWith('l', [run(EA_JUST, LS)]), BOX_W);
+    // Include the authored tracking in the box budget so this remains a
+    // paint-path control rather than accidentally becoming a wrap test.
+    const spcBoxW = BOX_W + ([...EA_JUST].length - 1) * LS;
+    const spc = render(bodyWith('l', [run(EA_JUST, LS)]), spcBoxW);
     const spcSeg = spc.texts.filter((c) => c.text === EA_JUST);
     expect(spcSeg.length, '@spc-only line is one contiguous draw').toBe(1);
     expect(spcSeg[0].letterSpacing, '@spc-only line carries ls (not a justify pitch)').toBe(`${LS}px`);

@@ -97,6 +97,35 @@ describe('GridGeometry', () => {
     expect(GridGeometry.forWorksheet(ws, 8)).toBe(wide);
   });
 
+  it('applies compact authored column-width ranges that omit customWidth', () => {
+    const ws = worksheet();
+    ws.colWidths = { 1: 30.1640625 };
+    ws.colWidthRanges = [{ min: 2, max: 16_384, width: 10.83203125 }];
+    ws.defaultColWidth = 8.43;
+    const geometry = GridGeometry.forWorksheet(ws, 8);
+
+    expect(geometry.col.sizeOf(1)).toBe(241);
+    expect(geometry.col.sizeOf(2)).toBe(87);
+    expect(geometry.col.sizeOf(16_384)).toBe(87);
+    const anchorWidth = geometry.col.offsetOf(10) - geometry.col.offsetOf(1)
+      + (539_749 - 298_449) / 9_525;
+    expect(anchorWidth).toBeCloseTo(962.33, 2);
+  });
+
+  it('resolves many overlapping full-sheet ranges without expanding each declaration', () => {
+    const ws = worksheet();
+    ws.colWidths = {};
+    ws.colWidthRanges = Array.from({ length: 50_000 }, (_, index) => ({
+      min: 1,
+      max: 16_384,
+      width: 9 + (index % 2),
+    }));
+
+    const geometry = GridGeometry.forWorksheet(ws, 8);
+    expect(geometry.col.sizeOf(1)).toBe(colWidthToPx(10, 8));
+    expect(geometry.col.sizeOf(16_384)).toBe(colWidthToPx(10, 8));
+  });
+
   it('skips a leading run of zero-sized rows and columns at offset zero', () => {
     const ws = worksheet();
     ws.rowHeights = { 1: 0, 2: 0 };

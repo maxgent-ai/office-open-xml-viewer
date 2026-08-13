@@ -18,3 +18,9 @@ export const EMU_PER_PX = 9525;
 
 /** CSS px per point at 96 DPI: 96 / 72 = 4 / 3. */
 export const PT_TO_PX = 4 / 3;
+
+/** ECMA-376 §21.1.2.1.1 default DrawingML text-body left/right inset. */
+export const DEFAULT_TEXT_INSET_LR_EMU = 91440;
+
+/** ECMA-376 §21.1.2.1.1 default DrawingML text-body top/bottom inset. */
+export const DEFAULT_TEXT_INSET_TB_EMU = 45720;

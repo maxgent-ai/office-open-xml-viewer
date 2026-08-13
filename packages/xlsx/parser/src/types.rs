@@ -71,6 +71,17 @@ pub struct MergeCell {
     pub right: u32,
 }
 
+/// Compact representation of a `<col min max width>` declaration. SpreadsheetML
+/// permits one declaration to cover all 16,384 columns, so expanding the range
+/// into `col_widths` would unnecessarily inflate the parser wire payload.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnWidthRange {
+    pub min: u32,
+    pub max: u32,
+    pub width: f64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Worksheet {
@@ -80,6 +91,8 @@ pub struct Worksheet {
     /// rows in ascending index order), making the parser output byte-stable for
     /// identical input.
     pub col_widths: BTreeMap<u32, f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub col_width_ranges: Vec<ColumnWidthRange>,
     pub row_heights: BTreeMap<u32, f64>,
     /// Per-column outline (grouping) depth, 0-7 (ECMA-376 §18.3.1.13
     /// `<col outlineLevel>`). Only columns whose level is non-zero are recorded,
@@ -212,6 +225,7 @@ impl Worksheet {
             name: name.to_string(),
             rows: Vec::new(),
             col_widths: BTreeMap::new(),
+            col_width_ranges: Vec::new(),
             row_heights: BTreeMap::new(),
             col_outline_levels: BTreeMap::new(),
             col_collapsed: BTreeMap::new(),

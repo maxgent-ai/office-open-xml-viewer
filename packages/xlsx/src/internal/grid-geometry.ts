@@ -84,11 +84,60 @@ export class GridGeometry {
     this.maximumDigitWidth = mdw;
     this.freezeRows = Math.min(MAX_WORKSHEET_ROW, Math.max(0, worksheet.freezeRows ?? 0));
     this.freezeCols = Math.min(MAX_WORKSHEET_COL, Math.max(0, worksheet.freezeCols ?? 0));
+    const defaultColPx = colWidthToPx(worksheet.defaultColWidth, mdw);
+    const resolvedColWidths = new Float64Array(MAX_WORKSHEET_COL + 1);
+    resolvedColWidths.fill(Number.NaN);
+    // Resolve declarations from last to first. The disjoint-set successor
+    // skips columns already assigned by a later declaration, so every sheet
+    // column is written at most once even when an adversarial file contains
+    // many overlapping full-width ranges.
+    const successor = new Int32Array(MAX_WORKSHEET_COL + 2);
+    for (let index = 1; index < successor.length; index++) successor[index] = index;
+    const findUnassigned = (start: number): number => {
+      let root = start;
+      while (successor[root] !== root) root = successor[root];
+      let index = start;
+      while (successor[index] !== index) {
+        const next = successor[index];
+        successor[index] = root;
+        index = next;
+      }
+      return root;
+    };
+    const authoredRanges = worksheet.colWidthRanges ?? [];
+    for (let rangeIndex = authoredRanges.length - 1; rangeIndex >= 0; rangeIndex--) {
+      const range = authoredRanges[rangeIndex];
+      const min = Math.max(1, Math.min(MAX_WORKSHEET_COL, Math.trunc(range.min)));
+      const max = Math.max(1, Math.min(MAX_WORKSHEET_COL, Math.trunc(range.max)));
+      if (max < min || !Number.isFinite(range.width) || range.width < 0) continue;
+      let index = findUnassigned(min);
+      while (index <= max) {
+        resolvedColWidths[index] = range.width;
+        successor[index] = findUnassigned(index + 1);
+        index = successor[index];
+      }
+    }
+    // Explicit point widths are also used by live resize overrides, so they
+    // intentionally win over the parsed compact ranges.
+    for (const [rawIndex, width] of Object.entries(worksheet.colWidths)) {
+      const index = Number(rawIndex);
+      if (Number.isInteger(index) && index >= 1 && index <= MAX_WORKSHEET_COL) {
+        resolvedColWidths[index] = width;
+      }
+    }
+    const columnPixels: Array<{ index: number; px: number }> = [];
+    for (let index = 1; index <= MAX_WORKSHEET_COL; index++) {
+      const width = resolvedColWidths[index];
+      if (!Number.isFinite(width) || width < 0) continue;
+      const px = colWidthToPx(width, mdw);
+      if (px !== defaultColPx) columnPixels.push({ index, px });
+    }
     this.col = new GridAxisGeometry(
-      worksheet.colWidths,
-      colWidthToPx(worksheet.defaultColWidth, mdw),
+      {},
+      defaultColPx,
       (raw) => colWidthToPx(raw, mdw),
       MAX_WORKSHEET_COL,
+      columnPixels,
     );
     this.row = new GridAxisGeometry(
       worksheet.rowHeights,

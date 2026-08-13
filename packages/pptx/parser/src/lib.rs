@@ -4083,7 +4083,8 @@ mod tests {
         }
     }
 
-    /// ECMA-376 §21.1.2.3.10 — strike="dblStrike" produces strike_double=true,
+    /// ECMA-376 §21.1.2.3.9; ST_TextStrikeType §20.1.10.79 —
+    /// strike="dblStrike" produces strike_double=true,
     /// while strike="sngStrike" leaves strike_double=false. The plain
     /// `strikethrough` flag is true in both cases.
     #[test]
@@ -4107,7 +4108,8 @@ mod tests {
         assert!(!r_n.strikethrough && !r_n.strike_double);
     }
 
-    /// ECMA-376 §21.1.2.3.13 — cap="all" / "small" are passed through;
+    /// ECMA-376 §21.1.2.3.9; ST_TextCapsType §20.1.10.64 — cap="all" /
+    /// "small" are passed through;
     /// cap="none" or omitted yields None so the field stays absent in JSON.
     #[test]
     fn test_parse_run_caps_attribute() {
@@ -4128,13 +4130,20 @@ mod tests {
         }
     }
 
-    /// ECMA-376 §21.1.2.3.5 — rPr @spc encodes letter spacing in 100ths of a
-    /// point; positive widens, negative tightens. Zero rounds away (None).
+    /// ECMA-376 §21.1.2.3.9; ST_TextPoint §20.1.10.74 — a unitless rPr @spc
+    /// encodes letter spacing in 100ths of a point; positive widens, negative
+    /// tightens. Zero rounds away (None).
     #[test]
     fn test_parse_run_letter_spacing() {
         let theme = HashMap::new();
         let rels = HashMap::new();
-        for (raw, expected) in [("100", Some(1.0)), ("-50", Some(-0.5)), ("0", None)] {
+        for (raw, expected) in [
+            ("100", Some(1.0)),
+            ("-50", Some(-0.5)),
+            ("1pt", Some(1.0)),
+            ("2.54cm", Some(72.0)),
+            ("0", None),
+        ] {
             let xml = format!(
                 r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr spc="{raw}"/><t>x</t></r>"#
             );
@@ -4872,7 +4881,8 @@ mod tests {
         }
     }
 
-    /// ECMA-376 §21.1.2.3.16 — underline_style carries non-default underline
+    /// ECMA-376 §21.1.2.3.9; ST_TextUnderlineType §20.1.10.82 —
+    /// underline_style carries non-default underline
     /// values (dbl, dotted, wavy, …) verbatim. The plain bool stays true for
     /// any non-"none" value; "sng" and absent both leave underline_style None
     /// because the renderer's default is already a single line.
@@ -4900,7 +4910,7 @@ mod tests {
         }
     }
 
-    /// ECMA-376 §21.1.2.3.20 — rPr > uFill > solidFill yields a per-run
+    /// ECMA-376 §21.1.2.3.12 — rPr > uFill > solidFill yields a per-run
     /// underline colour distinct from the text colour. uFillTx (or absent)
     /// leaves underline_color as None so the renderer falls back to text.
     #[test]
@@ -4987,7 +4997,7 @@ mod tests {
         assert!(r.highlight.is_none());
     }
 
-    /// ECMA-376 §21.1.2.3.7 — rPr > ea sets a separate East Asian font.
+    /// ECMA-376 §21.1.2.3.3 — rPr > ea sets a separate East Asian font.
     /// Resolves through the theme map: "+mn-ea" should expand to whatever
     /// the theme registered, while a literal name is preserved.
     #[test]

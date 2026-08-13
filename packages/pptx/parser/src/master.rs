@@ -75,7 +75,8 @@ pub(crate) struct LayoutPlaceholders {
     /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
     pub(crate) by_type_italic: HashMap<String, bool>,
     /// Default caps ("all"/"small") per placeholder type, from layout/master
-    /// lstStyle defRPr cap attribute (ECMA-376 §21.1.2.3.13)
+    /// lstStyle defRPr cap attribute (ECMA-376 §21.1.2.3.9;
+    /// ST_TextCapsType §20.1.10.64)
     pub(crate) by_type_caps: HashMap<String, String>,
     /// Default run reflection per placeholder type, inherited from layout or
     /// master `lvl1pPr/defRPr/effectLst`.
@@ -1124,7 +1125,8 @@ pub(crate) fn parse_master_txstyle_run_properties(
 ) -> MasterTxStyleRunProperties {
     let mut bold_map: HashMap<String, bool> = HashMap::new();
     let mut italic_map: HashMap<String, bool> = HashMap::new();
-    // ECMA-376 §21.1.2.3.13 cap="all"/"small" on the master txStyles defRPr —
+    // ECMA-376 §21.1.2.3.9, ST_TextCapsType §20.1.10.64: cap="all"/"small"
+    // on the master txStyles defRPr —
     // e.g. a template titleStyle with cap="all" upper-cases every title.
     let mut caps_map: HashMap<String, String> = HashMap::new();
     let mut reflection_map: HashMap<String, Reflection> = HashMap::new();

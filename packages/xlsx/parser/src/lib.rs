@@ -1453,6 +1453,9 @@ fn parse_projected_worksheet(
 
     let mut rows = streamed.rows;
     let mut col_widths: BTreeMap<u32, f64> = BTreeMap::new();
+    // All authored width declarations in XML order. The boolean records
+    // whether the declaration also needs the compact public wire form.
+    let mut authored_col_widths: Vec<(crate::types::ColumnWidthRange, bool)> = Vec::new();
     let mut row_heights = streamed.row_heights;
     // Outline (grouping) metadata — ECMA-376 §18.3.1.13 (col) / §18.3.1.73
     // (row) / §18.3.1.61 (outlinePr). Only non-default entries are recorded so
@@ -1635,6 +1638,10 @@ fn parse_projected_worksheet(
             "col" if is_x_ns(node.tag_name().namespace()) => {
                 let custom = attr_bool(&node, "customWidth").unwrap_or(false);
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
+                let authored_width = node
+                    .attribute("width")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && *value >= 0.0);
                 // §18.3.1.13 outline metadata: `outlineLevel` (0-7) and the
                 // summary-column `collapsed` flag. Recorded independently of the
                 // width so a grouped column at the default width is still
@@ -1645,31 +1652,48 @@ fn parse_projected_worksheet(
                     .unwrap_or(0)
                     .min(7);
                 let collapsed = attr_bool(&node, "collapsed").unwrap_or(false);
-                // Record widths for custom-widthed OR hidden columns, and also
-                // for columns that carry outline info (level > 0 or collapsed) —
-                // those must reach the viewer even at the default width.
+                // ECMA-376 §18.3.1.13: `customWidth` records how the width was
+                // established; it does not gate the authored `width` itself.
+                // Also retain outline-only columns so their gutter metadata
+                // reaches the viewer at the default width.
                 let has_outline = outline_level > 0 || collapsed;
-                if !custom && !hidden && !has_outline {
+                if authored_width.is_none() && !custom && !hidden && !has_outline {
                     continue;
                 }
                 let min: u32 = node
                     .attribute("min")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                let max: u32 = node
+                    .unwrap_or(1)
+                    .clamp(1, 16_384);
+                let full_max: u32 = node
                     .attribute("max")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                // Cap range to avoid storing 16K entries for max=16384 ranges
-                let max = max.min(min + 255);
+                    .unwrap_or(min)
+                    .clamp(1, 16_384);
+                if full_max < min {
+                    continue;
+                }
                 let width: f64 = if hidden {
                     0.0
                 } else {
-                    node.attribute("width")
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .filter(|value| value.is_finite() && *value >= 0.0)
-                        .unwrap_or(default_col_width)
+                    authored_width.unwrap_or(default_col_width)
                 };
+                let point_max = full_max.min(min.saturating_add(255));
+                let point_map_covers_width = (custom || hidden) && point_max == full_max;
+                if hidden || authored_width.is_some() || custom {
+                    authored_col_widths.push((
+                        crate::types::ColumnWidthRange {
+                            min,
+                            max: full_max,
+                            width,
+                        },
+                        !point_map_covers_width,
+                    ));
+                }
+                // Keep the legacy point map for existing consumers while
+                // bounding its wire size. Grid geometry applies the compact
+                // full range first, then lets these point entries override it.
+                let max = point_max;
                 for c in min..=max {
                     // Only store a width entry when the column actually has a
                     // custom / hidden width; a default-width grouped column keeps
@@ -2060,6 +2084,46 @@ fn parse_projected_worksheet(
         }
     }
 
+    // Resolve the effective width of every sheet column once, from the last
+    // declaration backwards. The successor DSU skips columns already claimed
+    // by a later declaration, bounding work by declarations + 16,384 columns
+    // rather than declarations × range length.
+    let mut resolved_widths: Vec<Option<f64>> = vec![None; 16_385];
+    let mut successor: Vec<usize> = (0..=16_385).collect();
+    fn find_unassigned(successor: &mut [usize], start: usize) -> usize {
+        let mut root = start;
+        while successor[root] != root {
+            root = successor[root];
+        }
+        let mut index = start;
+        while successor[index] != index {
+            let next = successor[index];
+            successor[index] = root;
+            index = next;
+        }
+        root
+    }
+    for (range, _) in authored_col_widths.iter().rev() {
+        let mut index = find_unassigned(&mut successor, range.min as usize);
+        while index <= range.max as usize {
+            resolved_widths[index] = Some(range.width);
+            successor[index] = find_unassigned(&mut successor, index + 1);
+            index = successor[index];
+        }
+    }
+    // Keep the legacy point map for existing consumers, but normalize its
+    // entries to the final XML document-order result. Live edits still mutate
+    // these points and therefore override compact ranges in grid geometry.
+    for (index, width) in &mut col_widths {
+        if let Some(resolved) = resolved_widths[*index as usize] {
+            *width = resolved;
+        }
+    }
+    let col_width_ranges = authored_col_widths
+        .into_iter()
+        .filter_map(|(range, compact)| compact.then_some(range))
+        .collect();
+
     conditional_formats.extend(x14_icon_formats);
 
     if rows_hidden_by_default {
@@ -2082,6 +2146,7 @@ fn parse_projected_worksheet(
         name: name.to_string(),
         rows,
         col_widths,
+        col_width_ranges,
         row_heights,
         col_outline_levels,
         col_collapsed,
@@ -3869,6 +3934,87 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+    }
+
+    /// ECMA-376 §18.3.1.13 defines `customWidth` as metadata indicating that
+    /// the width differs from the default; it is not a condition for applying
+    /// an authored `width`. Excel can omit the flag on style-wide ranges.
+    #[test]
+    fn col_width_without_custom_width_is_preserved_as_a_compact_range() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols><col min="2" max="16384" width="10.83203125" style="44"/></cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert!(
+            ws.col_widths.is_empty(),
+            "wide ranges must not expand into 16K JSON entries"
+        );
+        assert_eq!(
+            ws.col_width_ranges,
+            vec![crate::types::ColumnWidthRange {
+                min: 2,
+                max: 16_384,
+                width: 10.83203125,
+            }],
+        );
+    }
+
+    #[test]
+    fn later_compact_col_width_range_overrides_legacy_point_projection() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols>
+                <col min="2" max="2" width="20" customWidth="1"/>
+                <col min="2" max="16384" width="10"/>
+            </cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert_eq!(ws.col_widths.get(&2).copied(), Some(10.0));
+        assert_eq!(
+            ws.col_width_ranges,
+            vec![crate::types::ColumnWidthRange {
+                min: 2,
+                max: 16_384,
+                width: 10.0,
+            }],
+        );
+    }
+
+    #[test]
+    fn later_legacy_point_col_width_overrides_compact_range() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols>
+                <col min="2" max="16384" width="10"/>
+                <col min="2" max="2" width="20" customWidth="1"/>
+            </cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert_eq!(ws.col_widths.get(&2).copied(), Some(20.0));
+        assert_eq!(ws.col_width_ranges[0].width, 10.0);
+    }
+
+    #[test]
+    fn many_overlapping_full_col_width_ranges_are_normalized_in_bounded_work() {
+        let mut cols = String::new();
+        for chunk in 0..64 {
+            let min = chunk * 256 + 1;
+            let max = min + 255;
+            cols.push_str(&format!(
+                r#"<col min="{min}" max="{max}" width="11" customWidth="1"/>"#
+            ));
+        }
+        for index in 0..50_000 {
+            let width = 9 + (index % 2);
+            cols.push_str(&format!(r#"<col min="1" max="16384" width="{width}"/>"#));
+        }
+        let xml = format!(r#"<worksheet xmlns="{NS}"><cols>{cols}</cols><sheetData/></worksheet>"#);
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert_eq!(ws.col_widths.len(), 16_384);
+        assert!(ws.col_widths.values().all(|width| *width == 10.0));
+        assert_eq!(ws.col_width_ranges.len(), 50_000);
     }
 
     /// ECMA-376 §18.3.1.81 `zeroHeight` hides rows by default, including rows

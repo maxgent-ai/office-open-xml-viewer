@@ -28,6 +28,25 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v0781-docx-pagination-fix',
+    date: '2026-08-12',
+    label: 'Release note',
+    version: 'v0.78.1',
+    title: 'DOCX pagination fix in v0.78.1',
+    summary: 'v0.78.1 fixes a regression that could move text in narrow Word table cells to the wrong page or hide intentional blank spacing.',
+    audience: 'Users who display Word documents with narrow table columns or full-width spacing. No application changes are required when upgrading from v0.78.0.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This patch restores Word-compatible page breaks for affected table content and preserves intentional blank space created with full-width spaces.',
+          'There are no public API changes and no migration is required.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v078-chart-fidelity-and-multi-selection',
     date: '2026-08-12',
     label: 'Release note',

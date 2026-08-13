@@ -1028,6 +1028,10 @@ mod hidden_tests {
         assert_eq!(boxes[0].paragraphs[0].runs[0].text, "User-shape title");
         assert_eq!(boxes[0].paragraphs[0].runs[0].font_size_hpt, Some(2000));
         assert_eq!(boxes[0].paragraphs[0].runs[0].bold, Some(true));
+        assert_eq!(boxes[0].l_ins, ooxml_common::text::DEFAULT_INS_LR_EMU);
+        assert_eq!(boxes[0].r_ins, ooxml_common::text::DEFAULT_INS_LR_EMU);
+        assert_eq!(boxes[0].t_ins, ooxml_common::text::DEFAULT_INS_TB_EMU);
+        assert_eq!(boxes[0].b_ins, ooxml_common::text::DEFAULT_INS_TB_EMU);
     }
 }
 

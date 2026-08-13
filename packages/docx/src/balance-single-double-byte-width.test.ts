@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import {
   buildSegments,
+  layoutLines,
   segAdvanceWidth,
   type LayoutTextSeg,
   type LineLayoutEnvironment,
@@ -57,6 +59,21 @@ function textRun(text: string): DocRun {
   } as unknown as DocRun;
 }
 
+function laidOutTextLines(
+  runs: readonly DocRun[],
+  grid: Parameters<typeof layoutLines>[10],
+  width = 2,
+): string[] {
+  const lines = layoutLines(
+    measureContext(), textSegments(runs), width, 0, 1, [], undefined, {}, 0,
+    DEFAULT_KINSOKU_RULES, grid, 36, width, false,
+  );
+  return lines.map((line) =>
+    line.segments.filter((segment): segment is LayoutTextSeg => 'text' in segment)
+      .map((segment) => segment.text)
+      .join(''));
+}
+
 function environment(enabled: boolean): LineLayoutEnvironment {
   return {
     pageIndex: 0,
@@ -97,6 +114,76 @@ describe('ECMA-376 §17.15.3.3 single-byte/double-byte width balance', () => {
       ['\u3000', 0.5],
       ['本', 1],
     ]);
+  });
+
+  it('preserves ideographic-space hanging on a line-only document grid', () => {
+    const segments = textSegments([textRun('申\u3000請\u3000事\u3000項')]);
+    expect(segments.map((segment) => [segment.text, segment.joinPrev ?? false])).toEqual([
+      ['申', false],
+      ['\u3000', true],
+      ['請', false],
+      ['\u3000', true],
+      ['事', false],
+      ['\u3000', true],
+      ['項', false],
+    ]);
+
+    const lines = layoutLines(
+      measureContext(), segments, 4, 0, 1, [], undefined, {}, 0,
+      DEFAULT_KINSOKU_RULES, { type: 'lines', linePitchPt: 18 }, 36, 4, false,
+    );
+    const lineTexts = lines.map((line) =>
+      line.segments.filter((segment): segment is LayoutTextSeg => 'text' in segment)
+        .map((segment) => segment.text)
+        .join(''));
+    expect(lineTexts.map((text) => [...text][0])).toEqual(['申', '請', '事', '項']);
+    expect(lineTexts.some((text) => [...text].every((character) => character === '\u3000')))
+      .toBe(false);
+  });
+
+  it.each([-2, 2])(
+    'preserves ideographic-space hanging with linesAndChars charSpace %s',
+    (charSpacePt) => {
+      const lines = laidOutTextLines(
+        [textRun('申\u3000請\u3000事\u3000項')],
+        { type: 'linesAndChars', linePitchPt: 18, charSpacePt },
+      );
+      expect(lines.map((text) => [...text][0])).toEqual(['申', '請', '事', '項']);
+      expect(lines.some((text) => [...text].every((character) => character === '\u3000')))
+        .toBe(false);
+    },
+  );
+
+  it('preserves hanging when the run opts out of the character grid', () => {
+    const run = { ...textRun('申\u3000請\u3000事'), snapToGrid: false } as DocRun;
+    const lines = laidOutTextLines(
+      [run],
+      { type: 'linesAndChars', linePitchPt: 18, charSpacePt: -2 },
+    );
+    expect(lines).toEqual(['申\u3000', '請\u3000', '事']);
+  });
+
+  it('does not detach a paragraph-final U+3000 tail from its ruby source run', () => {
+    const run = {
+      ...textRun('見出し\u3000\u3000'),
+      ruby: { text: 'みだし', fontSizePt: 5 },
+    } as DocRun;
+    const segments = textSegments([run]);
+    expect(segments.map((segment) => [segment.text, segment.ruby !== undefined])).toEqual([
+      ['見出し', true],
+      ['\u3000\u3000', false],
+    ]);
+
+    const lines = layoutLines(
+      measureContext(), segments, 20, 0, 1, [], undefined, {}, 0,
+      DEFAULT_KINSOKU_RULES, { type: 'lines', linePitchPt: 18 }, 36, 20, false,
+    );
+    expect(lines.map((line) => line.segments
+      .filter((segment): segment is LayoutTextSeg => 'text' in segment)
+      .map((segment) => segment.text)
+      .join(''))).toEqual(['見出し\u3000\u3000']);
+    expect(segments.some((segment) => segment.paragraphFinalIdeographicSpaceTail === true))
+      .toBe(false);
   });
 
   it('balances two or more authored U+0020 spaces against half an ideographic cell', () => {

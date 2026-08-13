@@ -1116,12 +1116,12 @@ pub(crate) struct TextRunData {
     /// OOXML rPr @u value when explicit and != "sng" — e.g. "dbl", "dotted",
     /// "dash", "wavy", "heavy", "dotDash", … None means either no underline
     /// or the default single-line style (rPr @u = "sng" or unset truthy).
-    /// ECMA-376 §21.1.2.3.16 (ST_TextUnderlineType).
+    /// ECMA-376 §21.1.2.3.9 (`rPr@u`); ST_TextUnderlineType §20.1.10.82.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) underline_style: Option<String>,
     /// Underline-specific colour from rPr > uFill > solidFill. None means the
     /// underline follows the text colour (uFillTx behaviour, the default).
-    /// ECMA-376 §21.1.2.3.20 (CT_TextUnderlineFillGroupWrapper).
+    /// ECMA-376 §21.1.2.3.12 (CT_TextUnderlineFillGroupWrapper).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) underline_color: Option<String>,
     /// true when strike == "sngStrike" or "dblStrike"
@@ -1134,7 +1134,7 @@ pub(crate) struct TextRunData {
     pub(crate) font_family: Option<String>,
     /// East Asian font family from rPr > ea (resolved through the theme).
     /// Renderer uses this for CJK runs. None = inherit from latin font.
-    /// ECMA-376 §21.1.2.3.7 (CT_TextFont, ea variant).
+    /// ECMA-376 §21.1.2.3.3 (CT_TextFont, ea variant).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) font_family_ea: Option<String>,
     /// Symbol font family from rPr > sym (resolved through the theme).
@@ -1145,11 +1145,14 @@ pub(crate) struct TextRunData {
     /// Baseline shift in thousandths of a point. Positive = superscript, negative = subscript.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) baseline: Option<i32>,
-    /// Capitalisation transform — ECMA-376 §21.1.2.3.13 (ST_TextCapsType).
+    /// Capitalisation from `rPr@cap` — ECMA-376 §21.1.2.3.9;
+    /// ST_TextCapsType §20.1.10.64.
     /// "none" | "small" | "all". None = inherit / no transform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) caps: Option<String>,
-    /// Letter spacing (rPr @spc). 100ths of a point. Positive = looser, negative = tighter.
+    /// Letter spacing in points after normalizing DrawingML `rPr@spc` from
+    /// unitless hundredths of a point or `ST_UniversalMeasure` (ECMA-376
+    /// §21.1.2.3.9; ST_TextPoint §20.1.10.74). Positive = looser, negative = tighter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) letter_spacing: Option<f64>,
     /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)

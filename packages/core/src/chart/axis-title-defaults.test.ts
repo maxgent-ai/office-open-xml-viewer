@@ -185,8 +185,8 @@ describe('axis-title compatibility defaults', () => {
     expect(call.font).toContain('12px');
     expect(call.font).toContain('Aptos Display');
     expect(call.rotation).toBeCloseTo(Math.PI / 6);
-    expect(call.translateX).toBeCloseTo(188);
-    expect(call.translateY).toBeCloseTo(32);
+    expect(call.translateX).toBeCloseTo(187.248711, 5);
+    expect(call.translateY).toBeCloseTo(45.196152, 5);
   });
 
   it('keeps authored rot and vertical mode independent at paint time', () => {
@@ -197,5 +197,23 @@ describe('axis-title compatibility defaults', () => {
       valAxisTitleVerticalMode: 'vert270',
     }), WIDE, 1);
     expect(titleCall(texts, 'Combined').rotation).toBeCloseTo(-Math.PI / 3);
+  });
+
+  it('positions a manual vertical title by its rotated bounding box', () => {
+    const { ctx, texts } = recordingContext();
+    renderChart(ctx, model({
+      valAxisTitle: 'Vertical',
+      valAxisTitleRotation: -5_400_000,
+      valAxisTitleVerticalMode: 'horz',
+      valAxisTitleManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.01, y: 0.1,
+      },
+    }), WIDE, 1);
+
+    const call = titleCall(texts, 'Vertical');
+    // 8 glyphs × 7px = 56px. After a quarter turn, the fitted title box is
+    // 10×56, so edge coordinates (8,26) place its centre at (13,54).
+    expect(call.translateX).toBeCloseTo(13);
+    expect(call.translateY).toBeCloseTo(54);
   });
 });

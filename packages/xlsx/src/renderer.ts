@@ -6,7 +6,7 @@ import type {
   SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
-import type { Stroke } from '@silurus/ooxml-core';
+import type { Stroke, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
@@ -1630,6 +1630,8 @@ interface RenderContext {
   /** Logical canvas width (device-independent px). Needed by the RTL
    *  mirror; identical to the value the top-level render fn computes. */
   canvasW: number;
+  threeD?: ChartThreeDRenderer;
+  regionMap?: ChartRegionMapRenderer;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2320,7 +2322,7 @@ function renderQuadrant(
       // 0.5/dpr offset blurs at even device widths, e.g. dpr=3).
       // Skipped when the sheet has `<sheetView showGridLines="0">` (View →
       // Gridlines unchecked; ECMA-376 §18.3.1.83).
-      if (rc.worksheet.showGridlines !== false) {
+      if (rc.worksheet.isChartSheet !== true && rc.worksheet.showGridlines !== false) {
         ctx.strokeStyle = '#d0d0d0';
         ctx.lineWidth = 0.5;
         ctx.beginPath();
@@ -3256,6 +3258,7 @@ export function renderViewport(
 ): void {
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
+  const chartSheet = worksheet.isChartSheet === true;
   // Resolve MDW once per render — workbook-wide value derived from the
   // Normal-style font (ECMA-376 §18.3.1.13).
   const geometry = getGridGeometryForWorksheet(worksheet);
@@ -3269,8 +3272,10 @@ export function renderViewport(
 
   // Scaled pixel helper: apply cellScale to all cell/header dimensions
   const sp = (px: number) => Math.round(px * cs);
-  const hw = sp(HEADER_W);  // scaled header column width
-  const hh = sp(HEADER_H);  // scaled header row height
+  // Chart sheets have no worksheet grid or row/column headers. Their DrawingML
+  // absolute anchors are measured from the chart-sheet canvas origin.
+  const hw = chartSheet ? 0 : sp(HEADER_W);  // scaled header column width
+  const hh = chartSheet ? 0 : sp(HEADER_H);  // scaled header row height
 
   const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
   const scrollOffsetX = (opts.scrollOffsetX ?? 0) * cs;
@@ -3281,12 +3286,12 @@ export function renderViewport(
   // naturally reduces the scrollable quadrant to zero.
   const frozenColBands = colAxis.bandsToCover(
     1,
-    opts.freezeCols ?? 0,
+    chartSheet ? 0 : (opts.freezeCols ?? 0),
     Math.max(0, canvasW - hw),
   );
   const frozenRowBands = rowAxis.bandsToCover(
     1,
-    opts.freezeRows ?? 0,
+    chartSheet ? 0 : (opts.freezeRows ?? 0),
     Math.max(0, canvasH - hh),
   );
   const freezeRows = frozenRowBands.at(-1)?.index ?? 0;
@@ -3396,6 +3401,7 @@ export function renderViewport(
     onTextRun: opts.onTextRun,
     rtl: worksheet.rightToLeft === true,
     canvasW,
+    threeD: opts.threeD,
   };
 
   // Canvas areas for each quadrant
@@ -3440,24 +3446,26 @@ export function renderViewport(
   }
 
   // ── Q4: scrollable rows × scrollable cols (main area) ───────
-  renderQuadrant(ctx, rc,
-    startRow, overflowOverscan.startCol, renderScrollColWidths, scrollRowHeights,
-    renderScrollColIndices, scrollRowIndices,
-    renderScrollOffsetX, scrollOffsetY,
-    scrollAreaX, scrollAreaY,
-    scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
-  );
+  if (!chartSheet) {
+    renderQuadrant(ctx, rc,
+      startRow, overflowOverscan.startCol, renderScrollColWidths, scrollRowHeights,
+      renderScrollColIndices, scrollRowIndices,
+      renderScrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
+    );
+  }
 
   // ── Anchored DrawingML objects, in authored z-order ───────────
   renderAnchoredDrawings(
     ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
     startRow, startCol, scrollOffsetX, scrollOffsetY,
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
-    worksheet.rightToLeft === true, canvasW,
+    worksheet.rightToLeft === true, canvasW, opts.threeD, opts.regionMap,
   );
 
   // ── Anchored slicers (Office 2010+ pivot/table filter buttons) ──
-  if (worksheet.slicers && worksheet.slicers.length > 0) {
+  if (!chartSheet && worksheet.slicers && worksheet.slicers.length > 0) {
     renderSlicers(
       ctx, worksheet, colAxis, rowAxis, cs,
       startRow, startCol,
@@ -3469,19 +3477,21 @@ export function renderViewport(
   }
 
   // ── Row/col headers (drawn last, always on top) ──────────────
-  renderHeaders(ctx, canvasW, canvasH,
-    startRow, startCol, numRows, numCols,
-    scrollColWidths, scrollRowHeights,
-    scrollColIndices, scrollRowIndices,
-    scrollOffsetX, scrollOffsetY,
-    frozenColWidths, frozenRowHeights,
-    frozenColIndices, frozenRowIndices,
-    frozenW, frozenH,
-    hw, hh, cs, dpr,
-    opts.selectedRowRange ?? null,
-    opts.selectedColRange ?? null,
-    worksheet.rightToLeft === true,
-  );
+  if (!chartSheet) {
+    renderHeaders(ctx, canvasW, canvasH,
+      startRow, startCol, numRows, numCols,
+      scrollColWidths, scrollRowHeights,
+      scrollColIndices, scrollRowIndices,
+      scrollOffsetX, scrollOffsetY,
+      frozenColWidths, frozenRowHeights,
+      frozenColIndices, frozenRowIndices,
+      frozenW, frozenH,
+      hw, hh, cs, dpr,
+      opts.selectedRowRange ?? null,
+      opts.selectedColRange ?? null,
+      worksheet.rightToLeft === true,
+    );
+  }
 
   // ── Freeze pane separator lines ──────────────────────────────
   // RTL mirrors the vertical freeze divider to the left edge of the frozen
@@ -3755,6 +3765,8 @@ function renderAnchoredDrawings(
   scrollAreaH: number,
   rtl: boolean,
   canvasW: number,
+  threeD?: ChartThreeDRenderer,
+  regionMap?: ChartRegionMapRenderer,
 ): void {
   const drawings: AnchoredDrawing[] = [];
   let fallbackOrder = 0;
@@ -3795,6 +3807,8 @@ function renderAnchoredDrawings(
         startRow, startCol, scrollOffsetX, scrollOffsetY,
         scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH, rtl, canvasW,
         [drawing.anchor],
+        threeD,
+        regionMap,
       );
     }
   }
@@ -4963,6 +4977,8 @@ function renderCharts(
   rtl: boolean,
   canvasW: number,
   anchors: readonly ChartAnchor[] = ws.charts,
+  threeD?: ChartThreeDRenderer,
+  regionMap?: ChartRegionMapRenderer,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -5003,7 +5019,7 @@ function renderCharts(
     // `anchor.chart` is already the canonical ChartModel emitted by the Rust
     // parser (`ooxml_common::chart::ChartModel`) — the former `adaptChartData`
     // default/mapping logic now lives in the parser's `From<ChartData>`.
-    renderChart(ctx, anchor.chart, { x: cx, y: cy, w: cw, h: ch }, ptToPx);
+    renderChart(ctx, anchor.chart, { x: cx, y: cy, w: cw, h: ch }, ptToPx, 0, threeD, regionMap);
     ctx.restore();
   }
 }

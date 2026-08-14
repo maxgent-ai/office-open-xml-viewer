@@ -63,6 +63,16 @@
       "import": "./dist/math.mjs",
       "default": "./dist/math.mjs"
     },
+    "./three-d": {
+      "types": "./dist/types/three-d.d.ts",
+      "import": "./dist/three-d.mjs",
+      "default": "./dist/three-d.mjs"
+    },
+    "./region-map": {
+      "types": "./dist/types/region-map.d.ts",
+      "import": "./dist/region-map.mjs",
+      "default": "./dist/region-map.mjs"
+    },
     "./node": {
       "types": "./dist/types/node.d.ts",
       "import": "./dist/node.mjs",
@@ -87,6 +97,8 @@
     "smoke": "playwright test --config tests/smoke/playwright.config.ts layouts",
     "test": "vitest run && node --test tests/visual/private-corpus.test.mjs",
     "check:no-inline-wasm": "node scripts/check-no-inline-wasm.mjs dist",
+    "check:optional-three-d": "node scripts/check-optional-three-d.mjs dist",
+    "check:optional-region-map": "node scripts/check-optional-region-map.mjs dist",
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests",
     "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",

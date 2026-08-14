@@ -12,6 +12,8 @@
 <canvas id="canvas"></canvas>
 <script type="module">
   import { DocxDocument } from '/src/index.ts';
+  import { threeD } from '@ooxml-test-three-d-addon';
+  import { regionMap } from '@ooxml-test-region-map-addon';
 
   const params = new URLSearchParams(location.search);
   const file = params.get('file') ?? 'sample-1.docx';
@@ -21,7 +23,7 @@
   const canvas = document.getElementById('canvas');
 
   try {
-    const doc = await DocxDocument.load('/' + file);
+    const doc = await DocxDocument.load('/' + file, { threeD, regionMap });
     // Report the renderer's REAL page count so the VRT spec can assert the
     // requested page index is in range. renderPage() silently clamps an
     // out-of-range index back to page 0 (renderer.ts: `pages[pageIndex] ??

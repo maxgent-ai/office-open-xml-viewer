@@ -1,4 +1,6 @@
 import type { MathRenderer } from '../math/mathjax';
+import type { ChartThreeDRenderer } from '../chart/three-d-contract';
+import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
 import type { OoxmlResourceMetrics } from './resource-metrics.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
@@ -145,4 +147,18 @@ export interface LoadOptions {
    * cost).
    */
   math?: MathRenderer;
+  /**
+   * Opt-in model-space 3-D chart renderer. Import `threeD` from the separate
+   * `@silurus/ooxml/three-d` entry and inject it once. When omitted, authored
+   * 3-D groups use their canonical 2-D chart family and the mesh/camera addon
+   * tree-shakes out of the format bundle.
+   */
+  threeD?: ChartThreeDRenderer;
+  /**
+   * Opt-in offline ChartEx Region Map renderer with fixed Natural Earth
+   * geometry. Import `regionMap` from
+   * `@silurus/ooxml/region-map` and inject it once. Omit it when geospatial
+   * charts are not needed so the asset tree-shakes out completely.
+   */
+  regionMap?: ChartRegionMapRenderer;
 }

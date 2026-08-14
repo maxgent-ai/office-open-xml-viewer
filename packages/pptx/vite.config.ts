@@ -11,6 +11,12 @@ const dirname =
 
 export default defineConfig({
   plugins: [wasm()],
+  resolve: {
+    alias: {
+      '@ooxml-test-three-d-addon': resolve(dirname, '../../src/three-d.ts'),
+      '@ooxml-test-region-map-addon': resolve(dirname, '../../src/region-map.ts'),
+    },
+  },
   server: {
     fs: {
       // Include monorepo root so node_modules/.pnpm/ fontsource files can be served

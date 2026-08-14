@@ -135,12 +135,27 @@ export interface ChartFrame {
  *  Chart Style both omit a size. OOXML does not define an automatic size. */
 const DEFAULT_CHART_TITLE_SIZE_PT = 14;
 
+/** Validate DrawingML `ST_TextFontSize` at the public-model boundary and
+ * convert hundredths of a point to CSS pixels. Parsers apply the same
+ * 100..400000 schema bound, but renderers also accept hand-authored models. */
+export function chartTextFontSizePx(
+  sizeHpt: number | null | undefined,
+  ptToPx: number,
+): number | null {
+  return typeof sizeHpt === 'number'
+    && Number.isFinite(sizeHpt)
+    && sizeHpt >= 100
+    && sizeHpt <= 400_000
+    ? (sizeHpt / 100) * ptToPx
+    : null;
+}
+
 /** Chart title font size (px). Honor the parser-resolved size first (authored
  *  rich text, then linked Chart Style); otherwise use one deterministic 14pt
  *  fallback across classic and ChartEx chart families. */
 export function chartTitleFontPx(chart: ChartModel, _h: number, ptToPx: number): number {
-  if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
-  return DEFAULT_CHART_TITLE_SIZE_PT * ptToPx;
+  return chartTextFontSizePx(chart.titleFontSizeHpt, ptToPx)
+    ?? DEFAULT_CHART_TITLE_SIZE_PT * ptToPx;
 }
 
 /** Fraction of the title font size used as the band's TOP pad — the gap from
@@ -154,7 +169,7 @@ export function chartTitleFontPx(chart: ChartModel, _h: number, ptToPx: number):
  *  `textBaseline='top'` the glyph cap-top sits ~0.19×font below the draw origin
  *  (the box-top → cap-top gap intrinsic to the face), so a top pad of ~0.62×font
  *  places the cap-top at ~0.81×font from the band top, matching PowerPoint's
- *  rendered chart titles (measured against the demo sample-1 line chart PDF).
+ *  rendered chart titles in the bounded Office vector corpus.
  *
  *  For an already-resolved `fontPx`, the band's TOTAL height (`bandH`) is
  *  unchanged by this top/bottom-pad redistribution — see
@@ -216,7 +231,11 @@ export function chartLegendReserve(
   if (side === 'r' || side === 'l') {
     if (metrics) {
       const minWidth = Math.min(80, w * 0.3);
-      const maxWidth = Math.max(minWidth, Math.min(w * 0.3, Math.max(80, w * sideReserveFrac)));
+      // Once Canvas metrics are available, size the band from the content
+      // rather than reusing the legacy family fraction as an upper bound. The
+      // 30% safety cap still leaves the majority of the frame to the plot, but
+      // permits a long authored series name to wrap into complete words.
+      const maxWidth = w * 0.3;
       const measuredWidth = Math.max(0, ...metrics.itemWidths) + metrics.horizontalPadding;
       return {
         side,
@@ -271,15 +290,7 @@ export function axisTitleFontPx(
   // parser output and direct public-model inputs from creating negative or
   // unbounded layout bands; invalid values use the same product fallback as
   // omission. `ptToPx` is a host scale and is validated by the host renderer.
-  if (
-    typeof sizeHpt === 'number' &&
-    Number.isFinite(sizeHpt) &&
-    sizeHpt >= 100 &&
-    sizeHpt <= 400_000
-  ) {
-    return (sizeHpt / 100) * ptToPx;
-  }
-  return AXIS_TITLE_FALLBACK_PT * ptToPx;
+  return chartTextFontSizePx(sizeHpt, ptToPx) ?? AXIS_TITLE_FALLBACK_PT * ptToPx;
 }
 
 export type ChartAxisTitleSide = 'left' | 'right' | 'horizontal';
@@ -359,8 +370,8 @@ export function chartAxisTitleBands(
 // with no `<c:manualLayout>`). ECMA-376 does not specify the auto-layout geometry
 // — it only says the plot area is positioned automatically — so these constants
 // model the RUNTIME behavior PowerPoint applies, pinned to the rendered ground
-// truth. The load-bearing pin is the PLOT/frame ratio: the demo sample-1 slide-5
-// line chart PDF places the plot rect at 0.611 of the frame height. The remaining
+// truth. The load-bearing pin is the observed PLOT/frame ratio: a classic line
+// chart places the plot rect at 0.611 of the frame height. The remaining
 // 0.389 splits into the top reserve above the plot (title band + the gap down to
 // the first gridline ≈ 0.236) and the bottom reserve (category-label band ≈
 // 0.154). The title BAND itself is ≈ 0.200 of the frame — 0.236 is the top pad,
@@ -376,7 +387,7 @@ export function chartAxisTitleBands(
 /** Total vertical band a chart TITLE reserves, as a multiple of the title font
  *  size. PowerPoint centers the title text in a slot with air above and below;
  *  `2.25 × fontPx` reserves that slot. The reserve is pinned via the plot/frame
- *  ratio (0.611 on the demo slide-5 line chart PDF, see the block comment above);
+ *  ratio (0.611 in the measured classic-line case, see the block comment above);
  *  at that frame size the title BAND works out to ≈ 0.200 of the frame. (The
  *  0.236 figure sometimes quoted is the TOP PAD — band plus the gap down to the
  *  first gridline — not the band itself.) Replaces the old `fontPx + h·(top+bottom)`

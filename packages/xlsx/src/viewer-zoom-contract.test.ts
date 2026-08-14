@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
+import { worksheetContentBounds } from './internal/worksheet-content-bounds.js';
 import { installDom, makeContainer } from './viewer-destroy-test-dom.js';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet } from './renderer.js';
 import type { Worksheet } from './types.js';
@@ -102,12 +103,7 @@ function mount(
  *  `_naturalContentExtent` (header + used cols/rows, no scroll headroom). */
 function naturalExtent(ws: Worksheet): { width: number; height: number } {
   const mdw = getMdwForWorksheet(ws);
-  let maxRow = Math.max(50, ws.freezeRows ?? 0);
-  let maxCol = Math.max(26, ws.freezeCols ?? 0);
-  for (const row of ws.rows) {
-    if (row.index > maxRow) maxRow = row.index;
-    for (const cell of row.cells) if (cell.col > maxCol) maxCol = cell.col;
-  }
+  const { maxRow, maxCol } = worksheetContentBounds(ws);
   let width = HEADER_W;
   for (let c = 1; c <= maxCol; c++) width += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw);
   let height = HEADER_H;
@@ -116,6 +112,16 @@ function naturalExtent(ws: Worksheet): { width: number; height: number } {
 }
 
 describe('XlsxViewer IX9 zoom contract', () => {
+  it('extends the scrollable used range through cell-anchored drawings', () => {
+    const ws = makeSheet();
+    ws.charts = [{
+      fromCol: 9, fromColOff: 0, fromRow: 95, fromRowOff: 0,
+      toCol: 17, toColOff: 0, toRow: 113, toRowOff: 0,
+      chart: {} as never,
+    }];
+    expect(worksheetContentBounds(ws)).toEqual({ maxRow: 114, maxCol: 26 });
+  });
+
   it('getScale() is 1 (100%) by default and reflects the cellScale option', () => {
     installDom();
     expect(mount(makeSheet()).v.getScale()).toBe(1);

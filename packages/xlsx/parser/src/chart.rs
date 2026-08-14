@@ -373,8 +373,9 @@ pub(crate) fn load_sheet_charts(
         // Iterate over chart anchors. Charts may be saved either as a
         // `<xdr:twoCellAnchor>` (from + to cells — Excel's default) or a
         // `<xdr:oneCellAnchor>` (from cell + a saved `<xdr:ext cx cy>` EMU
-        // size, ECMA-376 §20.5.2.24). openpyxl and some other writers emit
-        // oneCellAnchor; both must produce a chart.
+        // size, ECMA-376 §20.5.2.24), or `<xdr:absoluteAnchor>` (absolute
+        // `<xdr:pos x y>` + extent, §20.5.2.1; the normal chart-sheet form).
+        // All three must produce the same bounded ChartAnchor wire shape.
         for anchor in draw_doc
             .root_element()
             .children()
@@ -382,7 +383,8 @@ pub(crate) fn load_sheet_charts(
         {
             let anchor_tag = anchor.tag_name().name();
             let is_one_cell = anchor_tag == "oneCellAnchor";
-            if (anchor_tag != "twoCellAnchor" && !is_one_cell)
+            let is_absolute = anchor_tag == "absoluteAnchor";
+            if (anchor_tag != "twoCellAnchor" && !is_one_cell && !is_absolute)
                 || !is_xdr_ns(anchor.tag_name().namespace())
             {
                 continue;
@@ -393,6 +395,8 @@ pub(crate) fn load_sheet_charts(
             let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
             // oneCellAnchor size: `<xdr:ext cx cy>` in EMU.
             let (mut ext_cx, mut ext_cy) = (0i64, 0i64);
+            // absoluteAnchor position: `<xdr:pos x y>` in EMU.
+            let (mut pos_x, mut pos_y) = (0i64, 0i64);
 
             for child in anchor.children() {
                 if !child.is_element() {
@@ -437,6 +441,16 @@ pub(crate) fn load_sheet_charts(
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0);
                     }
+                    "pos" => {
+                        pos_x = child
+                            .attribute("x")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        pos_y = child
+                            .attribute("y")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                    }
                     _ => {}
                 }
             }
@@ -450,6 +464,19 @@ pub(crate) fn load_sheet_charts(
                 to_row = from_row;
                 to_col_off = from_col_off + ext_cx;
                 to_row_off = from_row_off + ext_cy;
+            } else if is_absolute {
+                // ChartAnchor offsets are signed EMU and the renderer already
+                // turns a same-cell from/to pair into an exact pixel rectangle.
+                // Reuse that representation instead of fabricating worksheet
+                // cell indices for a chart sheet, which has no cell grid.
+                from_col = 0;
+                from_row = 0;
+                from_col_off = pos_x;
+                from_row_off = pos_y;
+                to_col = 0;
+                to_row = 0;
+                to_col_off = pos_x.saturating_add(ext_cx);
+                to_row_off = pos_y.saturating_add(ext_cy);
             }
 
             // Excel wraps chartEx in MCE either directly under the anchor or
@@ -947,6 +974,26 @@ mod hidden_tests {
         crate::XlsxZip::new(Cursor::new(buf)).unwrap()
     }
 
+    fn archive_with_custom_drawing(drawing: &str, sheet_dir: &str) -> crate::XlsxZip {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = SimpleFileOptions::default();
+            zw.start_file(format!("xl/{sheet_dir}/_rels/sheet1.xml.rels"), o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/drawings/drawing1.xml", o).unwrap();
+            zw.write_all(drawing.as_bytes()).unwrap();
+            zw.start_file("xl/drawings/_rels/drawing1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/charts/chart1.xml", o).unwrap();
+            zw.write_all(minimal_chart_xml().as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
+    }
+
     fn archive_with_chart_user_shapes() -> crate::XlsxZip {
         let mut chart_xml = minimal_chart_xml();
         chart_xml = chart_xml.replace(
@@ -1006,6 +1053,40 @@ mod hidden_tests {
             );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
+    }
+
+    /// ECMA-376 §20.5.2.1 `absoluteAnchor` is the chart-sheet placement form:
+    /// one absolute EMU position plus one absolute EMU extent. It must reach
+    /// the same ChartAnchor wire model without inventing a cell span.
+    #[test]
+    fn absolute_anchor_chart_uses_position_and_extent_offsets() {
+        let drawing = format!(
+            r#"<xdr:wsDr {NS}><xdr:absoluteAnchor>
+              <xdr:pos x="914400" y="457200"/><xdr:ext cx="3657600" cy="2743200"/>
+              <xdr:graphicFrame>
+                <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+                <xdr:xfrm><a:off x="914400" y="457200"/><a:ext cx="3657600" cy="2743200"/></xdr:xfrm>
+                <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+                  <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/>
+                </a:graphicData></a:graphic>
+              </xdr:graphicFrame><xdr:clientData/>
+            </xdr:absoluteAnchor></xdr:wsDr>"#,
+        );
+        let mut archive = archive_with_custom_drawing(&drawing, "chartsheets");
+        let charts = load_sheet_charts(
+            &mut archive,
+            "chartsheets/sheet1.xml",
+            None,
+            &theme(),
+            (None, None),
+            None,
+        );
+        assert_eq!(charts.len(), 1);
+        let anchor = &charts[0];
+        assert_eq!((anchor.from_col, anchor.from_row), (0, 0));
+        assert_eq!((anchor.to_col, anchor.to_row), (0, 0));
+        assert_eq!((anchor.from_col_off, anchor.from_row_off), (914400, 457200));
+        assert_eq!((anchor.to_col_off, anchor.to_row_off), (4572000, 3200400));
     }
 
     #[test]

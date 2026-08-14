@@ -105,6 +105,11 @@ export default defineConfig(({ command }) => ({
         // Opt-in math engine (MathJax + STIX Two Math). Separate entry so the
         // ~3 MB asset stays out of the docx/pptx bundles unless imported.
         math:  resolve(__dirname, 'src/math.ts'),
+        // Opt-in model-space 3-D chart mesh/camera painter. Ordinary format
+        // bundles keep the lightweight contract and 2-D fallback only.
+        'three-d': resolve(__dirname, 'src/three-d.ts'),
+        // Opt-in offline ChartEx Region Map geometry/projector.
+        'region-map': resolve(__dirname, 'src/region-map.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),

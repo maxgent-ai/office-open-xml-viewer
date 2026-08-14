@@ -244,6 +244,8 @@ export class DocxViewer implements ZoomableViewer {
         workerTimeoutMs: this._opts.workerTimeoutMs,
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
+        threeD: this._opts.threeD,
+        regionMap: this._opts.regionMap,
         mode: this._mode,
       }), () => {
         // Invalidate operations owned by the old document before its worker is

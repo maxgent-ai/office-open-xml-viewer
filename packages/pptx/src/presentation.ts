@@ -18,6 +18,8 @@ import {
   OoxmlResourceLimitError,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  type ChartThreeDRenderer,
+  type ChartRegionMapRenderer,
   type OoxmlResourceMetrics,
 } from '@silurus/ooxml-core';
 import {
@@ -180,6 +182,8 @@ export class PptxPresentation {
    *  `renderSlide` / `presentSlide` reuses it — equations render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private _math: MathRenderer | undefined;
+  private _threeD: ChartThreeDRenderer | undefined;
+  private _regionMap: ChartRegionMapRenderer | undefined;
 
   private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this._worker = worker;
@@ -274,7 +278,19 @@ export class PptxPresentation {
           "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
         );
       }
+      if (opts.threeD && mode === 'worker') {
+        console.warn(
+          "[ooxml] the 3-D chart addon is unavailable in mode: 'worker'; charts use their 2-D family fallback. Use mode: 'main' for authored 3-D charts.",
+        );
+      }
       pres._math = mode === 'worker' ? undefined : opts.math;
+      pres._threeD = mode === 'worker' ? undefined : opts.threeD;
+      if (opts.regionMap && mode === 'worker') {
+        console.warn(
+          "[ooxml] the Region Map addon is unavailable in mode: 'worker'; geospatial charts use the unsupported-chart placeholder. Use mode: 'main' for Region Maps.",
+        );
+      }
+      pres._regionMap = mode === 'worker' ? undefined : opts.regionMap;
       await pres._parse(
         buffer,
         resourceOptions.policy,
@@ -518,6 +534,8 @@ export class PptxPresentation {
             skipMediaControls: opts.skipMediaControls,
             dim: opts.dim,
             math: this._math,
+            threeD: this._threeD,
+            regionMap: this._regionMap,
           },
           opts.onTextRun,
         );

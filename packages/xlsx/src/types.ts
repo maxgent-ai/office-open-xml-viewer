@@ -5,6 +5,8 @@ import type {
   SpaceLine,
   Fill,
   ArrowEnd,
+  ChartThreeDRenderer,
+  ChartRegionMapRenderer,
 } from '@silurus/ooxml-core';
 
 export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
@@ -60,6 +62,9 @@ export interface MergeCell {
 
 export interface Worksheet {
   name: string;
+  /** `true` for an `xl/chartsheets/*.xml` part. Chart sheets have no cell grid;
+   *  their absolute-anchored drawing is the sheet content. */
+  isChartSheet?: boolean;
   rows: Row[];
   colWidths: Record<number, number>;
   /** Compact `<col min max width>` declarations in document order. The parser
@@ -1079,6 +1084,10 @@ export interface XlsxRenderViewportOptions {
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   loadedImages?: Map<string, CanvasImageSource | null>;
   fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+  /** @internal Optional synchronous 3-D chart addon retained by the workbook. */
+  threeD?: ChartThreeDRenderer;
+  /** @internal Optional synchronous offline Region Map addon. */
+  regionMap?: ChartRegionMapRenderer;
 }
 
 export type WorkerRequest =

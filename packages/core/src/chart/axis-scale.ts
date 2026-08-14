@@ -1,6 +1,30 @@
 // Excel-style "nice" value-axis scaling. Pure math (no canvas), extracted so it
 // can be unit-tested and reused independently of the chart renderer.
 
+export interface FiniteDataExtent {
+  min: number;
+  max: number;
+}
+
+/**
+ * Bounded-stack finite min/max reduction for chart caches and public models.
+ * Avoids `Math.min(...values)` / `Math.max(...values)`, whose argument expansion
+ * can throw for otherwise valid large OOXML caches.
+ */
+export function finiteDataExtent(
+  values: Iterable<number | null | undefined>,
+  fallback: FiniteDataExtent = { min: 0, max: 1 },
+): FiniteDataExtent {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (value == null || !Number.isFinite(value)) continue;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : fallback;
+}
+
 /** A round major-unit step that yields roughly `targetSteps` gridlines across
  *  `range` (1 / 2 / 5 × 10ⁿ — Excel's default ladder). */
 export function niceStep(range: number, targetSteps = 5): number {
@@ -12,51 +36,55 @@ export function niceStep(range: number, targetSteps = 5): number {
   return nice * mag;
 }
 
-/** Excel / PowerPoint automatic value-axis maximum. Microsoft's documented
- *  algorithm (per Peltier Tech) is "the first major unit above
- *  `Ymax + (Ymax − Ymin)/20`": ~5% of the data range is added as headroom so the
- *  tallest series sits just below the top gridline rather than flush against it,
- *  then the result is rounded up to the next major unit. `dataMin` is the axis
- *  minimum (0 for bar/column charts; the data minimum otherwise).
+/**
+ * Automatic percent-stacked major unit in percentage-point data space.
+ * OOXML does not define the omitted unit.  The 48-case boundary corpus found
+ * two stable density classes:
  *
- *  The major unit itself is Excel-proprietary (it varies with plot size, tick
- *  font, etc. and is not documented), so we approximate it with `niceStep`; the
- *  computed max can therefore differ from PowerPoint by one major unit on some
- *  charts. */
-export function niceAxisMax(dataMax: number, step: number, dataMin = 0): number {
-  if (dataMax <= 0) return step;
-  const withHeadroom = dataMax + (dataMax - dataMin) / 20;
-  return Math.ceil(withHeadroom / step) * step;
+ * - horizontal value axes: five positive intervals, or four signed intervals;
+ * - vertical value axes: the same compact density below a 120pt plot axis,
+ *   otherwise ten intervals.
+ *
+ * The result stays on the shared 1/2/5 ceiling ladder. Authored majorUnit is
+ * resolved by the caller and always wins over this compatibility default.
+ */
+export function automaticPercentMajorUnit(
+  min: number,
+  max: number,
+  orientation: 'vertical' | 'horizontal',
+  axisLenPt?: number,
+): number {
+  const lo = Number.isFinite(min) ? min : 0;
+  const hi = Number.isFinite(max) ? max : 100;
+  const span = hi > lo ? hi - lo : 100;
+  const signed = lo < 0 && hi > 0;
+  const compact = orientation === 'horizontal'
+    || axisLenPt == null
+    || !Number.isFinite(axisLenPt)
+    || axisLenPt < 120;
+  const intervals = compact ? (signed ? 4 : 5) : 10;
+  return ceilingNiceStep(hi > lo ? spanQuotient(lo, hi, intervals) : span / intervals);
 }
 
-/** Axis minimum for data that dips below zero: the largest major-unit multiple
- *  <= dataMin, dropping one extra step when the data sits exactly on a
- *  gridline so the lowest point isn't flush against the axis. Non-negative data
- *  anchors the axis at 0. */
-export function niceAxisMin(dataMin: number, step: number): number {
-  if (dataMin >= 0) return 0;
-  const ax = Math.floor(dataMin / step) * step;
-  return Math.abs(ax - dataMin) < step * 1e-9 ? ax - step : ax;
-}
-
-/** Target gridline spacing in POINTS. Excel's auto major unit is not a fixed
- *  gridline count — it targets a roughly constant on-screen spacing, so a long
- *  axis (e.g. a horizontal bar chart's wide value axis) gets MORE, finer
- *  gridlines than a short one of the same data range. This density is a
- *  compatibility approximation, because OOXML does not define it. */
-const GRIDLINE_SPACING_PT = 42;
-
-/** Pick the target-gridline count for an axis of `axisLenPt` points. Unknown
- *  lengths use five intervals; the four-interval floor keeps short axes
- *  readable and the ceiling bounds paint work on unusually long axes. */
-function targetStepsForAxis(axisLenPt?: number): number {
-  if (axisLenPt == null || !isFinite(axisLenPt) || axisLenPt <= 0) return 5;
-  return Math.min(15, Math.max(4, Math.round(axisLenPt / GRIDLINE_SPACING_PT)));
-}
-
-/** Existing nearest-ladder density used by specialized percent axes. */
-export function axisLengthNiceStep(range: number, axisLenPt?: number): number {
-  return niceStep(range, targetStepsForAxis(axisLenPt));
+/**
+ * Automatic radar-ring unit in value space. The 36-case Office corpus shows
+ * three radial densities: about 4 intervals on a small spoke, 8 on an ordinary
+ * spoke and 10 on a large spoke. Keeping this in the shared axis module avoids
+ * the former renderer-local fixed five-ring path while preserving authored
+ * majorUnit and logarithmic axes at the call site.
+ */
+export function automaticRadarMajorUnit(
+  min: number,
+  max: number,
+  spokeLenPt?: number,
+): number {
+  const lo = Number.isFinite(min) ? min : 0;
+  const hi = Number.isFinite(max) ? max : 1;
+  const span = hi > lo ? null : 1;
+  const intervals = spokeLenPt != null && Number.isFinite(spokeLenPt)
+    ? spokeLenPt < 45 ? 4 : spokeLenPt < 90 ? 8 : 10
+    : 8;
+  return ceilingNiceStep(hi > lo ? spanQuotient(lo, hi, intervals) : (span ?? 1) / intervals);
 }
 
 /** Hard allocation/paint bound for each numeric-axis tick layer. */
@@ -68,6 +96,8 @@ export interface LinearValueAxisOptions {
   explicitMin?: number | null;
   explicitMax?: number | null;
   axisLenPt?: number;
+  /** Physical direction of the numeric axis. Omitted keeps the legacy policy. */
+  axisOrientation?: 'vertical' | 'horizontal';
   majorUnit?: number | null;
   minorUnit?: number | null;
   /** Minor positions are needed by either minor ticks or minor gridlines. */
@@ -104,6 +134,22 @@ function positiveUnit(value: number | null | undefined): number | null {
   return value != null && isFinite(value) && value > 0 ? value : null;
 }
 
+/** Compute `(max - min) / divisor` without first materializing an overflowing
+ * span. Dividing the endpoints before subtraction keeps opposite-sign finite
+ * bounds usable all the way through Number.MAX_VALUE. */
+function spanQuotient(min: number, max: number, divisor: number): number {
+  const directSpan = max - min;
+  const quotient = isFinite(directSpan)
+    ? directSpan / divisor
+    : max / divisor - min / divisor;
+  if (quotient > 0 && isFinite(quotient)) return quotient;
+  // A positive subnormal span may underflow when divided. The smallest
+  // representable positive step is the only meaningful density input; using a
+  // huge fallback would invert the scale (unit much larger than its range).
+  if (directSpan > 0 && isFinite(directSpan)) return Number.MIN_VALUE;
+  return Number.MAX_VALUE;
+}
+
 function tickCount(min: number, max: number, unit: number): number {
   if (!isFinite(min) || !isFinite(max) || !(max >= min) || !(unit > 0) || !isFinite(unit)) return 0;
   const span = max - min;
@@ -135,7 +181,14 @@ function indexedTicks(
   ) * 1e-9;
   let previousValue = Number.NEGATIVE_INFINITY;
   for (let index = 0; index < count; index++) {
-    const value = min + index * unit;
+    const offset = index * unit;
+    let value = min + offset;
+    // On an opposite-sign near-limit axis, `index * unit` can overflow even
+    // though the final translated tick is finite. Retry only that exceptional
+    // path in unit coordinates; ordinary values retain their exact old math.
+    if (!isFinite(offset) || !isFinite(value) || (index > 0 && !(value > previousValue))) {
+      value = (min / unit + index) * unit;
+    }
     if (!isFinite(value) || value > max + epsilon) break;
     if (index > 0 && !(value > previousValue)) break;
     previousValue = value;
@@ -186,8 +239,14 @@ export function planLinearValueAxis(options: LinearValueAxisOptions): LinearValu
     if (dataMin >= 0 && (dataMin === 0 || dataMax > 1.2 * dataMin)) lo = 0;
     if (dataMax <= 0 && (dataMax === 0
       || Math.abs(dataMin) > 1.2 * Math.abs(dataMax))) hi = 0;
-    const target = targetStepsForAxis(options.axisLenPt);
-    autoMajor = ceilingNiceStep(hi / target - lo / target);
+    // The broad automatic-axis corpus (6,354 finite line-axis cases) selected
+    // the 1/2/5 ladder from roughly ten intervals.  Using the plot length here
+    // made ordinary vertical charts collapse to only three or four labelled
+    // intervals (for example 0..600 by 200 instead of 0..600 by 100).  Physical
+    // size remains relevant only for the separately observed explicit-bounds
+    // rule below; the fully automatic compact policy is intentionally one
+    // shared ten-interval rule across chart families.
+    autoMajor = ceilingNiceStep(hi / 10 - lo / 10);
     autoMin = Math.floor(lo / autoMajor) * autoMajor;
     autoMax = Math.ceil(hi / autoMajor) * autoMajor;
     // Large offsets can erase sub-ULP padding/rounding. Keep a finite range
@@ -200,10 +259,57 @@ export function planLinearValueAxis(options: LinearValueAxisOptions): LinearValu
 
   const explicitMin = finiteBound(options.explicitMin);
   const explicitMax = finiteBound(options.explicitMax);
-  const min = explicitMin ?? autoMin;
-  const max = explicitMax ?? autoMax;
   const authoredMajor = positiveUnit(options.majorUnit);
-  let majorUnit = authoredMajor ?? autoMajor;
+  // When only a major unit is authored, Excel keeps automatic bounds aligned
+  // to that unit.  The previous coarser automatic unit happened to mask this
+  // rule for common values; make it explicit now that auto density is finer.
+  const min = explicitMin ?? (authoredMajor == null
+    ? autoMin
+    : Math.floor(autoMin / authoredMajor) * authoredMajor);
+  const max = explicitMax ?? (authoredMajor == null
+    ? autoMax
+    : Math.ceil(autoMax / authoredMajor) * authoredMajor);
+  let automaticMajor = autoMajor;
+  // OOXML defines authored min/max and majorUnit, but not the unit chosen when
+  // both bounds are present and majorUnit is omitted. A bounded corpus across
+  // column, stacked-column, line, area, scatter-Y, and combo axes found that
+  // axes choose from the authored span, not the interior data range. The
+  // vertical fit below matched all 231 measured vertical rows. Horizontal axes
+  // form a second density class: a ceiling-ladder step at roughly one interval
+  // per 38pt matched all 66 measured bar/scatter-X rows, including the 1600
+  // boundary and the compact-chart controls. Keeping both observations here
+  // avoids family-local axis paths.
+  if (
+    authoredMajor == null
+    && explicitMin != null
+    && explicitMax != null
+    && explicitMax > explicitMin
+  ) {
+    if (options.axisOrientation === 'horizontal') {
+      const axisTarget = options.axisLenPt != null
+        && isFinite(options.axisLenPt)
+        && options.axisLenPt > 0
+        ? Math.max(5, Math.round(options.axisLenPt / 38))
+        : 8;
+      automaticMajor = ceilingNiceStep(
+        spanQuotient(explicitMin, explicitMax, axisTarget),
+      );
+    } else if (options.axisOrientation === 'vertical') {
+      const axisTarget = options.axisLenPt != null
+        && isFinite(options.axisLenPt)
+        && options.axisLenPt > 0
+        ? Math.max(5, Math.round(options.axisLenPt / 28))
+        : 7;
+      automaticMajor = Math.max(
+        ceilingNiceStep(spanQuotient(explicitMin, explicitMax, 10)),
+        Math.min(
+          Number.MAX_VALUE,
+          niceStep(spanQuotient(explicitMin, explicitMax, axisTarget), 1),
+        ),
+      );
+    }
+  }
+  let majorUnit = authoredMajor ?? automaticMajor;
   // An automatic unit may be coarsened to keep explicit wide bounds safe.
   if (authoredMajor == null && tickCount(min, max, majorUnit) > MAX_AXIS_TICKS) {
     majorUnit = ceilingNiceStep(max / (MAX_AXIS_TICKS - 1) - min / (MAX_AXIS_TICKS - 1));
@@ -218,7 +324,10 @@ export function planLinearValueAxis(options: LinearValueAxisOptions): LinearValu
       majorUnit = ceilingNiceStep(max / maxMajorIntervals - min / maxMajorIntervals);
     }
   }
-  const minorUnit = options.needMinor ? (authoredMinor ?? majorUnit / 5) : null;
+  const automaticMinor = majorUnit / 5;
+  const minorUnit = options.needMinor
+    ? (authoredMinor ?? (automaticMinor > 0 && isFinite(automaticMinor) ? automaticMinor : majorUnit))
+    : null;
 
   const majorTicks = indexedTicks(min, max, majorUnit, authoredMajor == null ? 'skip' : 'truncate');
   const minorTicks = minorUnit == null
@@ -271,7 +380,19 @@ export function axisFraction(
     frac = denom === 0 ? 0 : (Math.log(Math.max(v, Number.MIN_VALUE)) - lo) / denom;
   } else {
     const denom = max - min;
-    frac = denom === 0 ? 0 : (v - min) / denom;
+    if (denom === 0) {
+      frac = 0;
+    } else if (Number.isFinite(denom) && Number.isFinite(v - min)) {
+      // Keep the ordinary path byte-stable for normal chart ranges.
+      frac = (v - min) / denom;
+    } else {
+      // Finite opposite-sign bounds can overflow both subtractions even
+      // though their mathematical ratio is representable. Normalize before
+      // subtracting so no renderer receives Infinity/Infinity → NaN.
+      const scale = Math.max(Math.abs(v), Math.abs(min), Math.abs(max));
+      const scaledDenom = max / scale - min / scale;
+      frac = scaledDenom === 0 ? 0 : (v / scale - min / scale) / scaledDenom;
+    }
   }
   return opts?.reversed ? 1 - frac : frac;
 }
@@ -318,6 +439,53 @@ export function logAxisScale(
   if (lines.length < MAX_AXIS_TICKS && endValue >= min && endValue <= max
     && endValue > (lines[lines.length - 1] ?? 0)) lines.push(endValue);
   return { min, max, lines };
+}
+
+export interface NumericValueAxisOptions extends LinearValueAxisOptions {
+  /** `<c:scaling><c:logBase>`; omission keeps the linear planner. */
+  logBase?: number | null;
+  /** `<c:scaling><c:orientation val="maxMin">`. */
+  reversed?: boolean;
+}
+
+export interface NumericValueAxisPlan extends LinearValueAxisPlan {
+  /** Shared value→axis fraction for linear/logarithmic and normal/reversed axes. */
+  fraction: (value: number) => number;
+}
+
+/** Shared numeric-axis entry point used by primary, secondary and scatter X/Y
+ * axes. It keeps the bounded linear planner and logarithmic decade planner
+ * behind one model contract so a chart family cannot silently drop log/reverse. */
+export function planNumericValueAxis(options: NumericValueAxisOptions): NumericValueAxisPlan {
+  const logBase = options.logBase;
+  if (logBase != null && Number.isFinite(logBase) && logBase >= 2) {
+    const { min, max, lines } = logAxisScale(
+      options.dataMin,
+      options.dataMax,
+      logBase,
+      finiteBound(options.explicitMin),
+      finiteBound(options.explicitMax),
+    );
+    return {
+      min,
+      max,
+      majorUnit: lines.length > 1 ? lines[1] - lines[0] : max - min,
+      minorUnit: null,
+      majorTicks: lines,
+      minorTicks: [],
+      fraction: value => axisFraction(value, min, max, {
+        logBase,
+        reversed: options.reversed,
+      }),
+    };
+  }
+  const linear = planLinearValueAxis(options);
+  return {
+    ...linear,
+    fraction: value => axisFraction(value, linear.min, linear.max, {
+      reversed: options.reversed,
+    }),
+  };
 }
 
 /** A fitted trendline as a list of `(x, y)` points in DATA space (x = the
@@ -370,17 +538,27 @@ export function linearTrendlineStats(
 }
 
 /** Fit a trendline to `(xs, ys)` data points (nulls already filtered by the
- *  caller). Implements the two most common ECMA-376 `ST_TrendlineType`
- *  (§21.2.3.50) styles:
+ *  caller). Implements every ECMA-376 `ST_TrendlineType` (§21.2.3.50):
  *   - `linear` — ordinary least-squares `y = m·x + b` (honors a forced
  *     `intercept`), sampled at the first and last x (a straight line).
+ *   - `exp`, `log`, and `power` — least squares in their standard transformed
+ *     domains, sampled as a bounded 65-point curve.
+ *   - `poly` — order 2..6 least squares over a centred/scaled Vandermonde
+ *     matrix, solved by modified Gram-Schmidt rather than unstable normal
+ *     equations, then sampled as a bounded 65-point curve.
  *   - `movingAvg` — the trailing average of the previous `period` points
  *     (default 2), producing a point from index `period-1` onward.
- *  Other types (`exp` / `log` / `power` / `poly`) return an empty result for
- *  now (they parse but aren't plotted — tracked as a follow-up). */
+ * Invalid transformed-domain points are omitted. Any non-finite fit or sample
+ * fails closed instead of sending invalid geometry to Canvas. */
 export function fitTrendline(
   xs: number[], ys: number[], type: string,
-  opts?: { period?: number | null; intercept?: number | null },
+  opts?: {
+    period?: number | null;
+    order?: number | null;
+    intercept?: number | null;
+    forward?: number | null;
+    backward?: number | null;
+  },
 ): TrendlinePoints {
   const n = Math.min(xs.length, ys.length);
   if (n < 2) return { xs: [], ys: [] };
@@ -403,6 +581,138 @@ export function fitTrendline(
       ox.push(xs[i]); oy.push(sum / period);
     }
     return { xs: ox, ys: oy };
+  }
+
+  const transformed: Array<{ x: number; y: number }> = [];
+  for (let index = 0; index < n; index++) {
+    const x = xs[index];
+    const y = ys[index];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if ((type === 'log' && x <= 0) || (type === 'exp' && y <= 0)
+      || (type === 'power' && (x <= 0 || y <= 0))) continue;
+    transformed.push({ x, y });
+  }
+  if (transformed.length < 2) return { xs: [], ys: [] };
+
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  for (const point of transformed) {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || maxX <= minX) {
+    return { xs: [], ys: [] };
+  }
+  const backward = Number.isFinite(opts?.backward) ? Math.max(0, opts?.backward ?? 0) : 0;
+  const forward = Number.isFinite(opts?.forward) ? Math.max(0, opts?.forward ?? 0) : 0;
+  let sampleMin = minX - backward;
+  const sampleMax = maxX + forward;
+  if (type === 'log' || type === 'power') sampleMin = Math.max(Number.MIN_VALUE, sampleMin);
+  if (!Number.isFinite(sampleMin) || !Number.isFinite(sampleMax) || sampleMax <= sampleMin) {
+    return { xs: [], ys: [] };
+  }
+
+  const sample = (evaluate: (x: number) => number): TrendlinePoints => {
+    const sampledXs: number[] = [];
+    const sampledYs: number[] = [];
+    for (let index = 0; index <= 64; index++) {
+      const fraction = index / 64;
+      const x = sampleMin * (1 - fraction) + sampleMax * fraction;
+      const y = evaluate(x);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { xs: [], ys: [] };
+      sampledXs.push(x);
+      sampledYs.push(y);
+    }
+    return { xs: sampledXs, ys: sampledYs };
+  };
+
+  if (type === 'exp' || type === 'log' || type === 'power') {
+    const regressionXs = transformed.map(point =>
+      type === 'log' || type === 'power' ? Math.log(point.x) : point.x
+    );
+    const regressionYs = transformed.map(point =>
+      type === 'exp' || type === 'power' ? Math.log(point.y) : point.y
+    );
+    const stats = linearTrendlineStats(regressionXs, regressionYs);
+    if (!stats || ![stats.slope, stats.intercept].every(Number.isFinite)) {
+      return { xs: [], ys: [] };
+    }
+    if (type === 'exp') {
+      const coefficient = Math.exp(stats.intercept);
+      return sample(x => coefficient * Math.exp(stats.slope * x));
+    }
+    if (type === 'log') return sample(x => stats.slope * Math.log(x) + stats.intercept);
+    const coefficient = Math.exp(stats.intercept);
+    return sample(x => coefficient * x ** stats.slope);
+  }
+
+  if (type === 'poly') {
+    const degree = Math.min(
+      6,
+      transformed.length - 1,
+      Math.max(2, Math.round(opts?.order ?? 2)),
+    );
+    if (degree < 2) return { xs: [], ys: [] };
+    // Halved addition avoids overflow for large opposite-sign endpoints.
+    const center = minX / 2 + maxX / 2;
+    const scale = Math.max(Math.abs(minX - center), Math.abs(maxX - center));
+    if (!Number.isFinite(center) || !Number.isFinite(scale) || scale <= 0) {
+      return { xs: [], ys: [] };
+    }
+    const rowCount = transformed.length;
+    const columnCount = degree + 1;
+    const columns: number[][] = Array.from({ length: columnCount }, () => Array(rowCount).fill(0));
+    for (let row = 0; row < rowCount; row++) {
+      const z = (transformed[row].x - center) / scale;
+      let power = 1;
+      for (let column = 0; column < columnCount; column++) {
+        columns[column][row] = power;
+        power *= z;
+      }
+    }
+    const orthonormal: number[][] = [];
+    const upper: number[][] = Array.from(
+      { length: columnCount },
+      () => Array(columnCount).fill(0),
+    );
+    const projectedY = Array(columnCount).fill(0);
+    for (let column = 0; column < columnCount; column++) {
+      const vector = columns[column].slice();
+      for (let prior = 0; prior < column; prior++) {
+        let projection = 0;
+        for (let row = 0; row < rowCount; row++) projection += orthonormal[prior][row] * vector[row];
+        upper[prior][column] = projection;
+        for (let row = 0; row < rowCount; row++) vector[row] -= projection * orthonormal[prior][row];
+      }
+      let magnitudeSquared = 0;
+      for (const value of vector) magnitudeSquared += value * value;
+      const magnitude = Math.sqrt(magnitudeSquared);
+      if (!Number.isFinite(magnitude) || magnitude <= Number.EPSILON * Math.sqrt(rowCount)) {
+        return { xs: [], ys: [] };
+      }
+      upper[column][column] = magnitude;
+      const normalized = vector.map(value => value / magnitude);
+      orthonormal.push(normalized);
+      let projection = 0;
+      for (let row = 0; row < rowCount; row++) projection += normalized[row] * transformed[row].y;
+      if (!Number.isFinite(projection)) return { xs: [], ys: [] };
+      projectedY[column] = projection;
+    }
+    const coefficients = Array(columnCount).fill(0);
+    for (let row = columnCount - 1; row >= 0; row--) {
+      let remainder = projectedY[row];
+      for (let column = row + 1; column < columnCount; column++) {
+        remainder -= upper[row][column] * coefficients[column];
+      }
+      coefficients[row] = remainder / upper[row][row];
+      if (!Number.isFinite(coefficients[row])) return { xs: [], ys: [] };
+    }
+    return sample(x => {
+      const z = (x - center) / scale;
+      let value = coefficients[degree];
+      for (let index = degree - 1; index >= 0; index--) value = value * z + coefficients[index];
+      return value;
+    });
   }
   return { xs: [], ys: [] };
 }

@@ -22,6 +22,8 @@
 
   <script type="module">
     import { PptxViewer } from '/src/index.ts';
+    import { threeD } from '@ooxml-test-three-d-addon';
+    import { regionMap } from '@ooxml-test-region-map-addon';
 
     // Text rasterization must not depend on how quickly Vite serves the
     // fontsource CSS and weight-specific WOFF files. Regression baselines compare
@@ -38,6 +40,8 @@
     const canvas = document.getElementById('canvas');
     const viewer = new PptxViewer(canvas, {
       width,
+      threeD,
+      regionMap,
       onError: (err) => {
         document.body.dataset.status = 'error';
         document.body.dataset.errorMessage = err.message;

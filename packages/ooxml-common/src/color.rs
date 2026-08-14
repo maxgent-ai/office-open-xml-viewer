@@ -101,6 +101,54 @@ pub fn apply_tint_channels(rgb: (f64, f64, f64), val: f64, tint_mode: TintMode) 
     }
 }
 
+/// Apply a generated signed DrawingML shade/tint to a hex colour.
+///
+/// `amount < 0` shades toward black by `-amount`; `amount > 0` tints toward
+/// white by `amount`.  Generated chart-style palettes carry the same colour
+/// transforms as XML-backed `<a:shade>` / `<a:tint>` nodes but have no
+/// `roxmltree::Node`, so they share this node-free entry point.  Six-character
+/// RGB and eight-character RGBA input are both preserved; malformed input is
+/// returned unchanged.
+pub fn apply_signed_tint_or_shade(hex: &str, amount: f64, tint_mode: TintMode) -> String {
+    if hex.len() < 6 || !amount.is_finite() {
+        return hex.to_owned();
+    }
+    let (Ok(r), Ok(g), Ok(b)) = (
+        u8::from_str_radix(&hex[0..2], 16),
+        u8::from_str_radix(&hex[2..4], 16),
+        u8::from_str_radix(&hex[4..6], 16),
+    ) else {
+        return hex.to_owned();
+    };
+    let rgb = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    let amount = amount.clamp(-1.0, 1.0);
+    let transformed = if amount < 0.0 {
+        let retained = 1.0 + amount;
+        match tint_mode {
+            TintMode::WordLiteral => (rgb.0 * retained, rgb.1 * retained, rgb.2 * retained),
+            TintMode::PowerPointLinear => {
+                let shade = |channel: f64| {
+                    linear_to_srgb((srgb_to_linear(channel) * retained).clamp(0.0, 1.0))
+                };
+                (shade(rgb.0), shade(rgb.1), shade(rgb.2))
+            }
+        }
+    } else {
+        apply_tint_channels(rgb, 1.0 - amount, tint_mode)
+    };
+    let byte = |channel: f64| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut result = format!(
+        "{:02X}{:02X}{:02X}",
+        byte(transformed.0),
+        byte(transformed.1),
+        byte(transformed.2)
+    );
+    if hex.len() >= 8 {
+        result.push_str(&hex[6..8].to_uppercase());
+    }
+    result
+}
+
 /// Apply OOXML color transforms to `hex` based on the modifier elements
 /// declared as direct children of `node`. Returns 6-char hex when fully
 /// opaque, or 8-char hex (RRGGBBAA) when alpha < 1.
@@ -976,6 +1024,26 @@ mod tests {
 
         assert_eq!(word, "1B395E");
         assert_eq!(ppt, "275791");
+    }
+
+    /// Legacy chart Pattern 2 distributes repeated accent sets across a
+    /// signed shade/tint range.  The generated variation has no XML node, so
+    /// it must use the same linear-sRGB DrawingML math as an authored
+    /// `<a:shade>` / `<a:tint>` transform.
+    #[test]
+    fn signed_tint_or_shade_matches_excel_chart_variations() {
+        assert_eq!(
+            apply_signed_tint_or_shade("156082", -0.35, TintMode::PowerPointLinear),
+            "0F4E6A"
+        );
+        assert_eq!(
+            apply_signed_tint_or_shade("156082", 0.0, TintMode::PowerPointLinear),
+            "156082"
+        );
+        assert_eq!(
+            apply_signed_tint_or_shade("156082", 0.35, TintMode::PowerPointLinear),
+            "A1AFBB"
+        );
     }
 
     /// alpha < 1 yields an 8-char RRGGBBAA hex (transform emits the alpha byte).

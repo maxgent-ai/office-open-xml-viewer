@@ -89,6 +89,8 @@ pnpm add @silurus/ooxml
 > | `@silurus/ooxml/xlsx` | 2.6 MB | 0.82 MB | XLSX renderer, parser WASM, and lazy worker |
 > | `@silurus/ooxml/pptx` | 2.5 MB | 0.78 MB | PPTX renderer, parser WASM, and lazy worker |
 > | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
+> | `@silurus/ooxml/three-d` | 79 KB | 23 KB | Optional model-space 3-D chart mesh and camera |
+> | `@silurus/ooxml/region-map` | 236 KB | 66 KB | Optional offline Region Map renderer and fixed country geometry |
 >
 > These are production-artifact estimates, not initial-load figures: each row
 > sums all assets reachable from that entry, including parser WASM and worker
@@ -101,6 +103,11 @@ pnpm add @silurus/ooxml
 > `@silurus/ooxml/math` and passed it to a viewer (see
 > [Rendering equations](#rendering-equations)). Never import the `math` entry
 > and the loader chunk never enters your graph at all.
+>
+> The 3-D chart and Region Map renderers follow the same dependency-injection
+> boundary: import and pass only the addons an application needs. Ordinary
+> format entries do not reach either optional implementation, so bundlers can
+> tree-shake their mesh code and fixed geographic asset completely.
 
 ---
 
@@ -198,6 +205,37 @@ constructor or the `.load()` options — and every render reuses it; it is never
 per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
+
+### Optional chart renderers
+
+Model-space 3-D charts and offline country-level Region Maps are separate
+entries. Inject them once in the same load options object as `math`; omitting an
+addon keeps it out of the application graph. They currently render on the main
+thread, so use `mode: 'main'` (the default). Without `threeD`, 3-D chart groups
+fall back to their canonical 2-D family. Without `regionMap`, Region Maps show
+the standard unsupported-chart placeholder.
+
+```typescript
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { threeD } from '@silurus/ooxml/three-d';
+import { regionMap } from '@silurus/ooxml/region-map';
+
+const container = document.getElementById('xlsx-container') as HTMLElement;
+const workbookViewer = new XlsxViewer(container, {
+  threeD,
+  regionMap,
+  mode: 'main',
+});
+await workbookViewer.load('/workbook-with-advanced-charts.xlsx');
+```
+
+The Region Map addon is deterministic and network-free. It uses a pinned
+Natural Earth country dataset, supports authored world projections and
+two/three-stop value ramps, and fails closed for cached identities or
+sub-country/view-specific layouts that the bounded offline model cannot yet
+represent safely. The specification/Office evidence boundary for automatic
+chart behavior is documented in
+[Chart compatibility evidence and scope](docs/chart-compatibility-evidence.md).
 
 ### Off-main-thread rendering
 

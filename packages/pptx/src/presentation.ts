@@ -1,4 +1,4 @@
-import type { DimOptions, Slide } from './types';
+import type { DimOptions, Presentation, Slide } from './types';
 import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import {
@@ -800,6 +800,55 @@ export class PptxPresentation {
         drawBase,
         onError: opts.onError,
       });
+    } catch (error) {
+      this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /**
+   * Assemble a detached editor {@link Presentation} JSON model from this
+   * loaded package: theme fields from preflight plus every slide pulled through
+   * the main-thread repository.
+   *
+   * Intended as the bootstrap input for `@maxgent/ooxml-pptx-editor` so hosts
+   * do not need a second parser JSON source. Slides are `structuredClone`d so
+   * later optimistic edits cannot mutate the render cache. Unavailable in
+   * `mode: 'worker'` — the same constraint as {@link replaceSlides}.
+   *
+   * Loading every slide into memory is intentional for editor startup; the
+   * ordinary viewer path remains pull/LRU based.
+   */
+  async toEditorPresentation(): Promise<Presentation> {
+    this._assertResourceHealthy();
+    if (this._mode === 'worker') {
+      throw new Error(
+        "toEditorPresentation is unavailable in mode: 'worker'; use mode: 'main' for editor bootstrap",
+      );
+    }
+    const compact = this._preflight;
+    const repository = this._slides;
+    if (!compact || !repository) throw new Error('Presentation not loaded');
+
+    try {
+      const slides: Slide[] = [];
+      for (let slideIndex = 0; slideIndex < compact.slideCount; slideIndex += 1) {
+        slides.push(await repository.withSlide(slideIndex, (slide) => {
+          this._assertResourceHealthy();
+          return structuredClone(slide);
+        }));
+      }
+
+      const presentation: Presentation = {
+        slideWidth: compact.slideWidth,
+        slideHeight: compact.slideHeight,
+        slides,
+        defaultTextColor: compact.defaultTextColor,
+        majorFont: compact.majorFont,
+        minorFont: compact.minorFont,
+      };
+      if (compact.hlinkColor != null) presentation.hlinkColor = compact.hlinkColor;
+      if (compact.folHlinkColor != null) presentation.folHlinkColor = compact.folHlinkColor;
+      return presentation;
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }

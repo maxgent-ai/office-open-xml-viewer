@@ -983,6 +983,7 @@ export class PptxPresentation {
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
+    toEditorPresentation(): Promise<Presentation>;
     presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: PresentSlideOptions): Promise<PresentationHandle>;
     destroy(): void;
     private __privatePresence;

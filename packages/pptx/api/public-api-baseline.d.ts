@@ -984,6 +984,7 @@ export class PptxPresentation {
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
     presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: PresentSlideOptions): Promise<PresentationHandle>;
+    toEditorPresentation(): Promise<Presentation>;
     destroy(): void;
     private __privatePresence;
     private constructor();

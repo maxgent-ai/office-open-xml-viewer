@@ -78,8 +78,9 @@ slide replacement hook. Inside this monorepo, depend on the workspace package:
 
 ## Quick start
 
-Minimal loop: load a viewer in **main** mode, open a session on a matching
-`Presentation`, bind them, then submit commands.
+Minimal loop: load a viewer in **main** mode, export editor JSON with
+`toEditorPresentation()`, open a session on that model, bind them, then submit
+commands.
 
 ```ts
 import {
@@ -99,22 +100,19 @@ import type { Presentation } from '@maxgent/ooxml/pptx';
 async function openEditor(args: {
   canvas: HTMLCanvasElement;
   source: string | ArrayBuffer;
-  presentation: Presentation;
   sendBatch: (batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>;
 }) {
-  // The viewer borrows this main-mode presentation. The caller owns both.
+  // The viewer borrows this main-mode presentation. The caller owns it.
   const loadedPresentation = await PptxPresentation.load(args.source, {
     mode: 'main',
   });
+  // Detached editor JSON from the same loaded package (not a second parser source).
+  const presentation = await loadedPresentation.toEditorPresentation();
   const viewer = PptxViewer.fromPresentation(args.canvas, loadedPresentation);
-
-  if (args.presentation.slides.length !== viewer.slideCount) {
-    throw new Error('Editor presentation slide count must match the loaded viewer');
-  }
 
   let commandSeq = 0;
   const session = new PptxEditorSession({
-    presentation: args.presentation,
+    presentation,
     sendBatch: args.sendBatch,
     createCommandId: ({ direction, sourceCommandId }) => {
       commandSeq += 1;
@@ -185,7 +183,12 @@ call `getSnapshot()` on a disposed session.
 ## Presentation model requirements
 
 The session operates on `@maxgent/ooxml/pptx` `Presentation` JSON, not on the
-zip package itself.
+zip package itself. Bootstrap that model from the loaded package:
+
+```ts
+const loadedPresentation = await PptxPresentation.load(source, { mode: 'main' });
+const presentation = await loadedPresentation.toEditorPresentation();
+```
 
 Editable slides must expose complete `elementSources` parallel to `elements`
 (same length). Mutations currently support **direct slide shapes** only
@@ -529,10 +532,11 @@ Document these in product code rather than papering over them:
    (explicit values, not true OOXML attribute removal).
    Character offsets use run-concatenated plain text (OfficeCLI `range` rules).
 5. **Complete `elementSources` required** for any editable slide.
-6. **Bootstrap `Presentation`.** The viewer does not yet export a ready-made
-   editor `Presentation` from a loaded package. Supply parser JSON (or an
-   equivalent model) that matches the loaded file’s slides, including
-   `partName` / `elementSources` where available.
+6. **Bootstrap via `toEditorPresentation()`.** Prefer
+   `await loadedPresentation.toEditorPresentation()` (`mode: 'main'` only) so
+   the session JSON comes from the same loaded package the viewer paints.
+   Passing a separately parsed `Presentation` remains possible for tests, but
+   product hosts should not maintain a second bootstrap source.
 
 ## Publishing / fork sync
 

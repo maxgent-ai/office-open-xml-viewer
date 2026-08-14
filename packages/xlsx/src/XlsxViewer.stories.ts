@@ -4,7 +4,11 @@ import { XlsxViewer } from './viewer';
 // In the monorepo the stories build the same MathRenderer from the core engine
 // so OMML equations in shapes/text boxes render in the demo.
 import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
+import { renderSimpleThreeDChart } from '../../core/src/chart/three-d-renderer';
+import { renderRegionMapChart } from '../../core/src/chart/region-map-renderer';
 const math = { loadMathJax, mathMLToSvg };
+const threeD = { render: renderSimpleThreeDChart };
+const regionMap = { render: renderRegionMapChart };
 
 type Args = {
   scale: number;
@@ -56,6 +60,8 @@ export function buildViewerUI(
     selectionColor: args.selectionColor,
     useGoogleFonts: true,
     math,
+    threeD,
+    regionMap,
     onReady: (names) => {
       sheetNames = names;
       status.textContent = `Loaded — ${names.length} sheet(s)`;
@@ -129,6 +135,8 @@ export const FileUpload: Story = {
         debug: args.debug,
         useGoogleFonts: true,
         math,
+        threeD,
+        regionMap,
         onReady: (names) => { sheetNames = names; status.textContent = `${names.length} sheet(s)`; },
         onSheetChange: (idx, total) => { status.textContent = `Sheet ${idx + 1} / ${total}: ${sheetNames[idx] ?? ''}`; },
         onError: (err) => { status.textContent = `Error: ${err.message}`; },

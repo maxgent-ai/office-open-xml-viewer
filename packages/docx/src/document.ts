@@ -13,6 +13,8 @@ import {
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  type ChartThreeDRenderer,
+  type ChartRegionMapRenderer,
   type OoxmlResourceMetrics,
 } from '@silurus/ooxml-core';
 import {
@@ -107,6 +109,8 @@ export class DocxDocument {
    *  {@link destroy} so a reused reference never serves a stale document. */
   private _bookmarkPages: Map<string, number> | null = null;
   private _mode: 'main' | 'worker' = 'main';
+  private _threeD: ChartThreeDRenderer | undefined;
+  private _regionMap: ChartRegionMapRenderer | undefined;
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private readonly _rawParts = new BoundedRawPartCache({
@@ -237,6 +241,18 @@ export class DocxDocument {
           "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
         );
       }
+      if (opts.threeD && doc._mode === 'worker') {
+        console.warn(
+          "[ooxml] the 3-D chart addon is unavailable in mode: 'worker'; charts use their 2-D family fallback. Use mode: 'main' for authored 3-D charts.",
+        );
+      }
+      doc._threeD = doc._mode === 'worker' ? undefined : opts.threeD;
+      if (opts.regionMap && doc._mode === 'worker') {
+        console.warn(
+          "[ooxml] the Region Map addon is unavailable in mode: 'worker'; geospatial charts use the unsupported-chart placeholder. Use mode: 'main' for Region Maps.",
+        );
+      }
+      doc._regionMap = doc._mode === 'worker' ? undefined : opts.regionMap;
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
         doc._googleFontFaces = await preloadGoogleFonts(
           docxFontPreloadNames(doc._document),
@@ -616,6 +632,8 @@ export class DocxDocument {
       fetchImage: this._fetchImage,
       layoutServices: documentLayoutRuntimeOf(this).services ?? undefined,
       defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
+      threeD: this._threeD,
+      regionMap: this._regionMap,
     });
   }
 

@@ -12,6 +12,12 @@ const dirname =
 export default defineConfig({
   plugins: [wasm()],
   root: dirname,
+  resolve: {
+    alias: {
+      '@ooxml-test-three-d-addon': resolve(dirname, '../../src/three-d.ts'),
+      '@ooxml-test-region-map-addon': resolve(dirname, '../../src/region-map.ts'),
+    },
+  },
   server: { port: 5175, strictPort: true },
   build: {
     // Serve public/ (sample fixtures) from the dev server for VRT, but don't

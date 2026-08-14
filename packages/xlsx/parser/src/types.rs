@@ -86,6 +86,11 @@ pub struct ColumnWidthRange {
 #[serde(rename_all = "camelCase")]
 pub struct Worksheet {
     pub name: String,
+    /// `true` for an `xl/chartsheets/*.xml` part. A chart sheet has no
+    /// SpreadsheetML cell grid or `sheetData`; its drawing is the content.
+    /// Omitted for ordinary worksheets to preserve the existing wire shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub is_chart_sheet: bool,
     pub rows: Vec<Row>,
     /// Serialized as `BTreeMap`s so JSON key order is deterministic (columns /
     /// rows in ascending index order), making the parser output byte-stable for
@@ -218,11 +223,10 @@ pub struct Worksheet {
 }
 
 impl Worksheet {
-    /// A minimal empty sheet carrying a part-tagged parse error (RB7). Used when
-    /// one sheet's XML can't be read or parsed so the workbook still opens.
-    pub fn placeholder(name: &str, parse_error: String) -> Self {
+    fn empty(name: &str) -> Self {
         Worksheet {
             name: name.to_string(),
+            is_chart_sheet: false,
             rows: Vec::new(),
             col_widths: BTreeMap::new(),
             col_width_ranges: Vec::new(),
@@ -258,8 +262,25 @@ impl Worksheet {
             default_font_family: None,
             default_font_size: None,
             date1904: false,
-            parse_error: Some(parse_error),
+            parse_error: None,
         }
+    }
+
+    /// A healthy row-free chart sheet. Its drawing relationships are attached
+    /// by the same finalization path as an ordinary worksheet.
+    pub fn chart_sheet(name: &str) -> Self {
+        let mut worksheet = Self::empty(name);
+        worksheet.is_chart_sheet = true;
+        worksheet.show_gridlines = false;
+        worksheet
+    }
+
+    /// A minimal empty sheet carrying a part-tagged parse error (RB7). Used when
+    /// one sheet's XML can't be read or parsed so the workbook still opens.
+    pub fn placeholder(name: &str, parse_error: String) -> Self {
+        let mut worksheet = Self::empty(name);
+        worksheet.parse_error = Some(parse_error);
+        worksheet
     }
 }
 

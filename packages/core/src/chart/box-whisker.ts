@@ -139,12 +139,21 @@ export function boxWhiskerGeometry(
     || gapWidthPercent < 0
   ) return null;
 
-  const categoryInterval = plotWidth / (categoryCount + 1);
-  const groupWidth = categoryInterval / (1 + gapWidthPercent / 100);
-  const seriesSlotWidth = groupWidth / seriesCount;
+  // Excel divides the plot into `categoryCount` full category intervals.  The
+  // first and last category centres therefore sit half an interval from the
+  // plot edges.  Using `categoryCount + 1` incorrectly compresses a
+  // formula-only (one category, many series) box chart into the middle half of
+  // the plot.
+  const categoryInterval = plotWidth / categoryCount;
+  // `gapWidth` is a percentage of one data-point slot.  A category interval
+  // contains all series slots plus one gap slot, so applying it to the whole
+  // group (`interval / (1 + gap)`) makes a six-series formula chart about 20%
+  // too narrow.  This is the same unit relation used by clustered columns.
+  const seriesSlotWidth = categoryInterval / (seriesCount + gapWidthPercent / 100);
+  const groupWidth = seriesSlotWidth * seriesCount;
   const gutter = seriesSlotWidth * BOX_WHISKER_SLOT_GUTTER_FRACTION;
   const boxWidth = seriesSlotWidth - gutter;
-  const groupLeft = plotX + categoryInterval * (categoryIndex + 1) - groupWidth / 2;
+  const groupLeft = plotX + categoryInterval * (categoryIndex + 0.5) - groupWidth / 2;
   const boxX = groupLeft + seriesIndex * seriesSlotWidth + gutter / 2;
   return { boxX, boxWidth, centerX: boxX + boxWidth / 2 };
 }

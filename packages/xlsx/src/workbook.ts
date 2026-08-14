@@ -11,6 +11,8 @@ import {
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
+  type ChartThreeDRenderer,
+  type ChartRegionMapRenderer,
   OoxmlResourceLimitError,
   type OoxmlResourceMetrics,
 } from '@silurus/ooxml-core';
@@ -130,6 +132,12 @@ export class XlsxWorkbook {
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private math: MathRenderer | undefined;
+  /** Optional synchronous 3-D chart addon; main-thread only because functions
+   * cannot cross the worker structured-clone boundary. */
+  private threeD: ChartThreeDRenderer | undefined;
+  /** Optional synchronous Region Map addon; main-thread only because functions
+   * cannot cross the worker structured-clone boundary. */
+  private regionMap: ChartRegionMapRenderer | undefined;
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   private googleFontNames: string[] = [];
@@ -266,9 +274,21 @@ export class XlsxWorkbook {
     this.resourcePolicy = resourcePolicy;
     this.workerTimeoutMs = opts.workerTimeoutMs;
     this.math = opts.math;
+    this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
+    this.regionMap = this._mode === 'worker' ? undefined : opts.regionMap;
     if (opts.math && this._mode === 'worker') {
       console.warn(
         "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for workbooks with equations.",
+      );
+    }
+    if (opts.threeD && this._mode === 'worker') {
+      console.warn(
+        "[ooxml] the 3-D chart addon is unavailable in mode: 'worker'; charts use their 2-D family fallback. Use mode: 'main' for authored 3-D charts.",
+      );
+    }
+    if (opts.regionMap && this._mode === 'worker') {
+      console.warn(
+        "[ooxml] the Region Map addon is unavailable in mode: 'worker'; geospatial charts use the unsupported-chart placeholder. Use mode: 'main' for Region Maps.",
       );
     }
     // In worker mode the worker preloads fonts before its first render
@@ -719,7 +739,7 @@ export class XlsxWorkbook {
         GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
       }
       return renderWorksheetViewport(
-        { ws, styles, math: this.math },
+        { ws, styles, math: this.math, threeD: this.threeD, regionMap: this.regionMap },
         target,
         viewport,
         // The stable closure uses the archive operation already reserved by

@@ -4,7 +4,11 @@ import { DocxViewer } from './viewer';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
 // In the monorepo the stories build the same MathRenderer from the core engine.
 import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
+import { renderSimpleThreeDChart } from '../../core/src/chart/three-d-renderer';
+import { renderRegionMapChart } from '../../core/src/chart/region-map-renderer';
 const math = { loadMathJax, mathMLToSvg };
+const threeD = { render: renderSimpleThreeDChart };
+const regionMap = { render: renderRegionMapChart };
 
 type Args = {
   width: number;
@@ -73,6 +77,8 @@ export function buildViewerUI(
     enableTextSelection: true,
     useGoogleFonts: true,
     math,
+    threeD,
+    regionMap,
     ...extra,
   });
 
@@ -207,6 +213,8 @@ export const FileUpload: Story = {
         enableTextSelection: true,
         useGoogleFonts: true,
         math,
+        threeD,
+        regionMap,
       });
       try {
         await viewer.load(buffer);

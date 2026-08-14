@@ -6,6 +6,7 @@ import {
   PT_TO_PX,
 } from '@silurus/ooxml-core';
 import type { Duotone } from '@silurus/ooxml-core';
+import type { ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import type {
   DocumentLayout,
   LayoutPage,
@@ -17,7 +18,10 @@ import {
   paintLayoutPageContent,
   paintLayoutPage,
 } from './canvas-page.js';
-import { canonicalCanvasPaintResourceHandlers } from './canonical-resource-handlers.js';
+import {
+  canonicalCanvasPaintResourceHandlers,
+  createCanonicalCanvasPaintResourceHandlers,
+} from './canonical-resource-handlers.js';
 import {
   createProductionPaintResourceSession,
   unavailablePaintResourceHandle,
@@ -39,6 +43,8 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
   readonly privateResources?: PrivatePaintResourceLookup;
   readonly textRuns: readonly TTextRun[];
   readonly onTextRun?: (run: TTextRun) => void;
+  readonly threeD?: ChartThreeDRenderer;
+  readonly regionMap?: ChartRegionMapRenderer;
 }
 
 /** Per-canvas cancellation token: only the newest asynchronous image preload
@@ -193,7 +199,9 @@ export async function renderSelectedDocumentPage<TTextRun>(
     });
     const resources = createCanvasPaintResourcePainter(
       session,
-      canonicalCanvasPaintResourceHandlers,
+      options.threeD || options.regionMap
+        ? createCanonicalCanvasPaintResourceHandlers(options.threeD, options.regionMap)
+        : canonicalCanvasPaintResourceHandlers,
     );
     context.save();
     try {

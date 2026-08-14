@@ -64,17 +64,28 @@ describe('boxWhiskerGeometry', () => {
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
     expect(first?.boxWidth).toBeCloseTo(second?.boxWidth ?? 0, 10);
-    const seriesSlotWidth = (400 / 2 / 1.33) / 2;
+    // gapWidth is expressed as a percentage of one box/series slot, not as a
+    // percentage of the complete multi-series group.  One category interval
+    // therefore contains `seriesCount + gapWidth / 100` slot units.
+    const seriesSlotWidth = 400 / (2 + 0.33);
     expect(first?.boxWidth).toBeCloseTo(seriesSlotWidth * (1 - BOX_WHISKER_SLOT_GUTTER_FRACTION), 10);
     expect((second?.centerX ?? 0) - (first?.centerX ?? 0)).toBeCloseTo(seriesSlotWidth, 10);
     expect((second?.boxX ?? 0) - ((first?.boxX ?? 0) + (first?.boxWidth ?? 0)))
       .toBeCloseTo(seriesSlotWidth * BOX_WHISKER_SLOT_GUTTER_FRACTION, 10);
   });
 
+  it('does not multiply the authored gap around a many-series category group', () => {
+    const first = boxWhiskerGeometry(0, 600, 1, 6, 0, 0, 33);
+    expect(first?.boxWidth).toBeCloseTo(
+      (600 / (6 + 0.33)) * (1 - BOX_WHISKER_SLOT_GUTTER_FRACTION),
+      10,
+    );
+  });
+
   it('keeps a series position independent of whether peer series are populated', () => {
     const firstCategory = boxWhiskerGeometry(0, 600, 2, 3, 0, 2, 33);
     const secondCategory = boxWhiskerGeometry(0, 600, 2, 3, 1, 2, 33);
-    expect((secondCategory?.centerX ?? 0) - (firstCategory?.centerX ?? 0)).toBeCloseTo(200, 10);
+    expect((secondCategory?.centerX ?? 0) - (firstCategory?.centerX ?? 0)).toBeCloseTo(300, 10);
   });
 
   it('rejects invalid geometry inputs and bounds aggregate point counting', () => {

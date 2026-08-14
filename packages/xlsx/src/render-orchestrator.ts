@@ -11,6 +11,8 @@ import {
   EMU_PER_PT,
   EMU_PER_PX,
   type MathRenderer,
+  type ChartThreeDRenderer,
+  type ChartRegionMapRenderer,
   type SrcRect,
   type Duotone,
   type OffscreenFactory,
@@ -372,6 +374,8 @@ export interface RenderDeps {
   ws: Worksheet;
   styles: ParsedWorkbook['styles'];
   math?: MathRenderer;
+  threeD?: ChartThreeDRenderer;
+  regionMap?: ChartRegionMapRenderer;
 }
 
 /** The full per-frame orchestration: preload uncached images, pre-rasterize
@@ -505,7 +509,13 @@ async function renderWorksheetViewportLeased(
     return;
   }
 
-  renderViewport(ctx, ws, styles, viewport, { ...opts, dpr: effectiveDpr, loadedImages: imageCache });
+  renderViewport(ctx, ws, styles, viewport, {
+    ...opts,
+    dpr: effectiveDpr,
+    loadedImages: imageCache,
+    threeD: deps.threeD,
+    regionMap: deps.regionMap,
+  });
 }
 
 /**

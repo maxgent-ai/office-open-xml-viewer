@@ -167,6 +167,7 @@ export interface ChartAnchor {
 export interface ChartDataLabelOverride {
     idx: number;
     text: string;
+    richRuns?: ChartTextRun[];
     position?: string;
     fontColor?: string;
     fontSizeHpt?: number;
@@ -193,6 +194,7 @@ export interface ChartDataPointOverride {
     markerSize?: number;
     markerFill?: string;
     markerLine?: string;
+    markerLineWidthEmu?: number;
     explosion?: number;
 }
 export interface ChartErrBars {
@@ -220,6 +222,7 @@ export interface ChartexBoxSeries {
     quartileMethod: string;
 }
 export interface ChartexBoxWhisker {
+    oneBoxPerSeries?: boolean;
     categories: string[];
     series: ChartexBoxSeries[];
 }
@@ -238,6 +241,42 @@ export interface ChartExElementStyle {
     fillColorIndex?: number | null;
     lineColorIndex?: number | null;
 }
+export interface ChartexGeography {
+    projectionType?: 'mercator' | 'miller' | 'robinson' | 'albers' | string | null;
+    viewedRegionType?: string | null;
+    cultureLanguage?: string | null;
+    cultureRegion?: string | null;
+    attribution?: string | null;
+    cacheProvider?: string | null;
+    cachePresent: boolean;
+}
+export interface ChartexHistogramBinning {
+    binSize?: number | null;
+    binCount?: number | null;
+    intervalClosed?: 'l' | 'r' | null;
+    underflow?: number | null;
+    overflow?: number | null;
+}
+export interface ChartexRegionMap {
+    rows: ChartexRegionMapRow[];
+    regionLabelLayout?: 'none' | 'bestFitOnly' | 'showAll' | null;
+    geography?: ChartexGeography | null;
+    colors?: ChartexRegionMapColors | null;
+}
+export interface ChartexRegionMapColors {
+    stopCount?: 2 | 3 | null;
+    minColor?: string | null;
+    midColor?: string | null;
+    maxColor?: string | null;
+    minPosition?: ChartexValueColorStop | null;
+    midPosition?: ChartexValueColorStop | null;
+    maxPosition?: ChartexValueColorStop | null;
+}
+export interface ChartexRegionMapRow {
+    label: string;
+    entityId?: string | null;
+    value?: number | null;
+}
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
 }
@@ -249,12 +288,9 @@ export interface ChartexTreemap {
     rows: ChartexSunburstRow[];
     parentLabelLayout?: string | null;
 }
-export interface ChartexHistogramBinning {
-    binSize?: number | null;
-    binCount?: number | null;
-    intervalClosed?: 'l' | 'r' | null;
-    underflow?: number | null;
-    overflow?: number | null;
+export interface ChartexValueColorStop {
+    kind: 'extremeValue' | 'number' | 'percent' | string;
+    value?: number | null;
 }
 export interface ChartLabelBox {
     fill?: string;
@@ -317,15 +353,19 @@ export interface ChartModel {
     dataLabelFormatCode?: string | null;
     titleFontBold?: boolean | null;
     catAxisFontBold?: boolean | null;
+    catAxisFontItalic?: boolean | null;
     valAxisFontBold?: boolean | null;
+    valAxisFontItalic?: boolean | null;
     catAxisTitleFontSizeHpt?: number | null;
     catAxisTitleFontBold?: boolean | null;
+    catAxisTitleFontItalic?: boolean | null;
     catAxisTitleFontColor?: string | null;
     catAxisTitleRotation?: number | null;
     catAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
     catAxisTitleManualLayout?: ChartManualLayout | null;
     valAxisTitleFontSizeHpt?: number | null;
     valAxisTitleFontBold?: boolean | null;
+    valAxisTitleFontItalic?: boolean | null;
     valAxisTitleFontColor?: string | null;
     valAxisTitleRotation?: number | null;
     valAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
@@ -388,6 +428,7 @@ export interface ChartModel {
     catAxisMajorUnit?: number | null;
     catAxisMinorUnit?: number | null;
     valAxisLogBase?: number | null;
+    catAxisLogBase?: number | null;
     valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisOrientation?: 'minMax' | 'maxMin' | string | null;
     catAxisTickLabelPos?: string | null;
@@ -398,25 +439,42 @@ export interface ChartModel {
     stockHiLowLines?: boolean | null;
     stockHiLowLineColor?: string | null;
     stockUpDownBars?: boolean | null;
+    stockUpDownBarStyle?: ChartStockUpDownBarStyle | null;
+    ofPie?: ChartOfPie | null;
+    threeD?: ChartThreeD | null;
     chartexBox?: ChartexBoxWhisker | null;
     chartexSunburst?: ChartexSunburst | null;
     chartexTreemap?: ChartexTreemap | null;
+    chartexRegionMap?: ChartexRegionMap | null;
     chartexHistogramBinning?: ChartexHistogramBinning | null;
     chartexAccents?: string[] | null;
     chartexColorPalette?: Array<string | null> | null;
     chartexColorStyleMethod?: string | null;
     chartexDataPointStyle?: ChartExElementStyle | null;
     chartexDataPointLineStyle?: ChartExElementStyle | null;
+    chartexSeriesLineStyle?: ChartExElementStyle | null;
     chartexDataPointMarkerStyle?: ChartExElementStyle | null;
     chartexMarkerSizePt?: number | null;
     chartexMarkerSymbol?: string | null;
     chartexConnectorLines?: boolean | null;
+}
+export interface ChartOfPie {
+    type: 'pie' | 'bar';
+    splitType: 'auto' | 'cust' | 'percent' | 'pos' | 'val';
+    splitPos?: number | null;
+    customSplitIndices?: number[] | null;
+    secondPieSizePercent: number;
+    gapWidthPercent: number;
+    seriesLines: boolean;
 }
 export interface ChartRect {
     x: number;
     y: number;
     w: number;
     h: number;
+}
+export interface ChartRegionMapRenderer {
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number): boolean;
 }
 export interface ChartSeries {
     name: string;
@@ -426,6 +484,7 @@ export interface ChartSeries {
     chartexStyle?: ChartExElementStyle | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
+    threeDShape?: 'box' | 'cylinder' | 'cone' | 'coneToMax' | 'pyramid' | 'pyramidToMax' | string | null;
     values: (number | null)[];
     dataPointColors?: (string | null)[] | null;
     dataLabelColors?: (string | null)[] | null;
@@ -441,6 +500,7 @@ export interface ChartSeries {
     markerSize?: number | null;
     markerFill?: string | null;
     markerLine?: string | null;
+    markerLineWidthEmu?: number | null;
     dataPointOverrides?: ChartDataPointOverride[] | null;
     dataLabelOverrides?: ChartDataLabelOverride[] | null;
     seriesDataLabels?: ChartSeriesDataLabels | null;
@@ -466,6 +526,18 @@ export interface ChartSeriesDataLabels {
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
 }
+export interface ChartStockBarPaint {
+    fillColor?: string | null;
+    fillHidden?: boolean | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
+    lineHidden?: boolean | null;
+}
+export interface ChartStockUpDownBarStyle {
+    gapWidthPercent: number;
+    up: ChartStockBarPaint;
+    down: ChartStockBarPaint;
+}
 export interface ChartTextBox {
     x: number;
     y: number;
@@ -489,6 +561,19 @@ export interface ChartTextRun {
     bold?: boolean | null;
     color?: string | null;
     fontFace?: string | null;
+}
+export interface ChartThreeD {
+    rotationX?: number | null;
+    rotationY?: number | null;
+    heightPercent?: number | null;
+    depthPercent?: number | null;
+    perspective?: number | null;
+    rightAngleAxes?: boolean | null;
+    gapDepthPercent?: number | null;
+    shape?: string | null;
+}
+export interface ChartThreeDRenderer {
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number): boolean;
 }
 export interface ChartTrendline {
     trendlineType: string;
@@ -668,6 +753,8 @@ interface LoadOptions__emitterCollision1 {
     onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
     workerTimeoutMs?: number;
     math?: MathRenderer;
+    threeD?: ChartThreeDRenderer;
+    regionMap?: ChartRegionMapRenderer;
 }
 export interface MathAccent {
     kind: 'accent';
@@ -1081,6 +1168,8 @@ export interface SecondaryValueAxis {
     formatCode?: string | null;
     fontColor?: string | null;
     fontSizeHpt?: number | null;
+    fontItalic?: boolean | null;
+    fontBold?: boolean | null;
     fontFace?: string | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -1091,10 +1180,20 @@ export interface SecondaryValueAxis {
     minorGridlineColor?: string | null;
     minorGridlineWidthEmu?: number | null;
     minorGridlineDash?: string | null;
+    majorGridlines?: boolean;
+    majorGridlineColor?: string | null;
+    majorGridlineWidthEmu?: number | null;
+    majorGridlineDash?: string | null;
     majorUnit?: number | null;
     minorUnit?: number | null;
+    logBase?: number | null;
+    orientation?: 'minMax' | 'maxMin' | string | null;
+    tickLabelPos?: string | null;
+    crosses?: string | null;
+    crossesAt?: number | null;
     titleFontSizeHpt?: number | null;
     titleFontBold?: boolean | null;
+    titleFontItalic?: boolean | null;
     titleFontColor?: string | null;
     titleFontFace?: string | null;
     titleRotation?: number | null;
@@ -1358,6 +1457,7 @@ export interface Workbook {
 }
 export interface Worksheet {
     name: string;
+    isChartSheet?: boolean;
     rows: Row[];
     colWidths: Record<number, number>;
     colWidthRanges?: Array<{

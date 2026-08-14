@@ -89,6 +89,7 @@ import {
 import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
 import { selectionAutoScrollVelocity } from './selection-auto-scroll.js';
+import { worksheetContentBounds } from './internal/worksheet-content-bounds.js';
 
 const borrowedWorkbookOption = Symbol('XlsxViewer.borrowedWorkbook');
 
@@ -1082,6 +1083,8 @@ class XlsxViewerEngine implements ZoomableViewer {
           workerTimeoutMs: this.opts.workerTimeoutMs,
           wasmUrl: this.opts.wasmUrl,
           math: this.opts.math,
+          threeD: this.opts.threeD,
+          regionMap: this.opts.regionMap,
           mode: this._mode,
         }), () => {
           // Claim every async-operation generation before closing the old
@@ -4402,14 +4405,7 @@ class XlsxViewerEngine implements ZoomableViewer {
    *  {@link updateSpacerSize} at cs=1 (same used-range detection) so the fit
    *  targets exactly the region the spacer/scroll extent covers. */
   private _naturalContentExtent(ws: Worksheet): { width: number; height: number } {
-    let maxRow = Math.max(50, ws.freezeRows ?? 0);
-    let maxCol = Math.max(26, ws.freezeCols ?? 0);
-    for (const row of ws.rows) {
-      if (row.index > maxRow) maxRow = row.index;
-      for (const cell of row.cells) {
-        if (cell.col > maxCol) maxCol = cell.col;
-      }
-    }
+    const { maxRow, maxCol } = worksheetContentBounds(ws);
     return getGridGeometryForWorksheet(ws).logicalContentExtent(
       maxRow,
       maxCol,
@@ -4424,14 +4420,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     const freezeCols = ws.freezeCols ?? 0;
 
     // Find actual scrollable data extent
-    let maxRow = Math.max(50, freezeRows);
-    let maxCol = Math.max(26, freezeCols);
-    for (const row of ws.rows) {
-      if (row.index > maxRow) maxRow = row.index;
-      for (const cell of row.cells) {
-        if (cell.col > maxCol) maxCol = cell.col;
-      }
-    }
+    let { maxRow, maxCol } = worksheetContentBounds(ws);
     maxRow += 30;
     maxCol += 10;
 

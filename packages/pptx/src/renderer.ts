@@ -99,7 +99,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import { paintDistanceAwareReflectionBlur } from './reflection-blur';
 import { classifyPptxHyperlink } from './hyperlink';
@@ -6182,7 +6182,12 @@ export function applyDimOverlay(
  * math engine once through their load options; direct render callers can pass
  * the same public engine here.
  */
-export type SlideRenderOptions = RenderOptions & { math?: MathRenderer; dim?: DimOptions };
+export type SlideRenderOptions = RenderOptions & {
+  math?: MathRenderer;
+  threeD?: ChartThreeDRenderer;
+  regionMap?: ChartRegionMapRenderer;
+  dim?: DimOptions;
+};
 
 /**
  * Per-canvas monotonic render token for the {@link renderSlide} cancellation
@@ -6529,6 +6534,8 @@ async function renderSlideLeased(
         },
         chartPtToPx,
         el.rotation,
+        opts.threeD,
+        opts.regionMap,
       );
       ctx.restore();
     }

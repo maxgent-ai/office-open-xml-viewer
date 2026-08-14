@@ -37,11 +37,15 @@ export type {
   ChartRect,
   ChartSeries,
   ChartSeriesDataLabels,
+  ChartStockBarPaint,
+  ChartStockUpDownBarStyle,
   ChartTextBox,
   ChartTextParagraph,
   ChartTextRun,
   ChartTrendline,
   ChartType,
+  ChartOfPie,
+  ChartThreeD,
   ChartExElementStyle,
   ChartexHistogramBinning,
   ChartexBoxSeries,
@@ -49,6 +53,11 @@ export type {
   ChartexSunburst,
   ChartexSunburstRow,
   ChartexTreemap,
+  ChartexRegionMap,
+  ChartexRegionMapRow,
+  ChartexGeography,
+  ChartexRegionMapColors,
+  ChartexValueColorStop,
   LegendManualLayout,
   SecondaryValueAxis,
 } from './types/chart';
@@ -348,6 +357,11 @@ export {
   type SparklineModel,
   type SparklineRect,
 } from './sparkline/renderer';
+export {
+  THREE_D_MAX_SHAPE_FACES_PER_DATUM,
+  type ChartThreeDRenderer,
+} from './chart/three-d-contract';
+export type { ChartRegionMapRenderer } from './chart/region-map-contract';
 export {
   mathToMathML,
   svgExtents,

@@ -483,6 +483,8 @@ export class DocxScrollViewer implements ZoomableViewer {
         workerTimeoutMs: this._opts.workerTimeoutMs,
         wasmUrl: this._opts.wasmUrl,
         math: this._opts.math,
+        threeD: this._opts.threeD,
+        regionMap: this._opts.regionMap,
         mode: this._mode,
       }), (ownedDocument) => {
         this._invalidateElementContext(false);

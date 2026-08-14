@@ -1,4 +1,5 @@
 import { drawImageCropped, renderChart } from '@silurus/ooxml-core';
+import type { ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import type {
   ImagePaintResourceDescriptor,
   LayoutRect,
@@ -86,7 +87,11 @@ function paintDrawableResource(
   );
 }
 
-export const canonicalCanvasPaintResourceHandlers: CanvasPaintResourceHandlers = Object.freeze({
+export function createCanonicalCanvasPaintResourceHandlers(
+  threeD?: ChartThreeDRenderer,
+  regionMap?: ChartRegionMapRenderer,
+): CanvasPaintResourceHandlers {
+  return Object.freeze({
   image(resource, bounds, ctx) {
     paintImageResource(resource, bounds, ctx);
   },
@@ -98,6 +103,9 @@ export const canonicalCanvasPaintResourceHandlers: CanvasPaintResourceHandlers =
       resource.descriptor.model as import('@silurus/ooxml-core').ChartModel,
       { x: bounds.xPt, y: bounds.yPt, w: bounds.widthPt, h: bounds.heightPt },
       1,
+      0,
+      threeD,
+      regionMap,
     );
   },
   math(resource, bounds, ctx) {
@@ -106,4 +114,8 @@ export const canonicalCanvasPaintResourceHandlers: CanvasPaintResourceHandlers =
   'picture-bullet'(resource, bounds, ctx) {
     paintDrawableResource(resource, bounds, ctx);
   },
-});
+  });
+}
+
+export const canonicalCanvasPaintResourceHandlers: CanvasPaintResourceHandlers =
+  createCanonicalCanvasPaintResourceHandlers();

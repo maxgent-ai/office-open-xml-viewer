@@ -493,6 +493,14 @@ fn parse_sheet_with(
 
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
+    let is_chart_sheet = rels_doc.descendants().any(|node| {
+        node.is_element()
+            && node.tag_name().name() == "Relationship"
+            && node.attribute("Id") == Some(sheet_meta.r_id.as_str())
+            && node
+                .attribute("Type")
+                .is_some_and(|relationship_type| relationship_type.ends_with("/chartsheet"))
+    });
 
     let theme_colors = shared.theme_colors.as_ref();
     let sheet_part = format!("xl/{}", sheet_path);
@@ -503,13 +511,17 @@ fn parse_sheet_with(
     // names the offending part, so the OTHER sheets stay openable. Everything
     // after (images / charts / comments / …) is already lenient (returns empty
     // on error), so it stays outside this guard.
-    let sheet_read_parse = stream_sheet_data_from_archive(
-        archive,
-        &sheet_part,
-        Rc::clone(&shared.shared_strings),
-        Rc::clone(&shared.theme_colors),
-    )
-    .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name));
+    let sheet_read_parse = if is_chart_sheet {
+        parse_chart_sheet_shell(archive, &sheet_part, name)
+    } else {
+        stream_sheet_data_from_archive(
+            archive,
+            &sheet_part,
+            Rc::clone(&shared.shared_strings),
+            Rc::clone(&shared.theme_colors),
+        )
+        .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name))
+    };
     let parsed = match sheet_read_parse {
         Ok(parsed) => parsed,
         Err(detail) => {
@@ -527,6 +539,20 @@ fn parse_sheet_with(
         CurrentSheetLookup::BuildFromMaterializedRows,
     )?;
     serialize_worksheet_bounded(archive, &sheet_part, &worksheet)
+}
+
+fn parse_chart_sheet_shell(
+    archive: &mut XlsxZip,
+    sheet_part: &str,
+    name: &str,
+) -> Result<(Worksheet, HyperlinkRids, String), String> {
+    let xml = read_zip_string(archive, sheet_part)?;
+    let document = parse_guarded(&xml).map_err(|error| error.to_string())?;
+    let root = document.root_element();
+    if root.tag_name().name() != "chartsheet" || !is_x_ns(root.tag_name().namespace()) {
+        return Err("expected SpreadsheetML chartsheet root".to_string());
+    }
+    Ok((Worksheet::chart_sheet(name), Vec::new(), xml))
 }
 
 enum CurrentSheetLookup {
@@ -2144,6 +2170,7 @@ fn parse_projected_worksheet(
 
     let worksheet = Worksheet {
         name: name.to_string(),
+        is_chart_sheet: false,
         rows,
         col_widths,
         col_width_ranges,
@@ -3229,6 +3256,7 @@ struct ActiveWorksheetCursor {
 
 enum ActiveWorksheetSource {
     Streaming(Box<WorksheetCursor>),
+    Ready(Box<Worksheet>),
     DeferredFailure(CursorOpenFailure),
     Prepared,
 }
@@ -3417,16 +3445,43 @@ impl XlsxArchive {
                 .ok_or_else(|| format!("rId {} not found in rels", sheet.r_id))?;
             let part = format!("xl/{sheet_path}");
             let zip = self.archive.as_mut().expect("container open checked above");
-            let cursor = zip.open_worksheet_cursor(
-                &part,
-                Rc::clone(&shared.shared_strings),
-                Rc::clone(&shared.theme_colors),
-            );
-            let source = match cursor {
-                Ok(cursor) => ActiveWorksheetSource::Streaming(Box::new(cursor)),
-                Err(error) => {
-                    zip.assert_healthy()?;
-                    ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+            let is_chart_sheet = rels_doc.descendants().any(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "Relationship"
+                    && node.attribute("Id") == Some(sheet.r_id.as_str())
+                    && node
+                        .attribute("Type")
+                        .is_some_and(|relationship_type| relationship_type.ends_with("/chartsheet"))
+            });
+            let source = if is_chart_sheet {
+                match parse_chart_sheet_shell(zip, &part, name).and_then(|parsed| {
+                    finalize_projected_sheet(
+                        zip,
+                        shared,
+                        sheet_index,
+                        name,
+                        &sheet_path,
+                        parsed,
+                        CurrentSheetLookup::BuildFromMaterializedRows,
+                    )
+                }) {
+                    Ok(worksheet) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
+                    Err(error) => {
+                        zip.assert_healthy()?;
+                        ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                    }
+                }
+            } else {
+                match zip.open_worksheet_cursor(
+                    &part,
+                    Rc::clone(&shared.shared_strings),
+                    Rc::clone(&shared.theme_colors),
+                ) {
+                    Ok(cursor) => ActiveWorksheetSource::Streaming(Box::new(cursor)),
+                    Err(error) => {
+                        zip.assert_healthy()?;
+                        ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                    }
                 }
             };
             Ok(ActiveWorksheetCursor {
@@ -3434,7 +3489,7 @@ impl XlsxArchive {
                 sheet_index,
                 name: name.to_string(),
                 sheet_path,
-                reference_index: Some(WorksheetCellLookupBuilder::bounded()),
+                reference_index: (!is_chart_sheet).then(WorksheetCellLookupBuilder::bounded),
             })
         })();
         match result {
@@ -3471,7 +3526,7 @@ impl XlsxArchive {
             .source
         {
             ActiveWorksheetSource::DeferredFailure(failure) => Some(failure.clone()),
-            ActiveWorksheetSource::Streaming(_) => None,
+            ActiveWorksheetSource::Streaming(_) | ActiveWorksheetSource::Ready(_) => None,
             ActiveWorksheetSource::Prepared => {
                 return Err("worksheet terminal product is prepared".to_string());
             }
@@ -3498,6 +3553,36 @@ impl XlsxArchive {
                 .as_mut()
                 .expect("cursor checked above")
                 .source = ActiveWorksheetSource::Prepared;
+            self.last_cursor_pull_terminal = true;
+            self.terminal_awaiting_ack = true;
+            return Ok(bytes);
+        }
+        let ready = {
+            let active = self
+                .active_worksheet
+                .as_mut()
+                .ok_or_else(|| "worksheet cursor is not open".to_string())?;
+            match std::mem::replace(&mut active.source, ActiveWorksheetSource::Prepared) {
+                ActiveWorksheetSource::Ready(worksheet) => Some(worksheet),
+                other => {
+                    active.source = other;
+                    None
+                }
+            }
+        };
+        if let Some(worksheet) = ready {
+            let active = self
+                .active_worksheet
+                .as_ref()
+                .expect("cursor checked above");
+            let part = format!("xl/{}", active.sheet_path);
+            let reporter = self
+                .archive
+                .as_ref()
+                .expect("container open checked above")
+                .active_operation()?
+                .limit_reporter()?;
+            let bytes = serialize_cursor_finished(*worksheet, Some(&reporter), Some(&part))?;
             self.last_cursor_pull_terminal = true;
             self.terminal_awaiting_ack = true;
             return Ok(bytes);
@@ -4695,6 +4780,109 @@ mod date1904_tests {
     fn workbook_pr_absent_element_defaults_false() {
         let xml = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#;
         assert!(!parse(xml));
+    }
+}
+
+#[cfg(test)]
+mod chartsheet_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    fn chartsheet_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            let files = [
+                (
+                    "xl/workbook.xml",
+                    r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Map" sheetId="1" r:id="rSheet"/></sheets></workbook>"#,
+                ),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#,
+                ),
+                (
+                    "xl/chartsheets/sheet1.xml",
+                    r#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"/></sheetViews><drawing r:id="rDrawing"/></chartsheet>"#,
+                ),
+                (
+                    "xl/chartsheets/_rels/sheet1.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+                ),
+                (
+                    "xl/drawings/drawing1.xml",
+                    r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="5334000" cy="3302000"/><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="1" name="Map"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="5334000" cy="3302000"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>"#,
+                ),
+                (
+                    "xl/drawings/_rels/drawing1.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#,
+                ),
+                (
+                    "xl/charts/chart1.xml",
+                    r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:cat><c:strLit><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+                ),
+            ];
+            for (path, content) in files {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(content.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn chartsheet_archive() -> XlsxZip {
+        XlsxZip::new(Cursor::new(chartsheet_bytes())).expect("chartsheet zip opens")
+    }
+
+    /// A chartsheet has no CT_Worksheet/sheetData. It must still finalize its
+    /// drawing relationships and expose the absolute-anchored chart instead of
+    /// degrading to an empty worksheet parse-error placeholder.
+    #[test]
+    fn chart_sheet_without_sheet_data_reaches_its_absolute_chart() {
+        let mut archive = chartsheet_archive();
+        let shared = WorkbookShared::load(&mut archive).expect("shared workbook parts");
+        let bytes =
+            parse_sheet_with(&mut archive, &shared, 0, "Map").expect("chartsheet materializes");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value.get("isChartSheet").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(value.get("parseError").is_none());
+        assert_eq!(
+            value.get("charts").and_then(|v| v.as_array()).map(Vec::len),
+            Some(1),
+        );
+    }
+
+    /// The browser viewer opens worksheets through the resumable cursor API,
+    /// not `parse_sheet_with`. A chartsheet is already fully materialized after
+    /// its drawing relationships are resolved, so the first pull must return a
+    /// terminal worksheet model instead of trying to stream CT_Worksheet rows.
+    #[test]
+    fn chart_sheet_production_cursor_returns_terminal_model() {
+        let mut archive = XlsxArchive::new(chartsheet_bytes(), None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Map").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.get("kind").and_then(|v| v.as_str()), Some("finished"));
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert_eq!(
+            worksheet.get("isChartSheet").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(worksheet.get("parseError").is_none());
+        assert_eq!(
+            worksheet
+                .get("charts")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(1),
+        );
     }
 }
 

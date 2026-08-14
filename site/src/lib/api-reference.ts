@@ -38,6 +38,8 @@ const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Devic
 const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document URL). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.', emphasis: 'Override the URL the parser worker fetches the WebAssembly module from.' };
 const WORKER_TIMEOUT = { name: 'workerTimeoutMs', type: 'number', def: 'unlimited', desc: 'Reject the parse if the worker does not answer within this many ms — an opt-in safety net for a wedged / crashed worker that would otherwise leave load() pending forever. Unlimited by default (a large document with heavy media can legitimately take tens of seconds). A worker that throws or fails to load already rejects immediately regardless; this only covers the "silent, never-responds" case.', emphasis: 'Reject the parse if the worker does not answer within this many ms' };
 const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped, and the engine is left out of your build. When passed, the engine ships as a standalone asset fetched lazily the first time a document contains an equation.', emphasis: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB).' };
+const THREE_D = { name: 'threeD', type: 'ChartThreeDRenderer', def: 'undefined', desc: 'Opt-in model-space 3-D chart renderer. Import `threeD` from the separate `@silurus/ooxml/three-d` entry and inject it once. Omit it to use the canonical 2-D fallback and keep the mesh/camera implementation out of the application graph. Main-thread rendering only.', emphasis: 'Opt-in model-space 3-D chart renderer.' };
+const REGION_MAP = { name: 'regionMap', type: 'ChartRegionMapRenderer', def: 'undefined', desc: 'Opt-in offline ChartEx Region Map renderer backed by a fixed Natural Earth country asset. Import `regionMap` from `@silurus/ooxml/region-map` and inject it once. Unsupported cached or sub-country views fail closed. Main-thread rendering only.', emphasis: 'Opt-in offline ChartEx Region Map renderer' };
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' also renders inside the worker; the main thread only paints the returned ImageBitmap. This contains parser/renderer state and many failures away from Window, but a Worker is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM. Requires Worker + OffscreenCanvas. Canvas-target render methods are unavailable in 'worker' mode, equations require 'main', and transferring each frame can add latency.", emphasis: 'a Worker is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM.' };
 const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' renders on the main thread (default). 'worker' renders the viewer off the main thread and paints transferred ImageBitmaps, improving UI responsiveness and containing parser/renderer state away from Window. It is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM. Scroll, tabs, zoom, selection and find remain available; equations require 'main'. Requires Worker + OffscreenCanvas, and frame transfer can add latency.", emphasis: 'It is not a separate process or a strict memory sandbox and cannot guarantee recovery from every browser-level OOM.' };
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
@@ -110,6 +112,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         RESOURCE_METRICS,
         DEBUG,
         MATH,
+        THREE_D,
+        REGION_MAP,
         VIEWER_MODE,
         ZOOM_MIN_MAX,
         ON_SCALE_CHANGE,
@@ -142,7 +146,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, MODE],
+      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
@@ -190,6 +194,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         RESOURCE_METRICS,
         DEBUG,
         MATH,
+        THREE_D,
+        REGION_MAP,
         DPR,
         MODE,
         { name: 'onVisibleSlideChange', type: '(topIndex: number, total: number) => void', desc: 'Fires when the top-most visible slide changes.' },
@@ -231,6 +237,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         RESOURCE_METRICS,
         DEBUG,
         MATH,
+        THREE_D,
+        REGION_MAP,
         VIEWER_MODE,
         ZOOM_MIN_MAX,
         ON_SCALE_CHANGE,
@@ -259,7 +267,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, MODE],
+      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
         { sig: 'get pageCount(): number', desc: 'Total pages.' },
@@ -301,6 +309,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         RESOURCE_METRICS,
         DEBUG,
         MATH,
+        THREE_D,
+        REGION_MAP,
         DPR,
         MODE,
         { name: 'onVisiblePageChange', type: '(topIndex: number, total: number) => void', desc: 'Fires when the top-most visible page changes.' },
@@ -344,6 +354,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         RESOURCE_METRICS,
         DEBUG,
         MATH,
+        THREE_D,
+        REGION_MAP,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -410,6 +422,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         DEBUG,
         WORKER_TIMEOUT,
         MATH,
+        THREE_D,
+        REGION_MAP,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -450,7 +464,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, MODE],
+      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },

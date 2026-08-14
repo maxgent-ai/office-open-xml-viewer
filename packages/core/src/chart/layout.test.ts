@@ -108,6 +108,13 @@ describe('chartTitleFontPx', () => {
     expect(chartTitleFontPx(model({}), 80, PTPX)).toBe(14 * PTPX);
     expect(chartTitleFontPx(model({}), 720, PTPX)).toBe(14 * PTPX);
   });
+  it('rejects non-finite and out-of-schema public-model sizes', () => {
+    for (const size of [Number.NEGATIVE_INFINITY, 99, 400_001, Number.POSITIVE_INFINITY, Number.NaN]) {
+      expect(chartTitleFontPx(model({ titleFontSizeHpt: size }), H, PTPX)).toBe(14 * PTPX);
+    }
+    expect(chartTitleFontPx(model({ titleFontSizeHpt: 100 }), H, PTPX)).toBe(PTPX);
+    expect(chartTitleFontPx(model({ titleFontSizeHpt: 400_000 }), H, 1)).toBe(4000);
+  });
   it('shares the fallback across classic and ChartEx chart families', () => {
     expect(chartTitleFontPx(model({ chartType: 'line' }), H, PTPX)).toBe(14 * PTPX);
     expect(chartTitleFontPx(model({ chartType: 'boxWhisker' }), H, PTPX)).toBe(14 * PTPX);
@@ -211,7 +218,7 @@ describe('chartLegendReserve + bands', () => {
     // 300 + 12 + 322 = 634: it fits W - 4 but not the painted W - 8.
     expect(leg).toEqual({ side: 't', reserveW: 0, reserveH: 36 });
   });
-  it('bounds a measured side reserve while leaving room for the plot', () => {
+  it('lets a measured side reserve grow to the 30% plot-safety bound', () => {
     const leg = chartLegendReserve(
       model({ showLegend: true, legendPos: 'r' }),
       W,
@@ -225,7 +232,23 @@ describe('chartLegendReserve + bands', () => {
         verticalPadding: 4,
       },
     );
-    expect(leg).toEqual({ side: 'r', reserveW: W * 0.22, reserveH: 0 });
+    expect(leg).toEqual({ side: 'r', reserveW: W * 0.3, reserveH: 0 });
+  });
+  it('keeps a short measured side reserve at the 80px compatibility minimum', () => {
+    const leg = chartLegendReserve(
+      model({ showLegend: true, legendPos: 'r' }),
+      W,
+      H,
+      0.22,
+      {
+        itemWidths: [40],
+        rowHeight: 16,
+        itemGap: 12,
+        horizontalPadding: 8,
+        verticalPadding: 4,
+      },
+    );
+    expect(leg).toEqual({ side: 'r', reserveW: 80, reserveH: 0 });
   });
 });
 

@@ -6,6 +6,19 @@ is included in the npm tarball so it travels with every install.
 
 ## JavaScript / bundled asset
 
+### Natural Earth Admin 0 Countries, 1:110m
+
+The optional Region Map renderer contains a coordinate-quantized derivative of
+Natural Earth's Admin 0 Countries 1:110m vector dataset. Natural Earth states
+that all versions of its raster and vector data are in the public domain. The
+generated source records the exact upstream SHA-256 and fixed feature/vertex
+bounds. The boundaries are illustrative, show Natural Earth's default de-facto
+point of view, and do not imply this project's endorsement of any territorial
+claim.
+
+- Source: <https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_admin_0_countries.geojson>
+- Terms: <https://www.naturalearthdata.com/about/terms-of-use/>
+
 ### MathJax + STIX Two Math (`mathjax-stix2.js`)
 
 The optional equation-rendering engine (`@silurus/ooxml/math`, opt-in —

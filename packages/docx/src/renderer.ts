@@ -1,5 +1,6 @@
 import type { DocxDocumentModel, BodyElement, DocxTextRunInfo } from './types';
 import type { LayoutServices, MathRenderer } from './layout/types.js';
+import type { ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 export type { DocxTextRunInfo } from './types';
 import { bodyMathOccurrences } from './layout/resources.js';
 import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
@@ -60,6 +61,10 @@ export interface RenderDocumentOptions {
   layoutServices?: LayoutServices;
   /** Internal load-time default captured once and mirrored into worker mode. */
   defaultCurrentDateMs?: number;
+  /** Internal load-time optional 3-D addon retained by DocxDocument. */
+  threeD?: ChartThreeDRenderer;
+  /** Internal load-time optional Region Map addon retained by DocxDocument. */
+  regionMap?: ChartRegionMapRenderer;
 }
 
 export function dropColorReplacedCache(
@@ -112,6 +117,8 @@ function normalizeRenderOptions(
         ? textRunsForPage(selection.layout, pageIndex, { scale })
         : [],
       onTextRun: options.onTextRun,
+      threeD: options.threeD,
+      regionMap: options.regionMap,
     },
   };
 }

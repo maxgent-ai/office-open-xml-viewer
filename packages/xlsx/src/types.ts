@@ -85,6 +85,10 @@ export interface Worksheet {
   colHidden?: Record<number, boolean>;
   defaultColWidth: number;
   defaultRowHeight: number;
+  /** `<sheetFormatPr customHeight>` (ECMA-376 §18.3.1.81). When true, rows
+   *  without their own `ht` use the manually authored sheet default instead of
+   *  display-time auto-fit. Omitted when false. */
+  defaultRowHeightCustom?: boolean;
   mergeCells: MergeCell[];
   freezeRows: number;
   freezeCols: number;
@@ -782,6 +786,9 @@ export interface CfValue {
 export interface Row {
   index: number;
   height: number | null;
+  /** `<row customHeight>` (ECMA-376 §18.3.1.73). A true value suppresses
+   *  display-time auto-fit even when `ht` is omitted. */
+  customHeight?: boolean;
   cells: Cell[];
   /** Outline (grouping) depth 0-7 (ECMA-376 §18.3.1.73 `<row outlineLevel>`).
    *  Omitted on the wire when `0` (ungrouped); read as `outlineLevel ?? 0`. */
@@ -1084,9 +1091,9 @@ export interface XlsxRenderViewportOptions {
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   loadedImages?: Map<string, CanvasImageSource | null>;
   fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
-  /** @internal Optional synchronous 3-D chart addon retained by the workbook. */
+  /** @internal Optional synchronous 3-D chart renderer retained by the workbook. */
   threeD?: ChartThreeDRenderer;
-  /** @internal Optional synchronous offline Region Map addon. */
+  /** @internal Optional synchronous offline Region Map renderer. */
   regionMap?: ChartRegionMapRenderer;
 }
 

@@ -34,6 +34,8 @@ describe('VS Code extension package boundary', () => {
     writeFileSync(resolve(fixture, 'dist/webview.js'), '(() => {})();');
     writeFileSync(resolve(fixture, 'dist/extension.js.map'), '{"version":3}');
     writeFileSync(resolve(fixture, 'dist/webview.js.map'), '{"version":3}');
+    writeFileSync(resolve(fixture, 'esbuild-worker-stub.mjs'), 'export const plugin = {};');
+    writeFileSync(resolve(fixture, 'esbuild-worker-stub.d.mts'), 'export const plugin: unknown;');
 
     const files = execFileSync(process.execPath, [vsce, 'ls', '--no-dependencies'], {
       cwd: fixture,
@@ -43,5 +45,6 @@ describe('VS Code extension package boundary', () => {
     expect(files).toContain('dist/extension.js');
     expect(files).toContain('dist/webview.js');
     expect(files.filter((file) => file.endsWith('.map'))).toEqual([]);
+    expect(files.filter((file) => file.startsWith('esbuild-worker-stub.'))).toEqual([]);
   });
 });

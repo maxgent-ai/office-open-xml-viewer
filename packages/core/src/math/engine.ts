@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 // MathML → SVG via a pre-bundled MathJax v4 + STIX Two Math converter.
 //
 // This module is the *heavy* half of the math feature: it references the
@@ -9,7 +11,8 @@
 // import this module. Instead it is published as a *separate* entry point
 // (`@silurus/ooxml/math`) that consumers explicitly import and pass to a viewer
 // (`new DocxViewer(canvas, { math })`). When they don't, the whole asset
-// tree-shakes away. See `src/math.ts` (root) and the `MathRenderer` interface.
+// is not loaded or evaluated unless supplied. See `src/math.ts` (root) and the
+// `MathRenderer` interface.
 //
 // The asset itself is self-contained: DOM-free internally, zero network, zero
 // cross-origin requests. It exposes `globalThis.__ooxmlStix2`.
@@ -38,12 +41,16 @@ interface Stix2Engine {
 
 let enginePromise: Promise<Stix2Engine> | null = null;
 
-function resolveAssetUrl(): string {
+export function resolveMathJaxAssetUrl(): string {
   // `?url` yields the asset href directly — an absolute URL at build time, the
   // dev-served path in dev. Resolve against the module URL so a bare relative
   // dev value still becomes an absolute href fetchable from any realm (matches
   // the `new URL(wasmAssetUrl, …)` pattern in the format handles).
   return new URL(mathjaxAssetUrl, import.meta.url).href;
+}
+
+function normalizedAssetUrl(assetUrl?: string): string {
+  return assetUrl ? new URL(assetUrl, import.meta.url).href : resolveMathJaxAssetUrl();
 }
 
 function loadScript(src: string): Promise<void> {
@@ -57,15 +64,22 @@ function loadScript(src: string): Promise<void> {
   });
 }
 
-function ensureEngine(): Promise<Stix2Engine> {
+/** Module workers have no document and cannot use the classic-worker
+ * importScripts API. The prebuilt engine is a strict IIFE that is also valid as
+ * a side-effect-only ES module, so dynamic import evaluates it in the worker's
+ * own global realm and installs `globalThis.__ooxmlStix2`. */
+async function loadWorkerModule(src: string): Promise<void> {
+  await import(/* @vite-ignore */ src);
+}
+
+function ensureEngine(assetUrl?: string): Promise<Stix2Engine> {
   if (enginePromise) return enginePromise;
   enginePromise = (async () => {
     const existing = (globalThis as any).__ooxmlStix2 as Stix2Engine | undefined;
     if (existing) return existing;
-    if (typeof document === 'undefined') {
-      throw new Error('Math rendering requires a DOM (browser environment)');
-    }
-    await loadScript(resolveAssetUrl());
+    const resolvedAssetUrl = normalizedAssetUrl(assetUrl);
+    if (typeof document === 'undefined') await loadWorkerModule(resolvedAssetUrl);
+    else await loadScript(resolvedAssetUrl);
     const engine = (globalThis as any).__ooxmlStix2 as Stix2Engine | undefined;
     if (!engine) throw new Error('Math engine failed to initialize');
     return engine;
@@ -78,9 +92,25 @@ export async function loadMathJax(): Promise<void> {
   await ensureEngine();
 }
 
+/** Internal worker entry: use the asset URL resolved by the consumer bundler
+ * in the main realm instead of resolving relative to an opaque worker asset. */
+export async function loadMathJaxFromAsset(assetUrl: string): Promise<void> {
+  await ensureEngine(assetUrl);
+}
+
 /** Convert a MathML string to a standalone SVG + its baseline-relative extents. */
 export async function mathMLToSvg(mathml: string): Promise<MathSvg> {
   const engine = await ensureEngine();
+  const svg = engine.mathml2svg(mathml);
+  return { svg, ...svgExtents(svg) };
+}
+
+/** Internal worker entry paired with {@link loadMathJaxFromAsset}. */
+export async function mathMLToSvgFromAsset(
+  mathml: string,
+  assetUrl: string,
+): Promise<MathSvg> {
+  const engine = await ensureEngine(assetUrl);
   const svg = engine.mathml2svg(mathml);
   return { svg, ...svgExtents(svg) };
 }

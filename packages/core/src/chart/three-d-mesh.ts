@@ -369,7 +369,7 @@ export function buildThreeDPieSectorMesh(
     || !(endAngle > startAngle)) return null;
   const sweep = Math.min(Math.PI * 2, endAngle - startAngle);
   const fullSweep = sweep >= Math.PI * 2 - 1e-9;
-  const segments = Math.max(2, Math.min(64, Math.trunc(options.segments
+  const segments = Math.max(2, Math.min(128, Math.trunc(options.segments
     ?? Math.ceil(DEFAULT_THREE_D_ROUND_SEGMENTS * sweep / (Math.PI * 2)))));
   const topY = centerY - thickness / 2;
   const bottomY = centerY + thickness / 2;

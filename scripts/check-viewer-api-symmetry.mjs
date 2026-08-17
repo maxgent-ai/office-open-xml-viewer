@@ -283,7 +283,9 @@ for (const relativePath of ['docs/api-architecture-0.76.md', 'docs/api-architect
 
 const publicGuide = readFileSync(path.join(root, 'site/src/components/ApiReference.astro'), 'utf8');
 for (const token of [
-  'Choose one loading mode',
+  'Load once for one Viewer or share one document',
+  'For most applications',
+  'When several views need the same document',
   'viewer.load(source)',
   'DocxDocument',
   'PptxPresentation',
@@ -291,8 +293,9 @@ for (const token of [
   "factory: 'fromDocument()'",
   "factory: 'fromPresentation()'",
   "factory: 'fromWorkbook()'",
-  'mutually exclusive',
-  'caller must destroy the borrowed engine',
+  'Those Viewers cannot replace the file',
+  'your application must destroy the shared engine',
+  "engine's mode is authoritative",
 ]) {
   if (!publicGuide.includes(token)) fail(`official-site ownership guide is missing: ${token}`);
 }

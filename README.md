@@ -79,7 +79,7 @@ pnpm add @silurus/ooxml
 > **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
 > Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
 > asset, so the reported figure is much larger than any single app build. For
-> v0.78.1, the complete npm package is approximately 12.0 MB unpacked (4.0 MB
+> v0.79.0, the complete npm package is approximately 13.0 MB unpacked (4.3 MB
 > as the downloaded tarball), while a format-specific application graph is
 > approximately:
 >
@@ -89,7 +89,7 @@ pnpm add @silurus/ooxml
 > | `@silurus/ooxml/xlsx` | 2.6 MB | 0.82 MB | XLSX renderer, parser WASM, and lazy worker |
 > | `@silurus/ooxml/pptx` | 2.5 MB | 0.78 MB | PPTX renderer, parser WASM, and lazy worker |
 > | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
-> | `@silurus/ooxml/three-d` | 79 KB | 23 KB | Optional model-space 3-D chart mesh and camera |
+> | `@silurus/ooxml/three-d` | 92 KB | 27 KB | Optional model-space 3-D chart mesh and camera |
 > | `@silurus/ooxml/region-map` | 236 KB | 66 KB | Optional offline Region Map renderer and fixed country geometry |
 >
 > These are production-artifact estimates, not initial-load figures: each row
@@ -105,9 +105,10 @@ pnpm add @silurus/ooxml
 > and the loader chunk never enters your graph at all.
 >
 > The 3-D chart and Region Map renderers follow the same dependency-injection
-> boundary: import and pass only the addons an application needs. Ordinary
-> format entries do not reach either optional implementation, so bundlers can
-> tree-shake their mesh code and fixed geographic asset completely.
+> boundary: import and pass only the optional renderer modules an application
+> needs. Their implementations are not eagerly loaded or evaluated in main
+> mode. Worker mode fetches a self-contained render-worker asset that includes
+> the worker-side built-ins, so consumer bundlers can copy it safely.
 
 ---
 
@@ -182,8 +183,8 @@ OMML equations (`m:oMath` / `m:oMathPara`) in `.docx`, `.pptx` and `.xlsx` are r
 [MathJax](https://www.mathjax.org/) + [STIX Two Math](https://github.com/stipub/stixfonts).
 That engine is ~3 MB, so it is **opt-in**: import the `math` engine from the separate
 `@silurus/ooxml/math` entry and pass it to the viewer. Pass it and equations render;
-omit it and the engine is referenced nowhere, so a bundler leaves it out of your build
-entirely (equations are simply skipped). When you *do* pass it, the ~3 MB engine ships
+omit it and the engine asset is not fetched or evaluated (equations are simply skipped;
+the on-demand render-worker asset retains a small loader). When you *do* pass it, the ~3 MB engine ships
 as a **standalone asset file** next to the bundle rather than an inline data URL, and is
 fetched **on demand — only the first time a document actually contains an equation**, so
 equation-free documents never pay for it. It is fully self-contained: served from your own
@@ -209,9 +210,9 @@ shapes / text boxes the same way.)
 ### Optional chart renderers
 
 Model-space 3-D charts and offline country-level Region Maps are separate
-entries. Inject them once in the same load options object as `math`; omitting an
-addon keeps it out of the application graph. They currently render on the main
-thread, so use `mode: 'main'` (the default). Without `threeD`, 3-D chart groups
+entries. Inject them once in the same load options object as `math`; omitting a
+renderer keeps it out of the ordinary render path. The built-in renderers work
+in both main and worker modes. Without `threeD`, 3-D chart groups
 fall back to their canonical 2-D family. Without `regionMap`, Region Maps show
 the standard unsupported-chart placeholder.
 
@@ -224,12 +225,12 @@ const container = document.getElementById('xlsx-container') as HTMLElement;
 const workbookViewer = new XlsxViewer(container, {
   threeD,
   regionMap,
-  mode: 'main',
+  mode: 'worker',
 });
 await workbookViewer.load('/workbook-with-advanced-charts.xlsx');
 ```
 
-The Region Map addon is deterministic and network-free. It uses a pinned
+The Region Map renderer is deterministic and network-free. It uses a pinned
 Natural Earth country dataset, supports authored world projections and
 two/three-stop value ramps, and fails closed for cached identities or
 sub-country/view-specific layouts that the bounded offline model cannot yet
@@ -240,8 +241,8 @@ chart behavior is documented in
 ### Off-main-thread rendering
 
 By default the headless engines parse in a worker but render on the main thread.
-Pass `mode: 'worker'` to `.load()` to parse **and** render entirely inside a Web
-Worker — the main thread only paints the returned `ImageBitmap` via a
+Pass `mode: 'worker'` to `.load()` to normally parse **and** render inside a Web
+Worker — the main thread presents the returned `ImageBitmap` via a
 `bitmaprenderer` context, keeping it free for scrolling and input. It requires
 `Worker` + `OffscreenCanvas`.
 
@@ -271,8 +272,14 @@ Notes:
 - The canvas-target methods (`renderSlide(canvas)`, `renderPage(canvas)`,
   `renderViewport(canvas)`) are unavailable in worker mode — use the `*ToBitmap`
   variants instead.
-- OMML equations require `mode: 'main'`; in worker mode they are skipped (with a
-  console warning).
+- The built-in math, 3-D chart, and Region Map renderers work in both modes
+  through the same `math`, `threeD`, and `regionMap` options. Custom renderer
+  objects are main-realm code and therefore use the feature's documented
+  fallback in `mode: 'worker'`.
+- A DOCX document that requires browser-only OpenType vertical-glyph selection
+  automatically uses effective main mode for correct shaping. Read
+  `document.mode` after loading when your integration needs to observe this
+  fallback.
 - Trade-off: worker mode keeps the main thread responsive, but each frame is
   transferred back as an `ImageBitmap`, so a single render can be marginally
   slower than `mode: 'main'`. Choose it for non-blocking UI, not raw speed.

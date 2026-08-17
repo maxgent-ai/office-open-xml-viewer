@@ -28,7 +28,9 @@ const XLSX_FILES: { name: string; sheetCount: number }[] = [
   { name: 'private/sample-12', sheetCount: 8 },
   { name: 'private/sample-13', sheetCount: 2 },
   { name: 'private/sample-14', sheetCount: 2 },
-  { name: 'private/sample-15', sheetCount: 2 },
+  // Keep Plot Area, Legend, Titles, and Labels in the private self-VRT. The
+  // fifth sheet is source data without chart-renderer coverage.
+  { name: 'private/sample-15', sheetCount: 4 },
   { name: 'private/sample-16', sheetCount: 2 },
   { name: 'private/sample-17', sheetCount: 2 },
   { name: 'private/sample-18', sheetCount: 2 },

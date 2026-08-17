@@ -131,6 +131,12 @@ export interface ChartThreeDProjectionOptions {
    * axis the chart family occupies before projection.
    */
   sceneDepthScale?: number;
+  /**
+   * Compatibility multiplier applied to tan(FOV / 2). The default preserves
+   * the Office line/area boundary corpus; callers with an Office view whose
+   * authored FOV is observed directly can opt into the normative gain of 1.
+   */
+  perspectiveTangentGain?: number;
   /** Model-space scene height as a fraction of scene width when the chart has
    * no authored hPercent. Radial solids use their actual shallow Y extent
    * instead of fitting an otherwise empty full-height cartesian cuboid. */
@@ -266,13 +272,18 @@ export function planChartThreeDProjection(
   const sinPitch = Math.sin(pitch);
   const perspectiveEnabled = view.rightAngleAxes !== true && perspective > 0;
   // ECMA-376 §21.2.2.136 stores the full field-of-view in half-degree units,
-  // hence the normative pinhole half-angle is value * 0.25°. Office's fitted
-  // plot uses a stronger, but still monotonic, perspective response: the local
-  // vector boundary corpus matches a 2× tangent gain. Keep that observed
-  // compatibility rule explicit instead of mislabelling the full FOV as a
-  // half-angle. atan() keeps the complete 0..240 schema range below 90°.
+  // hence the normative pinhole half-angle is value * 0.25°. Existing Office
+  // line/area vectors require a stronger fitted response, while measured
+  // standard Bar views use the normative response. Keep this compatibility
+  // choice explicit and family-scoped instead of changing the authored angle.
+  // atan() keeps the complete 0..240 schema range below 90°.
   const normativeHalfAngle = clamp(perspective * 0.25, 0.25, 60) * radians;
-  const perspectiveHalfAngle = Math.atan(2 * Math.tan(normativeHalfAngle));
+  const perspectiveTangentGain = clamp(
+    finiteOr(options.perspectiveTangentGain, 2), 0.25, 4,
+  );
+  const perspectiveHalfAngle = Math.atan(
+    perspectiveTangentGain * Math.tan(normativeHalfAngle),
+  );
   const sceneDiagonal = Math.hypot(scene.w, scene.h, depthMagnitude);
   const requestedCameraDistance = perspectiveEnabled
     ? sceneDiagonal * 0.5 / Math.tan(perspectiveHalfAngle)

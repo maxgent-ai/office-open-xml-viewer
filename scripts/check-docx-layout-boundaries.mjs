@@ -112,6 +112,9 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['imageNaturalSize', 'value'],
     ['isHTMLCanvas', 'value'],
     ['mathToMathML', 'value'],
+    // Math engine output is decoded before layout; paint consumes only the
+    // resulting CanvasImageSource keyed by the immutable resource record.
+    ['rasterizeMathSvg', 'value'],
     ['metafileRasterSize', 'value'],
     ['paintDrawingMLShape', 'value'],
     ['withVertFeature', 'value'],
@@ -124,7 +127,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['recolorSvg', 'value'],
     ['renderChart', 'value'],
     ['withDrawingMLShapeTransform', 'value'],
-    // Optional chart addons are paint-only capabilities threaded into the
+    // Optional chart renderers are paint-only capabilities threaded into the
     // existing shared chart painter. Their erased contracts do not expose
     // layout acquisition or permit a renderer back-edge.
     ['ChartThreeDRenderer', 'type'],

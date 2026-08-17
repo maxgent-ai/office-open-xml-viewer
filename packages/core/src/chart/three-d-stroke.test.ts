@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildProjectedStrokeJunction,
   buildProjectedStrokePrimitives,
   MAX_PROJECTED_STROKE_PRIMITIVES,
 } from './three-d-stroke';
@@ -7,6 +8,18 @@ import {
 const point = (x: number, y: number, cameraDepth = x) => ({ x, y, cameraDepth });
 
 describe('buildProjectedStrokePrimitives', () => {
+  it('fills a degree-three mesh junction once without authored endpoint caps', () => {
+    const junction = buildProjectedStrokeJunction(
+      point(0, 0),
+      [point(-10, 0), point(0, -10), point(10, 0)],
+      { width: 2, lineJoin: 'miter' },
+    );
+    expect(junction?.kind).toBe('join');
+    expect(junction?.points.length).toBeGreaterThanOrEqual(3);
+    expect(junction?.points.every(value =>
+      Math.abs(value.x) <= 1.000001 && Math.abs(value.y) <= 1.000001)).toBe(true);
+  });
+
   it('keeps a solid polyline as segment geometry with one authored miter join', () => {
     const primitives = buildProjectedStrokePrimitives(
       [point(0, 0), point(10, 0), point(10, 10)],
@@ -17,6 +30,25 @@ describe('buildProjectedStrokePrimitives', () => {
     expect(primitives.filter(item => item.kind === 'cap')).toHaveLength(0);
     expect(primitives.flatMap(item => item.points)
       .every(item => Number.isFinite(item.x) && Number.isFinite(item.y))).toBe(true);
+    const segments = primitives.filter(item => item.kind === 'segment');
+    // The two independently painted polygons overlap below the join along
+    // their tangents, but keep the authored 2px normal thickness.
+    expect(Math.max(...segments[0].points.map(item => item.x))).toBeGreaterThan(10);
+    expect(Math.min(...segments[1].points.map(item => item.y))).toBeLessThan(0);
+    expect(Math.max(...segments[0].points.map(item => item.y))
+      - Math.min(...segments[0].points.map(item => item.y))).toBe(2);
+  });
+
+  it('overlaps a mesh-junction endpoint without changing stroke thickness', () => {
+    const primitives = buildProjectedStrokePrimitives(
+      [point(0, 0), point(10, 0)],
+      { width: 2, lineCap: 'butt', overlapStart: true },
+    ) ?? [];
+    const segment = primitives.find(item => item.kind === 'segment');
+    expect(segment).toBeDefined();
+    expect(Math.min(...segment!.points.map(item => item.x))).toBeLessThan(0);
+    expect(Math.max(...segment!.points.map(item => item.y))
+      - Math.min(...segment!.points.map(item => item.y))).toBe(2);
   });
 
   it('continues dash phase across source vertices instead of restarting it', () => {

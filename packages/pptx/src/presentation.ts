@@ -21,6 +21,7 @@ import {
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
   type OoxmlResourceMetrics,
+  workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
@@ -36,6 +37,7 @@ import {
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
   type PullSessionResponse,
+  type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { PPTX_GOOGLE_FONTS } from './google-fonts';
@@ -180,7 +182,7 @@ export class PptxPresentation {
   private readonly _fetchMedia = (path: string): Promise<Blob> => this.getMedia(path);
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderSlide` / `presentSlide` reuses it — equations render when present,
-   *  and are skipped (engine tree-shaken) when omitted. */
+   *  and are skipped when omitted. */
   private _math: MathRenderer | undefined;
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
@@ -269,25 +271,26 @@ export class PptxPresentation {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
+    const rendererDescriptors = mode === 'worker' ? workerRendererDescriptors(opts) : undefined;
     let pres: PptxPresentation | undefined;
     try {
       pres = new PptxPresentation(worker, mode, opts.wasmUrl);
       pres._metrics = metrics;
-      if (opts.math && mode === 'worker') {
+      if (opts.math && mode === 'worker' && !rendererDescriptors?.math) {
         console.warn(
-          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+          "[ooxml] a custom math renderer cannot cross the worker boundary; equations will be skipped in mode: 'worker'. Use the math renderer from @silurus/ooxml/math.",
         );
       }
-      if (opts.threeD && mode === 'worker') {
+      if (opts.threeD && mode === 'worker' && !rendererDescriptors?.threeD) {
         console.warn(
-          "[ooxml] the 3-D chart addon is unavailable in mode: 'worker'; charts use their 2-D family fallback. Use mode: 'main' for authored 3-D charts.",
+          "[ooxml] a custom 3-D chart renderer cannot cross the worker boundary; charts use their 2-D family fallback in mode: 'worker'. Use the renderer from @silurus/ooxml/three-d.",
         );
       }
       pres._math = mode === 'worker' ? undefined : opts.math;
       pres._threeD = mode === 'worker' ? undefined : opts.threeD;
-      if (opts.regionMap && mode === 'worker') {
+      if (opts.regionMap && mode === 'worker' && !rendererDescriptors?.regionMap) {
         console.warn(
-          "[ooxml] the Region Map addon is unavailable in mode: 'worker'; geospatial charts use the unsupported-chart placeholder. Use mode: 'main' for Region Maps.",
+          "[ooxml] a custom Region Map renderer cannot cross the worker boundary; geospatial charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/region-map.",
         );
       }
       pres._regionMap = mode === 'worker' ? undefined : opts.regionMap;
@@ -297,6 +300,7 @@ export class PptxPresentation {
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
+        rendererDescriptors,
       );
       metrics.checkpoint('presentation preflight ready');
       if (mode === 'main' && opts.useGoogleFonts && pres._preflight) {
@@ -324,11 +328,12 @@ export class PptxPresentation {
     useGoogleFonts = false,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
+    renderers?: WorkerRendererDescriptors,
   ): Promise<void> {
     const response = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts } satisfies RenderWorkerRequest)
+          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers } satisfies RenderWorkerRequest)
           : ({ kind: 'parse', id, buffer, resourcePolicy } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },

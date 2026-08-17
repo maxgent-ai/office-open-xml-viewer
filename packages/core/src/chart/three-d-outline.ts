@@ -4,6 +4,16 @@ const POINT_EPSILON = 1e-9;
 
 export type ThreeDOutlineEdge = readonly [ThreeDScenePoint, ThreeDScenePoint];
 
+export interface ThreeDOutlineJunction {
+  point: ThreeDScenePoint;
+  neighbours: ThreeDScenePoint[];
+}
+
+export interface ThreeDOutlineTopology {
+  paths: ThreeDScenePoint[][];
+  junctions: ThreeDOutlineJunction[];
+}
+
 interface OutlineNode {
   point: ThreeDScenePoint;
   edges: number[];
@@ -61,9 +71,9 @@ function canonicalClosedPath(path: ThreeDScenePoint[]): ThreeDScenePoint[] {
  * arbitrary branches would make dash phase and join geometry depend on face
  * enumeration order. All-degree-two components remain closed paths.
  */
-export function buildThreeDOutlinePaths(
+export function buildThreeDOutlineTopology(
   sourceEdges: readonly ThreeDOutlineEdge[],
-): ThreeDScenePoint[][] {
+): ThreeDOutlineTopology {
   // A renderer mesh is schema-bounded to at most 64 radial segments. Keeping
   // epsilon clustering local to one mesh avoids a global spatial index while
   // preserving coincident vertices emitted with different mesh indices.
@@ -138,5 +148,22 @@ export function buildThreeDOutlinePaths(
     const start = edge.first.order <= edge.second.order ? edge.first : edge.second;
     paths.push(canonicalClosedPath(walk(start, edgeIndex)));
   }
-  return paths.sort(comparePaths);
+  const junctions = nodes
+    .filter(node => node.edges.length > 2)
+    .map(node => ({
+      point: node.point,
+      neighbours: node.edges
+        .map(edgeIndex => {
+          const edge = edges[edgeIndex];
+          return edge.first === node ? edge.second.point : edge.first.point;
+        })
+        .sort(comparePoints),
+    }));
+  return { paths: paths.sort(comparePaths), junctions };
+}
+
+export function buildThreeDOutlinePaths(
+  sourceEdges: readonly ThreeDOutlineEdge[],
+): ThreeDScenePoint[][] {
+  return buildThreeDOutlineTopology(sourceEdges).paths;
 }

@@ -4,6 +4,83 @@ import { announcements } from './lib/announcements';
 
 const articlePage = readFileSync(new URL('./pages/announcements/[slug].astro', import.meta.url), 'utf8');
 
+describe('v0.80 worker rendering announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v080-worker-rendering');
+
+  it('presents worker rendering as a released compatible minor version', () => {
+    expect(announcement).toBeDefined();
+    expect(announcement).toMatchObject({ label: 'Release note', version: 'v0.80.0' });
+    expect(announcement?.summary).toContain('extends the existing');
+    expect(announcement?.summary).not.toContain('adds one worker rendering mode');
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections[0]?.paragraphs.join(' ')).toContain('introduced in v0.59.0');
+    expect(announcement?.sections[0]?.paragraphs.join(' ')).toContain('Main-thread mode remains the default');
+  });
+
+  it('states the main-thread boundary and production trade-offs', () => {
+    const text = announcement?.sections.flatMap((section) => [
+      section.title,
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+
+    expect(text).toContain('Choose the mode that fits your app');
+    expect(text).toContain('Use main mode for smaller documents');
+    expect(text).toContain('Use worker mode when larger or more complex documents');
+    expect(text).toContain("mode: 'worker'");
+    expect(text).toContain('published render worker is therefore self-contained');
+    expect(text).toContain('larger self-contained worker asset');
+    expect(text).toContain('transfers a rendered bitmap for each frame');
+    expect(text).toContain('equations, 3-D charts and Region Maps');
+    expect(text).toContain('structured-clone boundary');
+    expect(text).toContain('opaque asset');
+    expect(text).toContain('size-bounded surface');
+    expect(text).toContain('cached at 64 px/em');
+    expect(text).toContain('pixel-identical');
+    expect(text).toContain('automatically uses main mode');
+  });
+});
+
+describe('v0.79 chart rendering announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v079-chart-rendering-addons');
+
+  it('publishes the release and states the opt-in decision before implementation detail', () => {
+    expect(announcement).toBeDefined();
+    expect(announcement?.label).toBe('Release note');
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    const summary = announcement?.sections[0]?.paragraphs.join(' ') ?? '';
+    expect(summary).toContain('optional renderer modules');
+    expect(summary).toContain('No migration');
+  });
+
+  it('documents module boundaries, Region Map provenance and fidelity scope', () => {
+    const text = announcement?.sections.flatMap((section) => [
+      ...(section.modules ?? []),
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+    expect(text).toContain('@silurus/ooxml/three-d');
+    expect(text).toContain('@silurus/ooxml/region-map');
+    expect(text).toContain('Natural Earth');
+    expect(text).toContain('country-level world maps');
+    expect(text).toContain('main thread');
+    expect(text).not.toContain('interactive orbit');
+    expect(text).not.toContain('copied from Excel or Bing');
+  });
+
+  it('uses one local renderer-produced image with explicit provenance', () => {
+    expect(announcement?.image).toMatchObject({
+      src: '/announcements/chart-rendering-v079.webp',
+    });
+    expect(announcement?.image?.alt).toContain('synthetic');
+    expect(announcement?.image?.caption).toContain('Natural Earth');
+    expect(articlePage).toContain('announcement.image');
+    expect(articlePage).toContain('<figcaption>');
+  });
+});
+
 describe('resource-governance announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v075-resource-governance');
 

@@ -29,6 +29,22 @@ describe('automatic trendline label placement', () => {
     })).toEqual({ x: 40, y: 60, w: 100, h: 30, automatic: false });
   });
 
+  it('uses the Office automatic column and follows only the fitted endpoint height', () => {
+    expect(placeTrendlineLabel(CHART, PLOT, 90, 30, 10, null, { x: 220, y: 180 }))
+      .toEqual({ x: 185, y: 152.5, w: 90, h: 30, automatic: true });
+    expect(placeTrendlineLabel(CHART, PLOT, 90, 30, 10, null, { x: 999, y: -10 }))
+      .toEqual({ x: 185, y: 40, w: 90, h: 30, automatic: true });
+  });
+
+  it.each([{ width: 55 }, { width: 90 }, { width: 140 }])(
+    'keeps the measured block right edge at 75% of plot width ($width px)',
+    ({ width }) => {
+      const placed = placeTrendlineLabel(CHART, PLOT, width, 24, 8, null, { x: 999, y: 120 });
+      expect((placed?.x ?? 0) + (placed?.w ?? 0)).toBe(PLOT.x + PLOT.w * 0.75);
+      expect((placed?.y ?? 0) + (placed?.h ?? 0)).toBe(122);
+    },
+  );
+
   it.each([
     { x: 10, y: 20, w: 600, h: 120 },
     { x: 10, y: 20, w: 120, h: 600 },

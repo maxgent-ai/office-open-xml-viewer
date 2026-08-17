@@ -12,10 +12,11 @@ import {
   renderSimpleThreeDChart,
 } from '../packages/core/src/chart/three-d-renderer.js';
 import type { ChartThreeDRenderer } from '../packages/core/src/chart/three-d-contract.js';
+import { registerBuiltinWorkerRenderer } from '../packages/core/src/worker/renderer-module-contract.js';
 
 /** The optional model-space mesh/camera/material chart renderer. */
-export const threeD: ChartThreeDRenderer = {
+export const threeD: ChartThreeDRenderer = registerBuiltinWorkerRenderer({
   render: renderSimpleThreeDChart,
-};
+}, 'threeD');
 
 export type { ChartThreeDRenderer } from '../packages/core/src/chart/three-d-contract.js';

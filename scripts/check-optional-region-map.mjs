@@ -27,12 +27,12 @@ function assertAbsent(files, marker, entry) {
   if (hit) throw new Error(`${entry} unexpectedly reaches ${marker} via ${basename(hit.file)}`);
 }
 
-const addon = await dependencyClosure('region-map.mjs');
-const addonModule = await import(pathToFileURL(join(distDir, 'region-map.mjs')).href);
-if (typeof addonModule.regionMap?.render !== 'function') {
+const rendererClosure = await dependencyClosure('region-map.mjs');
+const rendererModule = await import(pathToFileURL(join(distDir, 'region-map.mjs')).href);
+if (typeof rendererModule.regionMap?.render !== 'function') {
   throw new Error('region-map.mjs does not export a usable Region Map renderer');
 }
-if (!addon.some(({ source }) => source.includes(implementationMarker))) {
+if (!rendererClosure.some(({ source }) => source.includes(implementationMarker))) {
   throw new Error('region-map.mjs does not reach the fixed offline geometry implementation');
 }
 

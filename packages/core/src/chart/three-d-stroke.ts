@@ -23,6 +23,11 @@ export interface ProjectedStrokeOptions {
   readonly startCap?: CanvasLineCap;
   /** Cap at the authored/path end. */
   readonly endCap?: CanvasLineCap;
+  /** The path endpoint is covered by another edge/junction of the same mesh.
+   * Extend the segment slightly below that join so independent antialiased
+   * polygons cannot expose a hairline crack at the shared vertex. */
+  readonly overlapStart?: boolean;
+  readonly overlapEnd?: boolean;
   readonly lineJoin?: CanvasLineJoin;
   readonly miterLimit?: number;
 }
@@ -152,6 +157,54 @@ const circle = (
   return primitive(kind, points);
 };
 
+/** Fill one mesh-graph junction after its incident edges have been split into
+ * deterministic paths. Canvas has no degree-three lineJoin primitive; this
+ * bounded screen-space patch closes the half-width gaps without painting any
+ * edge twice or adding caps at an internal solid vertex. */
+export function buildProjectedStrokeJunction(
+  center: ProjectedStrokePoint,
+  neighbours: readonly ProjectedStrokePoint[],
+  options: Pick<ProjectedStrokeOptions, 'width' | 'lineJoin'>,
+): ProjectedStrokePrimitive | null {
+  const width = Number.isFinite(options.width) ? Math.max(0, options.width) : 0;
+  if (!(width > EPSILON) || neighbours.length < 3) return null;
+  const half = width / 2;
+  if ((options.lineJoin ?? 'miter') === 'round') return circle(center, half, 'join');
+  const candidates: ProjectedStrokePoint[] = [];
+  for (const neighbour of neighbours) {
+    const dx = neighbour.x - center.x;
+    const dy = neighbour.y - center.y;
+    const length = Math.hypot(dx, dy);
+    if (!(length > EPSILON)) continue;
+    const nx = -dy / length * half;
+    const ny = dx / length * half;
+    candidates.push(
+      { ...center, x: center.x + nx, y: center.y + ny },
+      { ...center, x: center.x - nx, y: center.y - ny },
+    );
+  }
+  if (candidates.length < 3) return null;
+  candidates.sort((left, right) => left.x - right.x || left.y - right.y);
+  const cross = (
+    origin: ProjectedStrokePoint,
+    left: ProjectedStrokePoint,
+    right: ProjectedStrokePoint,
+  ) => (left.x - origin.x) * (right.y - origin.y)
+    - (left.y - origin.y) * (right.x - origin.x);
+  const lower: ProjectedStrokePoint[] = [];
+  for (const candidate of candidates) {
+    while (lower.length >= 2 && cross(lower.at(-2)!, lower.at(-1)!, candidate) <= EPSILON) lower.pop();
+    lower.push(candidate);
+  }
+  const upper: ProjectedStrokePoint[] = [];
+  for (const candidate of [...candidates].reverse()) {
+    while (upper.length >= 2 && cross(upper.at(-2)!, upper.at(-1)!, candidate) <= EPSILON) upper.pop();
+    upper.push(candidate);
+  }
+  const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  return hull.length >= 3 ? primitive('join', hull) : null;
+}
+
 const lineIntersection = (
   first: ProjectedStrokePoint,
   firstDirection: { x: number; y: number },
@@ -217,8 +270,18 @@ export function buildProjectedStrokePrimitives(
       const normal = { x: -direction.y * half, y: direction.x * half };
       const isStart = index === 0;
       const isEnd = index + 2 === fragment.length;
-      const startExtension = !closedFragment && isStart && fragmentStartCap === 'square' ? half : 0;
-      const endExtension = !closedFragment && isEnd && fragmentEndCap === 'square' ? half : 0;
+      // Separate stroke polygons meeting exactly at one sub-pixel coordinate
+      // can each antialias against the background, leaving a white seam even
+      // though their mathematical union is closed. Internal joins overlap by
+      // at most half a pixel along the tangent only; stroke thickness and the
+      // authored outer caps remain unchanged.
+      const joinOverlap = Math.min(0.5, half / 2);
+      const internalStart = closedFragment || !isStart || options.overlapStart === true;
+      const internalEnd = closedFragment || !isEnd || options.overlapEnd === true;
+      const startExtension = !closedFragment && isStart && fragmentStartCap === 'square'
+        ? half : internalStart ? joinOverlap : 0;
+      const endExtension = !closedFragment && isEnd && fragmentEndCap === 'square'
+        ? half : internalEnd ? joinOverlap : 0;
       const start = {
         ...fragment[index],
         x: fragment[index].x - direction.x * startExtension,

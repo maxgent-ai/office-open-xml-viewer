@@ -12,8 +12,8 @@
 <canvas id="canvas"></canvas>
 <script type="module">
   import { DocxDocument } from '/src/index.ts';
-  import { threeD } from '@ooxml-test-three-d-addon';
-  import { regionMap } from '@ooxml-test-region-map-addon';
+  import { threeD } from '@ooxml-test-three-d-renderer';
+  import { regionMap } from '@ooxml-test-region-map-renderer';
 
   const params = new URLSearchParams(location.search);
   const file = params.get('file') ?? 'sample-1.docx';

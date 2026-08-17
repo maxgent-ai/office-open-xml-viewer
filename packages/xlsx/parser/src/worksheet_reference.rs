@@ -874,6 +874,7 @@ mod tests {
         let rows = vec![Row {
             index: 1,
             height: None,
+            custom_height: false,
             cells: vec![
                 crate::Cell {
                     col: 1,

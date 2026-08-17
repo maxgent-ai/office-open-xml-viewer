@@ -9,15 +9,22 @@
   <canvas id="worker-canvas"></canvas>
   <script type="module">
     import { XlsxWorkbook } from '/src/index.ts';
+    import { math } from '@ooxml-test-math-renderer';
+    import { threeD } from '@ooxml-test-three-d-renderer';
+    import { regionMap } from '@ooxml-test-region-map-renderer';
 
     const params = new URLSearchParams(location.search);
     const name = params.get('xlsx') ?? 'demo/sample-1';
     const sheet = Math.max(0, parseInt(params.get('sheet') ?? '0', 10));
-    const viewport = { row: 1, col: 1, rows: 40, cols: 12 };
+    const viewport = {
+      row: Math.max(1, parseInt(params.get('row') ?? '1', 10)),
+      col: Math.max(1, parseInt(params.get('col') ?? '1', 10)),
+      rows: Math.max(1, parseInt(params.get('rows') ?? '40', 10)),
+      cols: Math.max(1, parseInt(params.get('cols') ?? '12', 10)),
+    };
     const width = 1280;
     const height = 720;
     const dpr = 1;
-
     try {
       const resp = await fetch(`/${name}.xlsx`);
       if (!resp.ok) throw new Error(`fetch ${name}.xlsx -> ${resp.status}`);
@@ -31,11 +38,12 @@
         bmp.close();
       };
 
-      const main = await XlsxWorkbook.load(buf.slice(0), { useGoogleFonts: true });
+      const renderers = { math, threeD, regionMap };
+      const main = await XlsxWorkbook.load(buf.slice(0), { useGoogleFonts: true, ...renderers });
       paint('main-canvas', await main.renderViewportToBitmap(sheet, viewport, { width, height, dpr }));
       main.destroy();
 
-      const wk = await XlsxWorkbook.load(buf.slice(0), { mode: 'worker', useGoogleFonts: true });
+      const wk = await XlsxWorkbook.load(buf.slice(0), { mode: 'worker', useGoogleFonts: true, ...renderers });
       paint('worker-canvas', await wk.renderViewportToBitmap(sheet, viewport, { width, height, dpr }));
 
       // Exercises the worker `parseSheet` round-trip that getWorksheet /

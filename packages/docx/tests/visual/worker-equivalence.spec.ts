@@ -44,3 +44,45 @@ for (const pageIndex of PAGES) {
     expect(pct).toBeLessThanOrEqual(MAX_DIFF_PCT[pageIndex]);
   });
 }
+
+test('worker mode renders non-empty equation pixels through the same math renderer', async ({ page }) => {
+  await page.goto('/tests/visual/math-worker-equivalence.html');
+  await page.waitForFunction(
+    () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+    { timeout: 60_000 },
+  );
+  const status = await page.evaluate(() => document.body.dataset.status);
+  if (status === 'error') {
+    throw new Error(await page.evaluate(() => document.body.dataset.errorMessage ?? ''));
+  }
+
+  const [mainUrl, workerUrl] = await page.evaluate(() => [
+    (document.getElementById('main-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+    (document.getElementById('worker-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+  ]);
+  const main = PNG.sync.read(Buffer.from(mainUrl.split(',')[1], 'base64'));
+  const worker = PNG.sync.read(Buffer.from(workerUrl.split(',')[1], 'base64'));
+  expect(worker.width).toBe(main.width);
+  expect(worker.height).toBe(main.height);
+  let inkPixels = 0;
+  for (let offset = 0; offset < main.data.length; offset += 4) {
+    if (main.data[offset] < 240
+      || main.data[offset + 1] < 240
+      || main.data[offset + 2] < 240) {
+      inkPixels++;
+    }
+  }
+  expect(inkPixels).toBeGreaterThan(500);
+
+  const diff = pixelmatch(
+    main.data,
+    worker.data,
+    undefined,
+    main.width,
+    main.height,
+    { threshold: 0.1 },
+  );
+  const pct = (diff / (main.width * main.height)) * 100;
+  console.log(`  math renderer: worker-vs-main diff ${pct.toFixed(3)}%, ink ${inkPixels}`);
+  expect(pct).toBeLessThanOrEqual(0.01);
+});

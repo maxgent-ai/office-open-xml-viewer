@@ -25,9 +25,11 @@ import {
   PULL_SESSION_PROTOCOL,
   resourcePolicyForWasm,
   serializeWorkerError,
+  loadWorkerRenderers,
+  type LoadedWorkerRenderers,
   type PullSessionResponse,
 } from '@silurus/ooxml-core/worker';
-import { renderLayoutSourceToCanvas } from './renderer';
+import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
@@ -75,6 +77,7 @@ const documentPull = new DocumentPullWorker(
 let documentGeneration = 0;
 let fallbackPull: DocumentPullWorker | null = null;
 let doc: RetainedRenderWorkerDocumentLayout | null = null;
+let renderers: LoadedWorkerRenderers = {};
 let localMetricFontFaces: FontFace[] = [];
 const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
@@ -142,6 +145,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
       rawParts.clear();
+      renderers = await loadWorkerRenderers(req.renderers);
       // A re-parse starts a fresh document: also drop the shared decoded owner
       // (base raster + derived colour surfaces) and SVG lookup owner, symmetric
       // with DocxDocument.destroy(). The worker's `getImage`
@@ -223,11 +227,16 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       }
       const localMetrics = await loadDocxLocalFontMetrics(model);
       localMetricFontFaces = localMetrics.faces;
+      const preparedMath = renderers.math && source.mathOccurrences.length > 0
+        ? await prepareMathRuns(model, renderers.math)
+        : undefined;
       const layoutServices = createLayoutServices(source, {
         localMetrics: localMetrics.metrics,
         useGoogleFonts: !!req.useGoogleFonts,
         embeddedFaces,
         googleFaces,
+        mathResources: preparedMath?.records,
+        mathDrawables: preparedMath?.drawables,
       });
       doc = retainRenderWorkerDocumentLayout(
         source,
@@ -265,6 +274,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         fetchImage: getImage,
         layoutServices: doc.layoutServices,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
+        threeD: renderers.threeD,
+        regionMap: renderers.regionMap,
       });
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,

@@ -10,9 +10,22 @@ import {
   buildThreeDPieSectorMesh,
   buildThreeDShapeMesh,
 } from './three-d-mesh.js';
-import { bucketThreeDStackItems } from './three-d-renderer.js';
+import {
+  bucketThreeDStackItems,
+  threeDMeshOutlineWidthPx,
+  threeDPieSliceAngles,
+  threeDWallGeometry,
+} from './three-d-renderer.js';
 
 const PLOT = { x: 20, y: 10, w: 360, h: 180 };
+
+describe('threeDMeshOutlineWidthPx', () => {
+  it('matches the observed one-pixel 1pt Excel mesh edge at 100% zoom', () => {
+    expect(threeDMeshOutlineWidthPx(12_700, 4 / 3)).toBe(1);
+    expect(threeDMeshOutlineWidthPx(12_700, 8 / 3)).toBe(2);
+    expect(threeDMeshOutlineWidthPx(25_400, 4 / 3)).toBe(2);
+  });
+});
 
 describe('bucketThreeDStackItems', () => {
   it('groups a maximum-size public model with one category read per item', () => {
@@ -38,6 +51,67 @@ describe('bucketThreeDStackItems', () => {
       { categoryIndex: 2 },
       { categoryIndex: Number.NaN },
     ], 2).map(bucket => bucket.length)).toEqual([1, 0]);
+  });
+});
+
+describe('threeDWallGeometry', () => {
+  it('closes floor, side wall and back wall on identical projected edges', () => {
+    const plan = planChartThreeDProjection({
+      rotationX: 15, rotationY: 20, heightPercent: 100,
+      depthPercent: 100, perspective: 30,
+    }, PLOT, { sceneDepthScale: 1 });
+    if (!plan) throw new Error('projection not planned');
+    const walls = threeDWallGeometry(plan);
+    expect(walls.floor).toHaveLength(4);
+    expect(walls.sideWall).toHaveLength(4);
+    expect(walls.backWall).toHaveLength(4);
+    const samePoint = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+      Math.hypot(a.x - b.x, a.y - b.y) < 1e-9;
+    const sharedFloorBack = walls.floor.filter(floorPoint =>
+      walls.backWall.some(backPoint => samePoint(floorPoint, backPoint)));
+    const sharedFloorSide = walls.floor.filter(floorPoint =>
+      walls.sideWall.some(sidePoint => samePoint(floorPoint, sidePoint)));
+    const sharedSideBack = walls.sideWall.filter(sidePoint =>
+      walls.backWall.some(backPoint => samePoint(sidePoint, backPoint)));
+    expect(sharedFloorBack).toHaveLength(2);
+    expect(sharedFloorSide).toHaveLength(2);
+    expect(sharedSideBack).toHaveLength(2);
+    const sideMidX = walls.sideWall.reduce((sum, point) => sum + point.x, 0) / 4;
+    const seriesStart = plan.project(walls.seriesAxisX, walls.floorY, walls.nearDepth);
+    const seriesEnd = plan.project(walls.seriesAxisX, walls.floorY, walls.farDepth);
+    expect((seriesStart.x + seriesEnd.x) / 2).toBeGreaterThan(sideMidX);
+  });
+});
+
+describe('threeDPieSliceAngles', () => {
+  it('maps OOXML zero to twelve o’clock and advances slices clockwise', () => {
+    const first = threeDPieSliceAngles(0, 0, 0.25);
+    expect(first.leading).toBeCloseTo(Math.PI / 2, 12);
+    expect(first.start).toBeCloseTo(0, 12);
+    expect(first.end).toBeCloseTo(Math.PI / 2, 12);
+    expect(first.middle).toBeCloseTo(Math.PI / 4, 12);
+    const second = threeDPieSliceAngles(0, 0.25, 0.25);
+    expect(second.leading).toBeCloseTo(0, 12);
+    const rotated = threeDPieSliceAngles(90, 0, 0.25);
+    expect(rotated.leading).toBeCloseTo(0, 12);
+  });
+
+  it('projects the zero-degree leading ray above the pie centre', () => {
+    const plan = planChartThreeDProjection({
+      rotationX: 30, rotationY: 0, perspective: 0, depthPercent: 100,
+    }, PLOT, { sceneDepthScale: 1, sceneHeightScale: 0.15 });
+    if (!plan) throw new Error('projection not planned');
+    const angle = threeDPieSliceAngles(0, 0, 0.25).leading;
+    const centerX = plan.scene.x + plan.scene.w / 2;
+    const centerY = plan.scene.y + plan.scene.h / 2;
+    const radius = Math.min(plan.scene.w, plan.modelDepth) * 0.35;
+    const center = plan.project(centerX, centerY, 0.5);
+    const leading = plan.project(
+      centerX + Math.cos(angle) * radius,
+      centerY,
+      0.5 + Math.sin(angle) * radius / plan.modelDepth,
+    );
+    expect(leading.y).toBeLessThan(center.y);
   });
 });
 
@@ -294,6 +368,7 @@ describe('buildThreeDPieSectorMesh', () => {
     expect(mesh.faces.filter(face => face.role === 'endCap')).toHaveLength(1);
     expect(mesh.vertices).toHaveLength(34);
   });
+
 });
 
 describe('planChartThreeDProjection', () => {
@@ -414,6 +489,38 @@ describe('planChartThreeDProjection', () => {
       expect(cross(axisStart, axisEnd, dataStart)).toBeCloseTo(0, 8);
       expect(cross(axisStart, axisEnd, dataEnd)).toBeCloseTo(0, 8);
     }
+  });
+
+  it('uses the normative FOV and measured axis proportions for a standard 3-D bar', () => {
+    // The source chart's authored inner plot is 43.5000531% × 57.3076923%
+    // of a 300.75pt × 196.5pt chart. Excel's projected axes measured
+    // width:height:depth = 8.1:8.1:2.6 for the authored default view.
+    const plot = {
+      x: 0,
+      y: 0,
+      w: 300.75 * 0.4350005310065076,
+      h: 196.5 * 0.573076923076923,
+    };
+    const plan = planChartThreeDProjection({
+      rotationX: 15,
+      rotationY: 20,
+      heightPercent: 100,
+      depthPercent: 100,
+      perspective: 30,
+      rightAngleAxes: false,
+    }, plot, {
+      sceneDepthScale: 0.65,
+      perspectiveTangentGain: 1,
+    });
+    if (!plan) throw new Error('projection not planned');
+    const origin = plan.project(plan.scene.x, plan.scene.y + plan.scene.h, 0);
+    const horizontal = plan.project(plan.scene.x + plan.scene.w, plan.scene.y + plan.scene.h, 0);
+    const vertical = plan.project(plan.scene.x, plan.scene.y, 0);
+    const depth = plan.project(plan.scene.x, plan.scene.y + plan.scene.h, 1);
+    const length = (point: { x: number; y: number }) =>
+      Math.hypot(point.x - origin.x, point.y - origin.y);
+    expect(length(horizontal) / length(vertical)).toBeCloseTo(1, 1);
+    expect(length(depth) / length(vertical)).toBeCloseTo(2.6 / 8.1, 2);
   });
 
   it('keeps rotation/depth schema boundaries finite and inside the plot budget', () => {

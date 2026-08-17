@@ -5,6 +5,92 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.80.1 — 2026-08-17
+
+Patch. Corrects numeric axis-label spacing across authored chart families
+without changing the 0.80 public integration contract.
+
+- **scatter charts:** place numeric labels beyond authored outward tick marks
+  instead of allowing major ticks to enter or touch adjacent glyphs.
+- **3-D charts:** keep value and category labels clear of projected tick marks
+  while preserving the established Office-compatible axis spacing.
+- **ChartEx axes:** use an axis-relative label offset for histogram,
+  box-and-whisker, and Pareto value axes instead of scaling the offset with the
+  label font size.
+- **compatibility:** no application or API migration is required from 0.80.0.
+
+## 0.80.0 — 2026-08-16
+
+Compatible minor release. Completes built-in renderer parity between the
+existing main-thread and worker rendering modes across DOCX, XLSX, and PPTX.
+
+- **worker renderer parity:** equations, authored 3-D charts, and country-level
+  Region Maps now use the same `math`, `threeD`, and `regionMap` injection
+  options in main and worker modes.
+- **production-safe workers:** publish self-contained render workers and carry
+  consumer-resolved assets such as MathJax across the worker boundary, including
+  applications that rebundle the packages with Vite.
+- **equation quality:** use one bounded Canvas raster path in Window and Worker
+  contexts, with staged high-resolution reduction for cleaner equation output.
+- **integration guidance:** add worker file-upload examples and document how to
+  choose between main and worker rendering, including responsiveness, download,
+  frame-transfer, browser-support, and custom-renderer trade-offs.
+- **compatibility:** main mode remains the default and existing applications do
+  not require migration. DOCX content requiring browser-only vertical-glyph
+  selection automatically falls back to effective main mode for correct shaping.
+
+## 0.79.1 — 2026-08-15
+
+Patch. Corrects authored chart labels, legend frames, and automatic worksheet
+row heights without changing the 0.79 public integration contract.
+
+- **data labels:** keep series-local label settings on their authored series,
+  and apply value-axis display units consistently to generated value labels in
+  classic, ChartEx, and optional 3-D chart paths.
+- **trendline labels:** align automatic equation and R² blocks with Excel's
+  plot-relative placement while preserving authored manual layouts.
+- **legend frames:** retain explicit solid legend fills and outlines, including
+  DrawingML theme color transforms, across DOCX, XLSX, and PPTX chart hosts.
+- **worksheet row heights:** auto-fit rows that omit an authored `ht` to wrapped,
+  rich, rotated, or larger text while preserving explicit heights and excluding
+  merged cells, matching Excel's display behavior. (#1260)
+- **compatibility:** no application or API migration is required from 0.79.0.
+
+## 0.79.0 — 2026-08-14
+
+Compatible minor release. Adds opt-in advanced chart renderers and completes a
+specification-first fidelity audit across charts hosted by Word, Excel, and
+PowerPoint.
+
+- **optional 3-D charts:** add the tree-shakeable `@silurus/ooxml/three-d`
+  entry, using one homogeneous model-space camera for chart walls, axes, grids,
+  labels, and bounded meshes. It supports cartesian and pie 3-D families plus
+  authored box, cylinder, cone, cone-to-max, pyramid, and pyramid-to-max bar
+  shapes. Applications opt in on the main thread; existing integrations retain
+  the 2-D fallback.
+- **offline Region Maps:** add the tree-shakeable
+  `@silurus/ooxml/region-map` entry for country-level ChartEx world maps using
+  pinned public-domain Natural Earth geometry. Authored projections, theme
+  colors, and two/three-stop value ramps are retained; unsupported cached or
+  sub-country views fail closed without network access.
+- **shared chart fidelity:** preserve more authored axis, title, rich-label,
+  legend, point, line, fill, and Chart Style properties through the shared
+  parser/model/renderer pipeline. Automatic linear axes, explicit bounds,
+  major/minor ticks, plot margins, secondary axes, and legend layout now use
+  common bounded policies across classic and ChartEx families.
+- **specialized chart families:** improve waterfall connectors and labels,
+  Pareto and histogram axes, box-and-whisker geometry, treemap and sunburst
+  hierarchy labels, funnel, bubble, line, area, combo, and chart-sheet layout.
+  XLSX chart sheets and absolute chart anchors are retained.
+- **bounded work and package boundaries:** cap expanded 3-D primitives,
+  hierarchy/data-label work, map rows, ticks, and parser caches. The 3-D camera,
+  mesh code, and geographic asset remain outside ordinary DOCX/XLSX/PPTX entry
+  graphs unless explicitly imported.
+- **site and compatibility:** the API reference and Try Yours demo expose the
+  optional renderers consistently across all three host formats. No existing
+  option is removed or renamed; add-ons are required only for their authored
+  chart families.
+
 ## 0.78.1 — 2026-08-12
 
 Patch. Fixes a DOCX pagination regression introduced in v0.78.0 without

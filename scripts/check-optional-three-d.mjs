@@ -27,12 +27,12 @@ function assertAbsent(files, marker, entry) {
   if (hit) throw new Error(`${entry} unexpectedly reaches ${marker} via ${basename(hit.file)}`);
 }
 
-const addon = await dependencyClosure('three-d.mjs');
-const addonModule = await import(pathToFileURL(join(distDir, 'three-d.mjs')).href);
-if (typeof addonModule.threeD?.render !== 'function') {
+const rendererClosure = await dependencyClosure('three-d.mjs');
+const rendererModule = await import(pathToFileURL(join(distDir, 'three-d.mjs')).href);
+if (typeof rendererModule.threeD?.render !== 'function') {
   throw new Error('three-d.mjs does not export a usable threeD renderer');
 }
-if (!addon.some(({ source }) => source.includes(implementationMarker))) {
+if (!rendererClosure.some(({ source }) => source.includes(implementationMarker))) {
   throw new Error('three-d.mjs does not reach the mesh/camera implementation');
 }
 

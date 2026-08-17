@@ -16,6 +16,7 @@ import {
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
   type OoxmlResourceMetrics,
+  workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
@@ -28,6 +29,7 @@ import {
   readLatestOoxmlResourceMetrics,
   PULL_SESSION_PROTOCOL,
   type NormalizedOoxmlResourcePolicy,
+  type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
@@ -71,7 +73,7 @@ export interface LoadOptions extends CoreLoadOptions {
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
    * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
-   * omitted, equations are skipped and the ~3 MB engine never enters the bundle.
+   * omitted, equations are skipped and the ~3 MB engine is not loaded or evaluated.
    */
   math?: MathRenderer;
   /**
@@ -80,8 +82,9 @@ export interface LoadOptions extends CoreLoadOptions {
    * {@link DocxDocument.renderPageToBitmap} and paint the returned ImageBitmap
    * via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas. Documents
    * needing DOM-only OpenType vertical glyph selection transparently continue
-   * in main mode; {@link DocxDocument.mode} reports the effective mode. The math
-   * engine is unavailable only when the effective mode remains worker.
+   * in main mode; {@link DocxDocument.mode} reports the effective mode. Built-in
+   * optional renderers use the same injection options in both modes. Custom
+   * renderer objects use their documented fallback in worker mode.
    */
   mode?: 'main' | 'worker';
 }
@@ -216,6 +219,7 @@ export class DocxDocument {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
+    const rendererDescriptors = mode === 'worker' ? workerRendererDescriptors(opts) : undefined;
     let doc: DocxDocument | undefined;
     try {
       doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
@@ -229,6 +233,7 @@ export class DocxDocument {
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
+        rendererDescriptors,
       );
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
@@ -236,20 +241,20 @@ export class DocxDocument {
           "[ooxml] mode: 'worker' fell back to main-thread rendering because this document requires DOM OpenType vertical glyph selection.",
         );
       }
-      if (opts.math && doc._mode === 'worker') {
+      if (opts.math && doc._mode === 'worker' && !rendererDescriptors?.math) {
         console.warn(
-          "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+          "[ooxml] a custom math renderer cannot cross the worker boundary; equations will be skipped in mode: 'worker'. Use the math renderer from @silurus/ooxml/math.",
         );
       }
-      if (opts.threeD && doc._mode === 'worker') {
+      if (opts.threeD && doc._mode === 'worker' && !rendererDescriptors?.threeD) {
         console.warn(
-          "[ooxml] the 3-D chart addon is unavailable in mode: 'worker'; charts use their 2-D family fallback. Use mode: 'main' for authored 3-D charts.",
+          "[ooxml] a custom 3-D chart renderer cannot cross the worker boundary; charts use their 2-D family fallback in mode: 'worker'. Use the renderer from @silurus/ooxml/three-d.",
         );
       }
       doc._threeD = doc._mode === 'worker' ? undefined : opts.threeD;
-      if (opts.regionMap && doc._mode === 'worker') {
+      if (opts.regionMap && doc._mode === 'worker' && !rendererDescriptors?.regionMap) {
         console.warn(
-          "[ooxml] the Region Map addon is unavailable in mode: 'worker'; geospatial charts use the unsupported-chart placeholder. Use mode: 'main' for Region Maps.",
+          "[ooxml] a custom Region Map renderer cannot cross the worker boundary; geospatial charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/region-map.",
         );
       }
       doc._regionMap = doc._mode === 'worker' ? undefined : opts.regionMap;
@@ -277,8 +282,8 @@ export class DocxDocument {
       }
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
-      // equations are skipped (and the engine asset is never bundled). Math is
-      // main-mode only (the engine needs a DOM, absent in workers).
+      // equations are skipped (and the engine asset is never bundled). Worker
+      // mode performs the same preparation with the renderer's imported engine.
       let preparedMath;
       if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
         preparedMath = await prepareMathRuns(doc._document, opts.math);
@@ -333,11 +338,12 @@ export class DocxDocument {
     useGoogleFonts = false,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
+    renderers?: WorkerRendererDescriptors,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },

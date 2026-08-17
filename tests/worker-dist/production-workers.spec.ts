@@ -1,0 +1,28 @@
+import { expect, test } from '@playwright/test';
+
+async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: string) {
+  await page.goto(url);
+  await expect(page.locator('body')).toHaveAttribute('data-status', 'ready', { timeout: 60_000 });
+
+  for (const id of ['docx', 'math', 'xlsx', 'pptx']) {
+    const ink = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
+      const context = canvas.getContext('2d');
+      if (!context) return 0;
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let count = 0;
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        if (pixels[offset] < 250 || pixels[offset + 1] < 250 || pixels[offset + 2] < 250) count++;
+      }
+      return count;
+    });
+    expect(ink, `${id} worker bitmap should contain ink`).toBeGreaterThan(100);
+  }
+}
+
+test('published dist starts all three render workers with optional renderers', async ({ page }) => {
+  await expectWorkerBitmaps(page, '/');
+});
+
+test('Vite consumer bundle preserves all three render workers', async ({ page }) => {
+  await expectWorkerBitmaps(page, '/consumer/index.html');
+});

@@ -1,5 +1,6 @@
 import {
   XlsxWorkbook,
+  prepareXlsxViewerRowHeights,
   releaseXlsxViewerProjection,
   retainXlsxViewerFonts,
 } from './workbook.js';
@@ -17,6 +18,8 @@ import {
   HEADER_H,
   pxToColWidth,
   pxToRowHeight,
+  invalidateAutoRowHeights,
+  derivedAutoRowHeights,
   getGridGeometryForWorksheet,
   rtlMirrorX,
 } from './renderer.js';
@@ -282,8 +285,9 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
    * parse AND render entirely inside the worker and paint the returned
    * ImageBitmap onto the viewer's canvas, so document rendering never blocks the
    * UI thread. All interaction (scroll, sheet tabs, frozen panes, zoom, cell
-   * selection) is unchanged. Requires `Worker` + `OffscreenCanvas`. Equations
-   * require `'main'` (the math engine cannot cross the worker boundary).
+   * selection) is unchanged. Requires `Worker` + `OffscreenCanvas`. Built-in
+   * math and chart renderers are reconstructed inside the worker from their
+   * serializable stable identities.
    */
   /**
    * How hidden / veryHidden sheets (`<sheet state>`, ECMA-376 §18.2.19) are
@@ -623,6 +627,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     number,
     {
       rows: Map<number, number | null>;
+      automaticRows: Map<number, number>;
       cols: Map<number, number | null>;
       revision: number;
       wire?: WireSizeOverrides;
@@ -1181,6 +1186,13 @@ class XlsxViewerEngine implements ZoomableViewer {
       if (!await this.ensureHostFonts(workbook)) return;
       const source = await workbook.getWorksheet(index);
       worksheet = this.sheetViews.get(index) ?? createSheetViewModel(source);
+      const prepareRowHeights = workbook[prepareXlsxViewerRowHeights];
+      if (typeof prepareRowHeights === 'function') {
+        const measureCanvas = this.hostDocument.createElement('canvas');
+        const measureCtx = measureCanvas.getContext('2d');
+        if (measureCtx) prepareRowHeights.call(workbook, worksheet, measureCtx);
+      }
+      this.syncAutomaticRowOverrides(index, worksheet);
       this.sheetViews.set(index, worksheet);
     } catch (error) {
       if (!this.isCurrentSheetRequest(generation, workbook)) return;
@@ -1725,10 +1737,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (!ws) return;
     let entry = this.sizeOverrideStore.get(this.currentSheet);
     if (!entry) {
-      entry = { rows: new Map(), cols: new Map(), revision: 0 };
+      entry = { rows: new Map(), automaticRows: new Map(), cols: new Map(), revision: 0 };
       this.sizeOverrideStore.set(this.currentSheet, entry);
     }
     const target = axis === 'row' ? entry.rows : entry.cols;
+    if (axis === 'row') entry.automaticRows.delete(index);
     const value = axis === 'row' ? ws.rowHeights[index] ?? null : ws.colWidths[index] ?? null;
     if (target.get(index) === value && target.has(index)) return;
     target.set(index, value);
@@ -1743,14 +1756,34 @@ class XlsxViewerEngine implements ZoomableViewer {
     revision: number;
   }> | undefined {
     const entry = this.sizeOverrideStore.get(this.currentSheet);
-    if (!entry || (entry.rows.size === 0 && entry.cols.size === 0)) return undefined;
+    if (!entry || (entry.rows.size === 0 && entry.automaticRows.size === 0 && entry.cols.size === 0)) {
+      return undefined;
+    }
     if (!entry.wire) {
       const wire: WireSizeOverrides = {};
-      if (entry.rows.size > 0) wire.rows = Object.fromEntries(entry.rows);
+      if (entry.rows.size > 0 || entry.automaticRows.size > 0) {
+        wire.rows = Object.fromEntries([...entry.automaticRows, ...entry.rows]);
+      }
       if (entry.cols.size > 0) wire.cols = Object.fromEntries(entry.cols);
       entry.wire = wire;
     }
     return { overrides: entry.wire, revision: entry.revision };
+  }
+
+  /** Mirror only display-derived heights into the worker projection channel.
+   * Manual/authored sizes remain in `rows`, so a later column refit can replace
+   * automatic values without reclassifying a user's row resize. */
+  private syncAutomaticRowOverrides(sheetIndex: number, worksheet: Worksheet): void {
+    const next = new Map(derivedAutoRowHeights(worksheet));
+    let entry = this.sizeOverrideStore.get(sheetIndex);
+    if (!entry && next.size === 0) return;
+    if (!entry) {
+      entry = { rows: new Map(), automaticRows: new Map(), cols: new Map(), revision: 0 };
+      this.sizeOverrideStore.set(sheetIndex, entry);
+    }
+    entry.automaticRows = next;
+    entry.revision++;
+    entry.wire = undefined;
   }
 
   /** Update the `collapsed` flag on a band's model entry so the outline rebuild
@@ -2517,6 +2550,27 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Live resize drag fires per pointermove; coalesce the canvas repaint into
     // one frame. The spacer (scrollbar extent) and overlay updates are cheap DOM
     // writes that must track the drag immediately, so they stay synchronous.
+    this.scheduleRender();
+  }
+
+  /** Refit automatic rows once after a column-resize gesture. Doing this on
+   * every pointermove would turn a drag into O(sheet cells × pointer events),
+   * while Excel's observable result only needs to be committed at release. */
+  private refitAutoRowsAfterColumnResize(): void {
+    const ws = this.currentWorksheet;
+    const workbook = this.preparedWorkbook;
+    if (!ws || !workbook) return;
+    const manualRows = this.sizeOverrideStore.get(this.currentSheet)?.rows.keys() ?? [];
+    invalidateAutoRowHeights(ws, manualRows);
+    const prepareRowHeights = workbook[prepareXlsxViewerRowHeights];
+    if (typeof prepareRowHeights !== 'function') return;
+    const measureCanvas = this.hostDocument.createElement('canvas');
+    const measureCtx = measureCanvas.getContext('2d');
+    if (!measureCtx) return;
+    prepareRowHeights.call(workbook, ws, measureCtx);
+    this.syncAutomaticRowOverrides(this.currentSheet, ws);
+    this.updateSpacerSize(ws);
+    this.updateSelectionOverlay();
     this.scheduleRender();
   }
 
@@ -3872,6 +3926,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.surface.on('pointerup', (e: PointerEvent) => {
       if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
+        if (this.resizeDrag.kind === 'col') this.refitAutoRowsAfterColumnResize();
         this.scrollHost.releasePointerCapture(e.pointerId);
         this.resizeDrag = null;
         return;
@@ -3945,6 +4000,7 @@ class XlsxViewerEngine implements ZoomableViewer {
 
     this.surface.on('pointercancel', (e: PointerEvent) => {
       if (this.resizeDrag && this.resizeDrag.pointerId === e.pointerId) {
+        if (this.resizeDrag.kind === 'col') this.refitAutoRowsAfterColumnResize();
         this.resizeDrag = null;
       }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
@@ -4534,7 +4590,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       {
         worksheet: ws,
         projection: sizeProjection
-          ? { id: this.projectionId, revision: sizeProjection.revision }
+          ? { id: this.projectionId, revision: sizeProjection.revision, autoRowHeightsPrepared: true }
           : undefined,
       },
     );

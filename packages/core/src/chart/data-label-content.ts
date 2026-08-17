@@ -9,6 +9,10 @@ export interface EffectiveDataLabelTextOptions {
   category?: string;
   seriesName?: string;
   sourceValue?: number;
+  /** Effective divisor of the value axis associated with this label. Office
+   * applies `<c:dispUnits>` to generated `showVal` text while leaving the
+   * source value and value-to-pixel geometry unchanged. */
+  valueDivisor?: number | null;
   percentRatio?: number;
   formatCode?: string | null;
   percentFormatCode?: string | null;
@@ -24,8 +28,13 @@ export function effectiveDataLabelText(options: EffectiveDataLabelTextOptions): 
   if (options.showCategory && options.category) parts.push(options.category);
   if (options.showSeries && options.seriesName) parts.push(options.seriesName);
   if (options.showValue && options.sourceValue != null) {
+    const divisor = options.valueDivisor != null
+      && Number.isFinite(options.valueDivisor)
+      && options.valueDivisor > 0
+      ? options.valueDivisor
+      : 1;
     parts.push(formatChartValWithCode(
-      options.sourceValue, options.formatCode ?? null, options.date1904,
+      options.sourceValue / divisor, options.formatCode ?? null, options.date1904,
     ));
   }
   if (options.showPercent && options.percentRatio != null) {

@@ -359,9 +359,11 @@ load-time default key backs synchronous page metadata. A per-call `currentDate`
 selects a keyed variant without mutating the default metadata or changing public
 method signatures; NUMPAGES is converged within that variant.
 
-The current worker limitation for the optional DOM-dependent math engine is not
-expanded by this work. The layout service boundary permits a future worker-safe
-math implementation without changing the public API.
+The optional built-in math engine is selected by a serializable stable identity
+and lazy-imported in worker mode. It uses MathJax's DOM-independent adaptor,
+rasterizes MathJax's path-and-rule SVG vocabulary through the same auxiliary
+Canvas painter in Window and Worker, and supplies the same measured resources to
+the layout service boundary used by main mode.
 
 ## Migration Strategy
 

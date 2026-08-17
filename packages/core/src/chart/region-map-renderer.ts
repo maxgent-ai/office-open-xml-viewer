@@ -359,7 +359,7 @@ export function renderRegionMapChart(
   // The fixed Natural Earth asset is country-level. ST_GeoMappingLevel also
   // permits state/county/postal views, but guessing those geometries from a
   // country table would silently color the wrong region. Fail closed until an
-  // explicit bounded sub-country asset is supplied by a future addon.
+  // explicit bounded sub-country asset is supplied by a future renderer module.
   const viewedRegionType = map.geography?.viewedRegionType;
   if (viewedRegionType != null && viewedRegionType !== 'world') {
     // `dataOnly`, country-region lists and sub-country levels each define a

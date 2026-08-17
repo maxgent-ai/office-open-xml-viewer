@@ -143,22 +143,24 @@ export interface LoadOptions {
    * uses it — the same dependency-injection contract across all three formats
    * and their viewers. Import it from the separate `@silurus/ooxml/math` entry
    * (`import { math } from '@silurus/ooxml/math'`). Omit it and equations are
-   * skipped and the engine tree-shakes away entirely (no network, no bundle
-   * cost).
+   * skipped and the engine asset is not fetched or evaluated. The on-demand,
+   * self-contained render-worker asset retains the small worker-side loader.
    */
   math?: MathRenderer;
   /**
    * Opt-in model-space 3-D chart renderer. Import `threeD` from the separate
    * `@silurus/ooxml/three-d` entry and inject it once. When omitted, authored
-   * 3-D groups use their canonical 2-D chart family and the mesh/camera addon
-   * tree-shakes out of the format bundle.
+   * 3-D groups use their canonical 2-D chart family and the mesh/camera renderer
+   * is not loaded or evaluated in main mode. The on-demand render-worker asset
+   * is self-contained and includes its worker-side implementation.
    */
   threeD?: ChartThreeDRenderer;
   /**
    * Opt-in offline ChartEx Region Map renderer with fixed Natural Earth
    * geometry. Import `regionMap` from
    * `@silurus/ooxml/region-map` and inject it once. Omit it when geospatial
-   * charts are not needed so the asset tree-shakes out completely.
+   * charts are not needed so the asset is not loaded or evaluated in main mode.
+   * The on-demand render-worker asset includes its worker-side implementation.
    */
   regionMap?: ChartRegionMapRenderer;
 }

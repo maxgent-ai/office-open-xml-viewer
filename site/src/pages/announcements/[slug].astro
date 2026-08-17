@@ -36,6 +36,19 @@ const sectionId = (title: string): string => title
         </div>
         <h1>{announcement.title}</h1>
         <p class="article-summary">{announcement.summary}</p>
+        {announcement.image && (
+          <figure class="article-image">
+            <img
+              src={announcement.image.src}
+              alt={announcement.image.alt}
+              width="2400"
+              height="930"
+              loading="eager"
+              decoding="async"
+            />
+            {announcement.image.caption && <figcaption>{announcement.image.caption}</figcaption>}
+          </figure>
+        )}
       </div>
     </header>
 
@@ -89,6 +102,9 @@ const sectionId = (title: string): string => title
   .article-version { color: var(--accent); }
   h1 { margin-top: 18px; max-width: 16ch; font-size: clamp(42px, 7vw, 78px); letter-spacing: -.055em; }
   .article-summary { max-width: 70ch; margin: 28px 0 0; color: var(--text-dim); font-size: 19px; }
+  .article-image { margin: 42px 0 -20px; }
+  .article-image img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-elev); }
+  .article-image figcaption { margin-top: 10px; color: var(--text-faint); font: 12px/1.55 var(--mono); }
   .article-grid { display: grid; grid-template-columns: 240px minmax(0, 720px); gap: 80px; padding-top: 72px; padding-bottom: 120px; }
   aside, .article-body { min-width: 0; overflow-wrap: anywhere; }
   .article-toc { position: sticky; top: 92px; align-self: start; padding-top: 8px; }

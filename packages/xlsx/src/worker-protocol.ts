@@ -87,6 +87,9 @@ export function createSizeOverriddenWorksheet(
 export interface WireViewProjection {
   readonly id: number;
   readonly revision: number;
+  /** The owning viewer supplied every display-derived automatic row height in
+   * `sizeOverrides.rows`; the worker must not rescan cells for this revision. */
+  readonly autoRowHeightsPrepared?: boolean;
 }
 
 /** Worker-local cache for one shallow worksheet projection per viewer/sheet.
@@ -217,7 +220,7 @@ export function extractViewerRenderContext(opts: WireRenderViewportOptions): {
 // `init` arm is copied verbatim from `WorkerRequest`.
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; renderers?: import('@silurus/ooxml-core/worker').WorkerRendererDescriptors }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
   | {
       type: 'renderViewport';

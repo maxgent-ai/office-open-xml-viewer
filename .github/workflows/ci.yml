@@ -171,6 +171,7 @@ jobs:
       - name: Public API compatibility
         run: |
           pnpm build
+          pnpm check:production-render-workers
           pnpm check:public-type-exports
           pnpm check:public-api:built
 
@@ -259,6 +260,15 @@ jobs:
         run: pnpm exec playwright install webkit firefox
       - name: Smoke tests
         run: pnpm smoke
+
+      - name: Published render-worker smoke
+        run: |
+          # This job validates runtime assets, not declarations. Declaration
+          # compatibility has its own clean-build job; avoiding a second
+          # rolldown-plugin-dts invocation also keeps this browser job focused.
+          pnpm build:runtime
+          pnpm check:production-render-workers
+          pnpm test:production-render-workers
 
       # Worker/main pixel-equivalence: each package renders demo/sample-1 on the
       # main thread and in a Web Worker (OffscreenCanvas) and asserts the two

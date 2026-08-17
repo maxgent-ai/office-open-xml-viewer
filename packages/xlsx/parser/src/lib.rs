@@ -705,6 +705,7 @@ mod retained_model_limit_tests {
         Row {
             index,
             height: None,
+            custom_height: false,
             cells,
             outline_level: 0,
             collapsed: false,
@@ -1501,6 +1502,7 @@ fn parse_projected_worksheet(
     // both this default and per-row `<row ht="…">` values share the
     // same units across the parser/renderer boundary.
     let mut default_row_height = 15.0;
+    let mut default_row_height_custom = false;
     let mut rows_hidden_by_default = false;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
@@ -1655,6 +1657,7 @@ fn parse_projected_worksheet(
                 {
                     default_row_height = v;
                 }
+                default_row_height_custom = attr_bool(&node, "customHeight").unwrap_or(false);
                 // ECMA-376 §18.3.1.81: zeroHeight makes unspecified rows hidden
                 // by default. Keep this fact separate from defaultRowHeight:
                 // explicit, non-hidden rows still use the authored default
@@ -2180,6 +2183,7 @@ fn parse_projected_worksheet(
         col_hidden,
         default_col_width,
         default_row_height,
+        default_row_height_custom,
         merge_cells,
         freeze_rows,
         freeze_cols,
@@ -4112,6 +4116,38 @@ mod sheet_view_tests {
         );
         let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
         assert_eq!(ws.default_row_height, 0.0);
+    }
+
+    #[test]
+    fn sheet_format_preserves_manual_default_row_height_fact() {
+        let automatic_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr defaultRowHeight="15"/><sheetData/></worksheet>"#
+        );
+        let manual_xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetFormatPr defaultRowHeight="30" customHeight="1"/><sheetData/></worksheet>"#
+        );
+        let (automatic, _) =
+            parse_worksheet(&automatic_xml, &[], &[], "Automatic").expect("worksheet parses");
+        let (manual, _) =
+            parse_worksheet(&manual_xml, &[], &[], "Manual").expect("worksheet parses");
+
+        assert!(!automatic.default_row_height_custom);
+        assert!(manual.default_row_height_custom);
+        assert_eq!(manual.default_row_height, 30.0);
+        assert!(
+            serde_json::to_value(automatic)
+                .expect("serializes")
+                .get("defaultRowHeightCustom")
+                .is_none(),
+            "the false schema default stays wire-compatible"
+        );
+        assert_eq!(
+            serde_json::to_value(manual)
+                .expect("serializes")
+                .get("defaultRowHeightCustom")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]

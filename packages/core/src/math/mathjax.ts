@@ -26,8 +26,9 @@ export interface MathSvg {
  * new DocxViewer(canvas, { math });
  * ```
  *
- * Omit it and the equation engine (MathJax + STIX Two Math, ~3 MB) is never
- * imported, so a bundler drops it entirely.
+ * Omit it and the equation engine (MathJax + STIX Two Math, ~3 MB) is not
+ * fetched or evaluated. The self-contained worker asset retains only the
+ * worker-side loader until the built-in is supplied and a document uses math.
  */
 export interface MathRenderer {
   /** Preload the engine. Called once before converting equations. */

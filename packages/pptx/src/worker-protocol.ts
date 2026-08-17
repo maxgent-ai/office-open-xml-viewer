@@ -5,6 +5,7 @@ import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionIdentity,
   WorkerErrorPayload,
+  WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type {
@@ -71,6 +72,7 @@ export type RenderWorkerRequest =
       buffer: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       useGoogleFonts?: boolean;
+      renderers?: WorkerRendererDescriptors;
     }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }

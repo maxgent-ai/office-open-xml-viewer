@@ -36,6 +36,19 @@ export {
 } from './pull-credit-error.js';
 export { exactTransferableArrayBuffer } from './transfer.js';
 export {
+  assertWorkerRendererDescriptor,
+  workerRendererDescriptors,
+  type WorkerRendererDescriptor,
+  type WorkerBuiltinRendererName,
+  type WorkerRendererSources,
+  type WorkerRendererDescriptors,
+} from './renderer-module-contract.js';
+export {
+  loadWorkerRenderer,
+  loadWorkerRenderers,
+  type LoadedWorkerRenderers,
+} from './renderer-module.js';
+export {
   DEFAULT_OOXML_RESOURCE_LIMITS,
   normalizeLoadResourceOptions,
   normalizeResourcePolicy,

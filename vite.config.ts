@@ -40,7 +40,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * bare `.wasm`, and every `?url` here is a real on-disk asset we want emitted —
  * exactly what Vite's non-lib mode would do anyway.
  */
-function wasmAssetUrl(): Plugin {
+export function wasmAssetUrl(): Plugin {
   const SUFFIX = '?url';
   return {
     name: 'wasm-asset-url',
@@ -74,14 +74,19 @@ function wasmAssetUrl(): Plugin {
   };
 }
 
-export default defineConfig(({ command }) => ({
+export default defineConfig(({ command, mode }) => ({
+  // Published library assets must resolve from the imported module URL, not
+  // from the hosting page's origin root. This is especially important for the
+  // standalone module workers and sibling assets when consumers serve the
+  // package below a subpath or from a CDN.
+  base: './',
   plugins: [
     wasmAssetUrl(),
     wasm(),
     // Storybook loads the root Vite config in serve mode. The declaration
     // plugins are build-only: their Rolldown buildStart hooks expect library
     // inputs and fail against Storybook's dev-server graph.
-    ...(command === 'build'
+    ...(command === 'build' && mode !== 'runtime'
       ? dts({
           // TypeScript 7 is the repository's sole compiler. Its native tsgo
           // declaration generator avoids the removed JavaScript Compiler API.
@@ -138,6 +143,20 @@ export default defineConfig(({ command }) => ({
   },
   worker: {
     format: 'es',
-    plugins: () => [wasm()],
+    // Built-in worker renderers lazy-import the same optional math engine. Keep
+    // its ~3 MB `?url` asset external in nested worker builds too; otherwise
+    // library mode base64-inlines one copy into every format worker chunk.
+    plugins: () => [wasmAssetUrl(), wasm()],
+    rollupOptions: {
+      output: {
+        assetFileNames: '[name][extname]',
+        // The published format entry is commonly re-bundled by a consumer.
+        // A prebuilt worker URL is an opaque asset to that second bundler, so
+        // sibling JS chunks imported by the worker would not be copied. Keep
+        // each render worker as one self-contained module asset; optional
+        // renderer code is fetched only when mode:'worker' loads this asset.
+        codeSplitting: false,
+      },
+    },
   },
 }));

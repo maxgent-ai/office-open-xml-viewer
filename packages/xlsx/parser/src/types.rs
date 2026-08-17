@@ -118,6 +118,10 @@ pub struct Worksheet {
     pub col_hidden: BTreeMap<u32, bool>,
     pub default_col_width: f64,
     pub default_row_height: f64,
+    /// `<sheetFormatPr customHeight>` (§18.3.1.81): the sheet-wide default row
+    /// height was manually set. Omitted when false, the schema default.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub default_row_height_custom: bool,
     pub merge_cells: Vec<MergeCell>,
     pub freeze_rows: u32,
     pub freeze_cols: u32,
@@ -236,6 +240,7 @@ impl Worksheet {
             col_hidden: BTreeMap::new(),
             default_col_width: 0.0,
             default_row_height: 0.0,
+            default_row_height_custom: false,
             merge_cells: Vec::new(),
             freeze_rows: 0,
             freeze_cols: 0,
@@ -1341,6 +1346,11 @@ impl Default for OutlinePr {
 pub struct Row {
     pub index: u32,
     pub height: Option<f64>,
+    /// `<row customHeight>` (§18.3.1.73): the row height was manually set.
+    /// Retained even when producers omit `ht`, because Office then
+    /// keeps the sheet default rather than applying display-time auto-fit.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub custom_height: bool,
     pub cells: Vec<Cell>,
     /// Outline (grouping) depth of this row, 0-7 (ECMA-376 §18.3.1.73
     /// `<row outlineLevel>`). `0` (the ungrouped default) is omitted from JSON

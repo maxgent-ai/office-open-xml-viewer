@@ -125,7 +125,7 @@ CI が Chromium のみ、パーサーのファジング 0 件、MathJax (Apache-
 | IX4 | **スクリーンリーダーに完全不可視**。既存 text layer を PDF.js 型のアクセシビリティ層へ昇格(常時 DOM 出力、段落/行グループ、reading order、role=document、見出し→aria-level) | `docx/pptx/src/text-layer.ts`, xlsx | L |
 | IX5 | **alt text(wp:docPr / cNvPr @descr/@title)をパーサーが drop** — 3フォーマット追加フィールドとして emit し IX4 が消費 | 3 parser | S |
 | IX6 | worker モードで**テキスト選択が黙って消える**(docx/pptx。run 幾何は structured-clone 可能 — bitmap と一緒に返すだけ) | `pptx/src/render-worker.ts:133`, `docx/src/worker-protocol.ts:19` | M |
-| IX7 | worker モードで **OMML 数式が黙って消える**(意図コメントあり)— MathJax liteDOM adaptor で in-worker SVG 化(core は SVG ラスタライズ済み)か、main への持ち帰り合成 | `pptx/src/presentation.ts:152` | M |
+| IX7 | worker モードの OMML 数式 — MathJax LiteDOM による in-worker SVG 化と共通 Canvas path ラスタライズを実装。main/worker の画像差分検証を継続 | `core/src/math`, 各 `render-worker.ts` | M |
 | IX8 | **タッチピンチズームなし**(ctrl+wheel はトラックパッド合成イベントのみ)— 2-pointer トラッカーを core/interaction に足し3ビューアで共用。モバイル対応の第一歩 | `core/src/interaction/zoom.ts` + 3 viewer | M |
 | IX9 | ズーム契約の不統一: 単canvas DocxViewer/PptxViewer はズーム API 自体なし、スクロールビューアは UI なし、fit-width/fit-page モードなし、xlsx だけスライダー。setScale/zoomIn/Out/fitWidth/fitPage を4ビューア共通契約に | 全 viewer | M |
 | IX10 | `load()` に進捗報告なし(100MB ファイルで first paint まで無音)。`onProgress({phase, loaded, total})` を共有 LoadOptions へ(fetch は body reader 計数) | `core/src/types/load-options.ts` | M |

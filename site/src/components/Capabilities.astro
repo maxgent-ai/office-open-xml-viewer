@@ -7,7 +7,7 @@ const cols = [
       'Complex tables with borders, fills & merged cells',
       'Inline / anchored images and DrawingML shapes with image fills',
       'CJK typography: ruby, vertical writing & line grids',
-      'Math equations and embedded charts',
+      'Math equations, embedded charts and optional 3-D / Region Map rendering',
       'Text / element context, virtualized scroll, zoom, find & links',
     ],
   },
@@ -16,7 +16,7 @@ const cols = [
     items: [
       'Multi-sheet workbooks with frozen panes & outlines',
       'Cached formulas, dates and Excel number formats',
-      'Charts, sparklines and conditional formatting',
+      'Classic / ChartEx charts, optional 3-D / Region Maps, sparklines and conditional formatting',
       'Images, drawing shapes and styled slicers',
       'Pivot metadata, comments and CJK cell text',
       'Multiple-area selection, range / element context, TSV copy, find, zoom & drag-resize',
@@ -28,7 +28,7 @@ const cols = [
       'Slide master and layout inheritance',
       'Preset / custom shapes, groups and SmartArt text',
       'Gradient fills, picture effects and 3D shading',
-      'Combo, chartEx and stock charts with data labels',
+      'Combo, ChartEx, stock and optional 3-D / Region Map charts with data labels',
       'WordArt, math equations and embedded audio / video',
       'Text / element context, virtualized scroll, zoom, find & links',
     ],
@@ -46,10 +46,6 @@ const cols = [
     </div>
   ))}
 </div>
-<p class="selection-guide">
-  Building “explain this”, “evaluate these cells”, or a similar read-only integration?
-  <a href="/selection-context">See how selection context works across all three formats →</a>
-</p>
 
 <style>
   .caps-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 0; margin-top: 48px; border-top: 1px solid var(--border-bright); }
@@ -85,8 +81,6 @@ const cols = [
     transition: opacity 0.15s;
   }
   .caps-link:hover { opacity: 0.75; }
-  .selection-guide { margin: 28px 0 0; color: var(--text-dim); font-size: 14px; }
-  .selection-guide a { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
   @media (max-width: 860px) {
     .caps-col { grid-column: span 12; border-right: 0; padding: 28px 0 !important; }
   }

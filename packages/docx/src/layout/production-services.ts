@@ -222,7 +222,7 @@ export function createProductionLayoutServices(
     diagnostics: [{
       code: 'UNSUPPORTED_FEATURE' as const,
       severity: 'warning' as const,
-      message: 'The optional DOM math engine is unavailable; using the worker-safe text fallback',
+      message: 'The optional math renderer is unavailable; using the deterministic text fallback',
     }],
   }));
   const imageMetadata = source.imageMetadata;

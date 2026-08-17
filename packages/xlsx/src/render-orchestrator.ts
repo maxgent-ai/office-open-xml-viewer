@@ -24,6 +24,9 @@ import {
   worksheetHasUncachedMath,
   imageCacheKey,
   getGridGeometryForWorksheet,
+  applyAutoRowHeights,
+  hasPreparedAutoRowHeights,
+  inheritSheetRenderCache,
   HEADER_W,
   HEADER_H,
 } from './renderer.js';
@@ -378,6 +381,35 @@ export interface RenderDeps {
   regionMap?: ChartRegionMapRenderer;
 }
 
+const autoHeightProjectionCache = new WeakMap<Worksheet, Worksheet>();
+
+export function worksheetWithAutoRowHeights(
+  ctx: CanvasRenderingContext2D,
+  source: Worksheet,
+  styles: ParsedWorkbook['styles'],
+): Worksheet {
+  if (hasPreparedAutoRowHeights(source)) return source;
+  const cached = autoHeightProjectionCache.get(source);
+  if (cached) return cached;
+  const projection: Worksheet = {
+    ...source,
+    rowHeights: { ...source.rowHeights },
+  };
+  inheritSheetRenderCache(source, projection);
+  // The viewer/main realm supplies the authoritative Normal-font MDW used by
+  // hit-testing and spacer geometry. Preserve it across the render-local clone
+  // so worker/direct auto-fit wraps at the exact same column pixels.
+  const mdw = getGridGeometryForWorksheet(source).maximumDigitWidth;
+  GridGeometry.forWorksheet(projection, mdw);
+  applyAutoRowHeights(ctx, projection, styles);
+  // applyAutoRowHeights invalidates geometry after deriving row sizes; seed the
+  // rebuilt row axis with the same authoritative MDW rather than remeasuring in
+  // another Canvas realm.
+  GridGeometry.forWorksheet(projection, mdw);
+  autoHeightProjectionCache.set(source, projection);
+  return projection;
+}
+
 /** The full per-frame orchestration: preload uncached images, pre-rasterize
  *  equations, size the target, draw. Shared verbatim by the main-thread
  *  XlsxWorkbook and the render worker.
@@ -412,7 +444,10 @@ async function renderWorksheetViewportLeased(
   viewport: ViewportRange,
   opts: RenderViewportOptions = {},
 ): Promise<void> {
-  const { ws, styles } = deps;
+  const styles = deps.styles;
+  const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
+  const ws = worksheetWithAutoRowHeights(measurementCtx, deps.ws, styles);
   const rawW = isHTMLCanvas(target) ? (target.clientWidth || 800) : target.width;
   const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
   const width = opts.width ?? rawW;

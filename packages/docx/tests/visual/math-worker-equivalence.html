@@ -1,0 +1,42 @@
+<!doctype html>
+<html><body data-status="loading">
+  <canvas id="main-canvas" width="900" height="240"></canvas>
+  <canvas id="worker-canvas" width="900" height="240"></canvas>
+  <script type="module">
+    import { rasterizeMathSvg, workerRendererDescriptors } from '@silurus/ooxml-core';
+    import { math } from '@ooxml-test-math-renderer';
+
+    const mathml = '<math xmlns="http://www.w3.org/1998/Math/MathML"><mfrac><mrow><mo>∑</mo><msubsup><mi>x</mi><mi>i</mi><mn>2</mn></msubsup></mrow><msqrt><mrow><mi>n</mi><mo>+</mo><mn>1</mn></mrow></msqrt></mfrac><mo>=</mo><mover><mi>μ</mi><mo>¯</mo></mover></math>';
+    const paint = (canvas, source, widthPx, heightPx) => {
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      const scale = Math.min(800 / widthPx, 180 / heightPx, 1);
+      const width = widthPx * scale;
+      const height = heightPx * scale;
+      context.drawImage(source, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+    };
+
+    try {
+      await math.loadMathJax();
+      const output = await math.mathMLToSvg(mathml);
+      const raster = await rasterizeMathSvg(output, '#111827');
+      paint(document.getElementById('main-canvas'), raster.source, raster.widthPx, raster.heightPx);
+
+      const worker = new Worker(new URL('./math-raster-worker.ts', import.meta.url), { type: 'module' });
+      const result = await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => data.ok ? resolve(data) : reject(new Error(data.message));
+        worker.onerror = (event) => reject(new Error(event.message));
+        worker.postMessage({ mathml, renderer: workerRendererDescriptors({ math }).math });
+      });
+      const workerCanvas = document.getElementById('worker-canvas');
+      const workerContext = workerCanvas.getContext('bitmaprenderer');
+      workerContext.transferFromImageBitmap(result.bitmap);
+      worker.terminate();
+      document.body.dataset.status = 'ready';
+    } catch (error) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = error instanceof Error ? error.message : String(error);
+    }
+  </script>
+</body></html>

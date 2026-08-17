@@ -30,7 +30,8 @@ import {
   buildShapePath,
   EMU_PER_PT as PT_TO_EMU,
   mathToMathML,
-  recolorSvg,
+  rasterizeMathSvg,
+  tintMathRaster,
   applyOuterShadow,
   applyInnerShadow,
   applySoftEdge,
@@ -99,7 +100,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, RasterizedMathSvg, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import { paintDistanceAwareReflectionBlur } from './reflection-blur';
 import { classifyPptxHyperlink } from './hyperlink';
@@ -270,7 +271,7 @@ export function resolveShapeFill(
 // Mirrors the docx renderer's pipeline so the typesetting is identical.
 interface MathRender {
   /** The equation rasterized as opaque black glyphs on transparent. */
-  img: HTMLImageElement;
+  raster: RasterizedMathSvg;
   /** baseline-relative extents in em (1em = the equation's font size in px). */
   widthEm: number;
   ascentEm: number;
@@ -289,47 +290,9 @@ const mathRenders = new WeakMap<MathNode[], MathRender>();
 function tintedMathImage(render: MathRender, color: string): CanvasImageSource {
   const cached = render.tinted.get(color);
   if (cached) return cached;
-  const iw = render.img.naturalWidth || 1;
-  const ih = render.img.naturalHeight || 1;
-  const canvas = document.createElement('canvas');
-  canvas.width = iw;
-  canvas.height = ih;
-  const cx = canvas.getContext('2d');
-  if (!cx) return render.img;
-  cx.drawImage(render.img, 0, 0, iw, ih);
-  cx.globalCompositeOperation = 'source-in';
-  cx.fillStyle = color;
-  cx.fillRect(0, 0, iw, ih);
-  render.tinted.set(color, canvas);
-  return canvas;
-}
-
-function svgToImage(svg: string): Promise<HTMLImageElement> {
-  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-  const img = new Image();
-  return new Promise((resolve, reject) => {
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
-  });
-}
-
-// Rasterization resolution for equation SVGs, in px per em. A MathJax SVG
-// carries its size in `ex` units, so an `<img>` rasterizes it at a small
-// intrinsic size and `drawImage` then upscales it — blurry on HiDPI canvases.
-// Forcing an explicit px width/height makes the browser rasterize at this
-// resolution instead; 256 px/em stays crisp for equations well past 40pt even
-// at devicePixelRatio 3 (40pt → ~53px/em × 3 ≈ 160 px/em needed).
-const MATH_RASTER_PX_PER_EM = 256;
-
-/** Pin the SVG root to an explicit high-resolution px size before rasterizing. */
-function sizeSvgForRaster(svg: string, widthEm: number, heightEm: number): string {
-  const w = Math.max(1, Math.round(widthEm * MATH_RASTER_PX_PER_EM));
-  const h = Math.max(1, Math.round(heightEm * MATH_RASTER_PX_PER_EM));
-  return svg.replace(/<svg([^>]*?)>/, (_m, attrs: string) => {
-    const cleaned = attrs.replace(/\s(?:width|height)="[^"]*"/g, '');
-    return `<svg${cleaned} width="${w}" height="${h}">`;
-  });
+  const tinted = tintMathRaster(render.raster, color);
+  render.tinted.set(color, tinted);
+  return tinted;
 }
 
 /** Gather every math run reachable from a slide's shapes and table cells. */
@@ -365,10 +328,9 @@ export async function prepareSlideMath(slide: Slide, math: MathRenderer): Promis
     if (mathRenders.has(r.nodes)) continue;
     try {
       const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
-      const sized = sizeSvgForRaster(recolorSvg(out.svg, '#000000'), out.widthEm, out.ascentEm + out.descentEm);
-      const img = await svgToImage(sized);
+      const raster = await rasterizeMathSvg(out, '#000000');
       mathRenders.set(r.nodes, {
-        img,
+        raster,
         widthEm: out.widthEm,
         ascentEm: out.ascentEm,
         descentEm: out.descentEm,

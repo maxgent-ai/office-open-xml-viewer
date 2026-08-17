@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   xlsx: [] as Array<Record<string, any>>,
   deferDocx: false,
   rejectXlsx: false,
+  threeD: { render: vi.fn() },
+  regionMap: { render: vi.fn() },
 }));
 
 vi.mock('@silurus/ooxml-docx', () => {
@@ -105,6 +107,9 @@ vi.mock('../../../packages/core/src/math/engine', () => ({
   mathMLToSvg: vi.fn(),
 }));
 
+vi.mock('../../../src/three-d', () => ({ threeD: mocks.threeD }));
+vi.mock('../../../src/region-map', () => ({ regionMap: mocks.regionMap }));
+
 import { disposeRenderedFile, renderFile } from './try';
 
 class FakeElement {
@@ -181,6 +186,9 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.enableZoom).toBe(true);
     expect(viewer.opts.zoomMin).toBe(0.5);
     expect(viewer.opts.pageShadow).toBe(false);
+    expect(viewer.opts.mode).toBe('main');
+    expect(viewer.opts.threeD).toBe(mocks.threeD);
+    expect(viewer.opts.regionMap).toBe(mocks.regionMap);
     expect(viewer.setScaleCalls).toEqual([]);
     expect(viewer.events[0]).toBe('load');
     expect(viewer.opts.overscan).toBe(4);
@@ -203,6 +211,9 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.mediaOverscan).toBe(1);
     expect(viewer.opts.zoomMin).toBe(0.5);
     expect(viewer.opts.pageShadow).toBe(false);
+    expect(viewer.opts.mode).toBe('main');
+    expect(viewer.opts.threeD).toBe(mocks.threeD);
+    expect(viewer.opts.regionMap).toBe(mocks.regionMap);
     expect(viewer.setScaleCalls).toEqual([]);
     expect(viewer.events[0]).toBe('load');
     expect(viewer.opts.overscan).toBe(6);
@@ -225,6 +236,17 @@ describe('Try Yours ScrollViewer integration', () => {
     mocks.rejectXlsx = true;
     await expect(renderFile(stage(), file('broken.xlsx'))).rejects.toThrow('xlsx parse failed');
     expect(mocks.xlsx[0].destroyed).toBe(true);
+  });
+
+  it('enables equations and every optional chart renderer for XLSX', async () => {
+    await renderFile(stage(), file('advanced.xlsx'));
+    const viewer = mocks.xlsx[0];
+
+    expect(viewer.opts.mode).toBe('main');
+    expect(viewer.opts.math).toBeDefined();
+    expect(viewer.opts.threeD).toBe(mocks.threeD);
+    expect(viewer.opts.regionMap).toBe(mocks.regionMap);
+    expect(viewer.opts.useGoogleFonts).toBe(true);
   });
 
   it('destroys the active viewer when a later selection has an unsupported extension', async () => {

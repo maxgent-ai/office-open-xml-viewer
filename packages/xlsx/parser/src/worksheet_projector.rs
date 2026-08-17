@@ -482,6 +482,7 @@ fn parse_row_node(
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
     };
+    let custom_height = attr_bool(node, "customHeight").unwrap_or(false);
     let outline_level = node
         .attribute("outlineLevel")
         .and_then(|s| s.parse::<u8>().ok())
@@ -493,6 +494,7 @@ fn parse_row_node(
     Ok(Row {
         index: row_idx,
         height,
+        custom_height,
         cells,
         outline_level,
         collapsed,
@@ -1751,6 +1753,29 @@ mod worksheet_streaming_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn row_height_presence_distinguishes_authored_height_from_auto_fit() {
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData>
+            <row r="1"><c r="A1" t="inlineStr"><is><t>automatic</t></is></c></row>
+            <row r="2" ht="30" customHeight="1"><c r="A2" t="inlineStr"><is><t>manual</t></is></c></row>
+            <row r="3" ht="24" customHeight="0"><c r="A3" t="inlineStr"><is><t>authored ht still wins</t></is></c></row>
+            <row r="4" customHeight="1"><c r="A4" t="inlineStr"><is><t>manual default</t></is></c></row>
+          </sheetData>
+        </worksheet>"#;
+        let streamed = stream_sheet_data(xml, &[], &[]).expect("rows project");
+        assert_eq!(streamed.rows[0].height, None);
+        assert_eq!(streamed.rows[1].height, Some(30.0));
+        // §18.3.1.73: customHeight describes how the height was set; it does
+        // not erase an authored ht value when false.
+        assert_eq!(streamed.rows[2].height, Some(24.0));
+        assert!(!streamed.rows[0].custom_height);
+        assert!(streamed.rows[1].custom_height);
+        assert!(!streamed.rows[2].custom_height);
+        assert_eq!(streamed.rows[3].height, None);
+        assert!(streamed.rows[3].custom_height);
     }
 
     struct CountingRead<'a> {

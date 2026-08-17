@@ -13,10 +13,13 @@ import {
 } from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
 import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine';
+import { threeD } from '../../../src/three-d';
+import { regionMap } from '../../../src/region-map';
 
 // Opt-in OMML equation engine — enabled here so user-supplied docx/pptx with
 // equations render. (In the published library this is `@silurus/ooxml/math`.)
 const math = { loadMathJax, mathMLToSvg };
+const advancedChartRenderers = { threeD, regionMap };
 
 const VIEWER_GAP = 26;
 const MIN_SCALE = 0.5;
@@ -78,7 +81,13 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     const host = document.createElement('div');
     host.className = 'lv-xlsx';
     stage.appendChild(host);
-    const viewer = new XlsxViewer(host, { useGoogleFonts: true, showZoomSlider: true, math });
+    const viewer = new XlsxViewer(host, {
+      mode: 'main',
+      useGoogleFonts: true,
+      showZoomSlider: true,
+      math,
+      ...advancedChartRenderers,
+    });
     try {
       await viewer.load(buffer);
     } catch (error) {
@@ -106,6 +115,8 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       pageShadow: false,
       useGoogleFonts: true,
       math,
+      mode: 'main',
+      ...advancedChartRenderers,
     };
     const viewer = new PptxScrollViewer(host, viewerOptions);
     // Do not force an absolute scale here. ScrollViewer derives its initial
@@ -140,6 +151,8 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     pageShadow: false,
     useGoogleFonts: true,
     math,
+    mode: 'main',
+    ...advancedChartRenderers,
   };
   const viewer = new DocxScrollViewer(host, viewerOptions);
   // As with PPTX, the viewer-owned width fit is the initial zoom contract for
@@ -185,16 +198,28 @@ export function prewarmEngines(): void {
     // Fonts are intentionally disabled here. Prewarming should prime only the
     // parser binaries; downloading fonts used by bundled samples would compete
     // with (and may be irrelevant to) the user's own file.
-    void PptxPresentation.load(sample('sample-1.pptx'), { useGoogleFonts: false })
+    void PptxPresentation.load(sample('sample-1.pptx'), {
+      useGoogleFonts: false,
+      mode: 'main',
+      ...advancedChartRenderers,
+    })
       .then((d) => d.destroy())
       .catch(() => {});
-    void DocxDocument.load(sample('sample-1.docx'), { useGoogleFonts: false })
+    void DocxDocument.load(sample('sample-1.docx'), {
+      useGoogleFonts: false,
+      mode: 'main',
+      ...advancedChartRenderers,
+    })
       .then((d) => d.destroy())
       .catch(() => {});
     // XlsxViewer needs a container; mount into a detached node never added to the
     // DOM, then dispose. The parse + one render warms the xlsx WASM engine.
     const host = document.createElement('div');
-    const v = new XlsxViewer(host, { useGoogleFonts: false });
+    const v = new XlsxViewer(host, {
+      useGoogleFonts: false,
+      mode: 'main',
+      ...advancedChartRenderers,
+    });
     void v.load(sample('sample-1.xlsx')).then(() => v.destroy()).catch(() => v.destroy());
   };
 

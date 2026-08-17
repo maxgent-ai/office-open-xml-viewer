@@ -1,14 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { XlsxViewer } from './viewer';
-// Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
-// In the monorepo the stories build the same MathRenderer from the core engine
-// so OMML equations in shapes/text boxes render in the demo.
-import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
-import { renderSimpleThreeDChart } from '../../core/src/chart/three-d-renderer';
-import { renderRegionMapChart } from '../../core/src/chart/region-map-renderer';
-const math = { loadMathJax, mathMLToSvg };
-const threeD = { render: renderSimpleThreeDChart };
-const regionMap = { render: renderRegionMapChart };
+import { math } from '../../../src/math';
+import { threeD } from '../../../src/three-d';
+import { regionMap } from '../../../src/region-map';
 
 type Args = {
   scale: number;
@@ -92,18 +86,9 @@ export function buildViewerUI(
 }
 
 // ---------------------------------------------------------------------------
-// File upload
+// File upload (shared by main-thread and Web Worker stories)
 // ---------------------------------------------------------------------------
-export const FileUpload: Story = {
-  name: 'Load from file',
-  args: { debug: true },
-  argTypes: {
-    debug: {
-      control: 'boolean',
-      description: 'Print resource-usage metrics to the browser console',
-    },
-  },
-  render(args) {
+function renderFileUpload(args: Args, mode: 'main' | 'worker'): HTMLElement {
     const root = document.createElement('div');
     root.style.cssText = 'width:100%;height:100vh;display:flex;flex-direction:column;overflow:hidden;font-family:sans-serif;box-sizing:border-box;';
 
@@ -131,6 +116,7 @@ export const FileUpload: Story = {
       viewer?.destroy();
       viewerContainer.innerHTML = '';
       viewer = new XlsxViewer(viewerContainer, {
+        mode,
         cellScale: args.scale,
         debug: args.debug,
         useGoogleFonts: true,
@@ -152,7 +138,27 @@ export const FileUpload: Story = {
     });
 
     return root;
+}
+
+const fileUploadArgTypes = {
+  debug: {
+    control: 'boolean' as const,
+    description: 'Print resource-usage metrics to the browser console',
   },
+};
+
+export const FileUpload: Story = {
+  name: 'Load from file — main thread',
+  args: { debug: true },
+  argTypes: fileUploadArgTypes,
+  render: (args) => renderFileUpload(args, 'main'),
+};
+
+export const FileUploadWorker: Story = {
+  name: 'Load from file — Web Worker',
+  args: { debug: true },
+  argTypes: fileUploadArgTypes,
+  render: (args) => renderFileUpload(args, 'worker'),
 };
 
 // ---------------------------------------------------------------------------

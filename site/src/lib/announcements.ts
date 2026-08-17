@@ -15,6 +15,13 @@ export interface AnnouncementExample {
   readonly code: string;
 }
 
+export interface AnnouncementImage {
+  /** Site-public path. Announcement artwork is deliberately static and local. */
+  readonly src: string;
+  readonly alt: string;
+  readonly caption?: string;
+}
+
 export interface Announcement {
   readonly slug: string;
   readonly date: string;
@@ -23,10 +30,185 @@ export interface Announcement {
   readonly title: string;
   readonly summary: string;
   readonly audience: string;
+  readonly image?: AnnouncementImage;
   readonly sections: readonly AnnouncementSection[];
 }
 
 export const announcements: readonly Announcement[] = [
+  {
+    slug: 'v080-worker-rendering',
+    date: '2026-08-16',
+    label: 'Release note',
+    version: 'v0.80.0',
+    title: 'Built-in renderer parity for worker mode in v0.80.0',
+    summary: 'v0.80.0 extends the existing DOCX, XLSX and PPTX worker mode so the built-in math, 3-D chart and Region Map renderers use the same injection API and rendering path as main-thread mode.',
+    audience: 'Browser applications that use worker mode and need equations, authored 3-D charts or country-level Region Maps without moving document layout and paint back to the main thread. Main-thread rendering remains the default, so existing applications do not need to change.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/math', '@silurus/ooxml/three-d', '@silurus/ooxml/region-map'],
+        rationale: 'Choose worker mode for a more responsive UI during heavier rendering, or keep the default main mode for the smallest and simplest setup.',
+        paragraphs: [
+          'Worker rendering across DOCX, XLSX and PPTX was introduced in v0.59.0. v0.80.0 closes its remaining built-in renderer gaps: equations, 3-D charts and Region Maps now use the same math, threeD and regionMap options in main-thread and worker modes.',
+          'Main-thread mode remains the default. No migration is required for existing applications.',
+        ],
+        bullets: [
+          'Use main mode for smaller documents, the smallest worker download, the lowest single-frame overhead or custom renderer objects.',
+          'Use worker mode when larger or more complex documents make scrolling, navigation or other application UI less responsive.',
+          'The built-in math, 3-D chart and Region Map renderers now use the same injection options in both modes.',
+          'Selection, find, navigation and viewer interactions retain the same public APIs.',
+        ],
+      },
+      {
+        title: 'Choose the mode that fits your app',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Worker mode trades a larger download and bitmap-transfer overhead for less layout and paint work on the browser UI thread.',
+        paragraphs: [
+          'In main mode, parsing already runs in a Worker, while layout and Canvas rendering run on the main thread. It is the best default for ordinary previews, smaller files and applications that prioritize the smallest download and lowest per-frame transfer overhead.',
+          'In worker mode, parsing, layout and Canvas rendering run in a Web Worker. Choose it when rendering a larger document competes with scrolling, navigation, animation or other UI work in your application. Viewer controls and interactions remain available in both modes.',
+          'A DOCX document that needs browser-only OpenType vertical-glyph selection automatically uses main mode for correct text shaping. Read the loaded document\'s mode when your integration needs to observe that fallback.',
+          'Worker mode requires Worker and OffscreenCanvas support. It improves responsiveness rather than guaranteeing faster total rendering time, and it is not a separate process or a memory-safety boundary.',
+        ],
+      },
+      {
+        title: 'Use the same options in either mode',
+        modules: ['@silurus/ooxml/math', '@silurus/ooxml/three-d', '@silurus/ooxml/region-map'],
+        rationale: 'Switching modes should not require a second setup for equations, 3-D charts or Region Maps.',
+        paragraphs: [
+          'Pass math, threeD and regionMap exactly as in main-thread mode. The library recognizes its built-in renderers and reconstructs them inside the worker without exposing worker protocol objects through the public renderer contracts.',
+          'Custom renderer objects remain a main-mode feature because arbitrary JavaScript objects cannot be transferred into a Worker. Use the built-in math, threeD and regionMap exports when those capabilities are required in worker mode.',
+        ],
+        examples: [
+          {
+            title: 'Render an XLSX Viewer off the main thread',
+            code: `import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { math } from '@silurus/ooxml/math';
+import { threeD } from '@silurus/ooxml/three-d';
+import { regionMap } from '@silurus/ooxml/region-map';
+
+const viewer = new XlsxViewer(container, {
+  mode: 'worker',
+  math,
+  threeD,
+  regionMap,
+});
+
+await viewer.load(source);`,
+          },
+        ],
+      },
+      {
+        title: 'Trade-offs to consider',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Worker mode is primarily a UI-responsiveness choice, not an automatic speed or memory improvement.',
+        paragraphs: [
+          'Worker mode downloads a larger self-contained worker asset and transfers a rendered bitmap for each frame. Main mode has less worker code to download and avoids that frame transfer, but heavy layout or paint can occupy the UI thread.',
+          'Both modes keep Viewer navigation, zoom, virtualized scrolling, selection, find, hyperlinks, equations, 3-D charts and Region Maps available. PowerPoint media controls and other DOM overlays continue to be presented by the Viewer in either mode.',
+        ],
+      },
+      {
+        title: 'Technical note',
+        paragraphs: [
+          'JavaScript renderer functions cannot cross the structured-clone boundary. Instead of exposing a second worker-specific API, v0.80 keeps the public math, threeD and regionMap objects as ordinary renderer contracts and records the built-in module identity privately. The worker reconstructs only those recognized built-ins, so application code uses the same options while transport details stay out of the public types.',
+          'Production packaging was the less obvious part. A consumer bundler can treat a published Worker as an opaque asset: copying the entry file while leaving its split chunks behind, or rebasing a MathJax URL against the consumer output directory. The published render worker is therefore self-contained, while browser-resolved external asset URLs are handed across explicitly. Tests cover both the raw package output and a fresh Vite consumer rebundle.',
+          'Math output also needed one drawing contract in both realms. Equations are rasterized through the same Canvas path in Window and Worker contexts on a size-bounded surface. A 256 px/em source is reduced in two stages and cached at 64 px/em for cleaner 100% display without turning ordinary document text into vector geometry.',
+          'Finally, the worker path is compared against main mode in the same browser for public DOCX, XLSX and PPTX examples, equations, 3-D charts and Region Maps. The exercised frames are pixel-identical; CI retains a small tolerance only for browser text rasterization differences across environments.',
+        ],
+      },
+    ],
+  },
+  {
+    slug: 'v079-chart-rendering-addons',
+    date: '2026-08-14',
+    label: 'Release note',
+    version: 'v0.79.0',
+    title: '3-D charts, Region Maps and chart fidelity in v0.79.0',
+    summary: 'v0.79.0 adds opt-in 3-D and offline Region Map renderers while improving shared chart axes, labels, legends and modern chart families across DOCX, XLSX and PPTX.',
+    audience: 'Applications that display Office charts. Existing applications keep the established chart fallback without source changes; import the optional renderer modules only when authored 3-D charts or country-level Region Maps are required.',
+    image: {
+      src: '/announcements/chart-rendering-v079.webp',
+      alt: 'A grid of eight synthetic chart renderings: 3-D columns, 3-D pie, an offline country Region Map, a combo chart with minor ticks, waterfall, treemap, bubble and box-and-whisker charts.',
+      caption: 'Rendered by @silurus/ooxml from synthetic data. The map uses public-domain Natural Earth geometry.',
+    },
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/three-d', '@silurus/ooxml/region-map'],
+        rationale: '3-D camera and map geometry stay out of the default bundles unless an application enables them.',
+        paragraphs: [
+          'v0.79.0 keeps ordinary chart rendering in the format entries and provides 3-D and Region Map rendering as optional renderer modules. The same injected renderer works for charts hosted by Word, Excel and PowerPoint.',
+          'Existing viewers continue to use the established chart fallback without configuration changes. No migration is required.',
+        ],
+        bullets: [
+          'Authored 3-D chart views render through one model-space camera and projected mesh pipeline.',
+          'Country-level ChartEx Region Maps render offline from worksheet or document data.',
+          'Shared axis planning, titles, data labels, legend paint and ChartEx layout now follow more authored OOXML properties.',
+          'Both renderers use separate entries and are loaded only when supplied. They launched for the main thread only in v0.79.0; current releases also reconstruct the built-ins inside render workers.',
+        ],
+      },
+      {
+        title: 'One 3-D scene for axes and data',
+        modules: ['@silurus/ooxml/three-d', '@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Axes, walls, grids, bars, lines and surfaces must share one projection to remain geometrically coherent.',
+        paragraphs: [
+          'The 3-D renderer projects chart walls, axes and data through one homogeneous camera instead of applying unrelated screen-space offsets. Bar and column solids use projected meshes, area charts use extruded surfaces, and pie slices use bounded mesh geometry. Authored box, cylinder, cone, cone-to-max, pyramid and pyramid-to-max shapes are retained where the OOXML model supplies them.',
+          'The renderer honors the view saved in the document, including rotation, perspective, right-angle axes, depth and height.',
+        ],
+      },
+      {
+        title: 'Offline country Region Maps',
+        modules: ['@silurus/ooxml/region-map', '@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'An OOXML Region Map may store country names and values without embedding the geographic polygons used by Excel.',
+        paragraphs: [
+          'The parser keeps ChartEx country identities, numeric color values, authored projections and two- or three-stop color scales. The renderer module renders supported countries offline.',
+          'The map uses public-domain Natural Earth Admin 0 Countries 1:110m geometry.',
+          'v0.79.0 supports country-level world maps. Cached provider identities and state, county or postal views are not supported.',
+        ],
+      },
+      {
+        title: 'Enable the optional renderers',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx', '@silurus/ooxml/three-d', '@silurus/ooxml/region-map'],
+        rationale: 'Dependency injection keeps the base entries small and gives every host format the same renderer contract.',
+        paragraphs: [
+          'Import each renderer from its separate package entry and pass it to a Viewer or headless engine at construction/load time. The same built-in renderer injection works in main and worker modes; custom renderer objects retain the documented worker fallback.',
+        ],
+        examples: [
+          {
+            title: 'Enable advanced charts in an XLSX Viewer',
+            code: `import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { threeD } from '@silurus/ooxml/three-d';
+import { regionMap } from '@silurus/ooxml/region-map';
+
+const viewer = new XlsxViewer(container, {
+  mode: 'worker',
+  threeD,
+  regionMap,
+});
+
+await viewer.load(source);`,
+          },
+        ],
+      },
+      {
+        title: 'Chart fidelity and bounded work',
+        modules: ['@silurus/ooxml/docx', '@silurus/ooxml/xlsx', '@silurus/ooxml/pptx'],
+        rationale: 'Office chart fidelity must not reintroduce unbounded tick, text, hierarchy or mesh expansion.',
+        paragraphs: [
+          'Classic and ChartEx charts now share more of the same value-axis planner, title defaults, data-label layout, rich text, legend paint and explicit-property precedence. This improves waterfall, funnel, box-and-whisker, histogram, Pareto, treemap, sunburst, bubble, line, area and combo charts without family-specific copies of the same policy.',
+          'Parser/model inputs and painting work are bounded for ticks, data-label text, hierarchies, Region Map rows and expanded 3-D primitives. The optional entries keep 3-D and map geometry out of the base format bundles.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No existing option is removed or renamed. Upgrade normally to receive the shared 2-D chart fixes. Add the threeD or regionMap option only when the corresponding authored chart needs its optional renderer.',
+          'The optional entries are ESM-only like the rest of the package. Custom renderer objects retain the documented fallback in worker mode.',
+        ],
+      },
+    ],
+  },
   {
     slug: 'v0781-docx-pagination-fix',
     date: '2026-08-12',

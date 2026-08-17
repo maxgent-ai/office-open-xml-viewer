@@ -46,6 +46,10 @@ export type {
   ChartType,
   ChartOfPie,
   ChartThreeD,
+  ChartThreeDSurface,
+  ChartThreeDSeriesAxis,
+  ChartDisplayUnits,
+  ChartDisplayUnitsLabel,
   ChartExElementStyle,
   ChartexHistogramBinning,
   ChartexBoxSeries,
@@ -362,12 +366,18 @@ export {
   type ChartThreeDRenderer,
 } from './chart/three-d-contract';
 export type { ChartRegionMapRenderer } from './chart/region-map-contract';
+export { workerRendererDescriptors } from './worker/renderer-module-contract';
 export {
   mathToMathML,
   svgExtents,
   recolorSvg,
+  MATH_RASTER_PX_PER_EM,
+  rasterizeMathSvg,
+  sizeMathSvgForRaster,
+  tintMathRaster,
   type MathSvg,
   type MathRenderer,
+  type RasterizedMathSvg,
 } from './math';
 export type {
   MathAccent,

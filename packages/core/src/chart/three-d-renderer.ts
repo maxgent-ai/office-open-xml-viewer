@@ -1,6 +1,7 @@
 import type {
   ChartDataLabelOverride,
   ChartDataPointOverride,
+  ChartDisplayUnits,
   ChartModel,
   ChartRect,
   ChartSeries,
@@ -10,7 +11,7 @@ import type {
  * build verification can prove the mesh/camera implementation is absent from
  * every base document-format dependency closure. */
 export const THREE_D_IMPLEMENTATION_MARKER = 'ooxml-three-d-mesh-implementation-v1';
-import { EMU_PER_PT } from '../units.js';
+import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 import { pptxPresetDashArray } from '../draw/dash.js';
 import { finiteDataExtent, planNumericValueAxis, type NumericValueAxisPlan } from './axis-scale.js';
 import { formatCategoryLabel, formatChartValWithCode } from './chart-number-format.js';
@@ -54,12 +55,14 @@ import {
   type ProjectedSceneFace,
 } from './three-d-scene.js';
 import {
+  buildProjectedStrokeJunction,
   buildProjectedStrokePrimitives,
   MAX_PROJECTED_STROKE_PRIMITIVES,
   type ProjectedStrokePoint,
   type ProjectedStrokePrimitive,
 } from './three-d-stroke.js';
-import { buildThreeDOutlinePaths } from './three-d-outline.js';
+import { buildThreeDOutlineTopology } from './three-d-outline.js';
+import { paintLegendFrame } from './legend-frame.js';
 
 const PALETTE = ['4472C4', 'ED7D31', '70AD47', 'A5A5A5', 'FFC000', '5B9BD5'] as const;
 const SUPPORTED_CARTESIAN_THREE_D_TYPES = new Set([
@@ -71,6 +74,18 @@ const SUPPORTED_CARTESIAN_THREE_D_TYPES = new Set([
 /** Worst-case cap + side-face count for one revolved 3-D datum. Shared with
  * the renderer preflight so higher fidelity never expands unbounded work. */
 export const THREE_D_ROUND_MESH_FACE_WEIGHT = DEFAULT_THREE_D_ROUND_SEGMENTS + 4;
+
+/** Office renders authored 3-D mesh edges in chart/sheet display pixels, not
+ * with the 96-DPI typography expansion used for text. The supplied Excel
+ * reference has `a:ln@w=12700` (1pt) and a one-pixel solid at 100% zoom across
+ * all six equivalent 3-D bar charts. Keep that observed material-edge rule
+ * separate from 2-D DrawingML strokes and scale it only with viewer zoom. */
+export function threeDMeshOutlineWidthPx(lineWidthEmu: number, ptToPx: number): number {
+  const zoom = Number.isFinite(ptToPx) && ptToPx > 0 ? ptToPx / PT_TO_PX : 1;
+  const points = Number.isFinite(lineWidthEmu) && lineWidthEmu >= 0
+    ? lineWidthEmu / EMU_PER_PT : 0;
+  return Math.max(0.25, points) * zoom;
+}
 
 /** Group stack geometry in one pass before resolving shared internal caps.
  * The parser/render preflight bounds the item count, but rescanning the whole
@@ -318,6 +333,7 @@ function projectThreeDMesh(
   color: string,
   outlineStyle?: MeshOutlineStyle,
   budget?: ScenePrimitiveBudget,
+  outlineOnly = false,
 ): SceneFace[] {
   if (budget?.exceeded) return [];
   const candidates = mesh.faces.map(meshFace => {
@@ -350,7 +366,7 @@ function projectThreeDMesh(
     };
     return { meshFace, facing, face };
   });
-  const visibleFaces = candidates
+  const visibleFaces = outlineOnly ? [] : candidates
     .map(candidate => candidate.face)
     .filter((face): face is SceneFace => face != null);
   if (budget) {
@@ -409,11 +425,15 @@ function projectThreeDMesh(
       addOutlineEdge(startIndex, endIndex);
     }
   }
-  const paths = buildThreeDOutlinePaths([...outlineEdges.values()].map(([startIndex, endIndex]) => [
+  const topology = buildThreeDOutlineTopology([...outlineEdges.values()].map(([startIndex, endIndex]) => [
     mesh.vertices[startIndex], mesh.vertices[endIndex],
   ]));
   if (!outlineStyle) return visibleFaces;
-  for (const scenePath of paths) {
+  const sameScenePoint = (left: ThreeDScenePoint, right: ThreeDScenePoint) =>
+    Math.hypot(left.x - right.x, left.y - right.y, left.depth - right.depth) <= 1e-9;
+  const isJunction = (point: ThreeDScenePoint) =>
+    topology.junctions.some(junction => sameScenePoint(junction.point, point));
+  for (const scenePath of topology.paths) {
     const projectedPath = scenePath.map(point => projection.project(point.x, point.y, point.depth));
     const cameraDepths = scenePath.map(point =>
       projection.cameraDepth(point.x, point.y, point.depth));
@@ -427,6 +447,10 @@ function projectThreeDMesh(
       width: outlineStyle.width,
       dash: outlineStyle.dash,
       lineCap: outlineStyle.cap,
+      startCap: isJunction(scenePath[0]) ? 'butt' : outlineStyle.cap,
+      endCap: isJunction(scenePath.at(-1)!) ? 'butt' : outlineStyle.cap,
+      overlapStart: isJunction(scenePath[0]),
+      overlapEnd: isJunction(scenePath.at(-1)!),
       lineJoin: outlineStyle.join,
     });
     if (!stroke || (budget && stroke.length > budget.remaining)) {
@@ -434,17 +458,235 @@ function projectThreeDMesh(
       return [];
     }
     if (budget) budget.remaining -= stroke.length;
-    visibleFaces.push(...stroke.map(primitive => ({
+    visibleFaces.push(...stroke.map(primitive => {
+      // Mesh edges are coplanar with their adjacent fill. A minute camera-space
+      // bias prevents a later coplanar slice from erasing one side of an
+      // authored circumference; genuinely nearer solids still occlude it.
+      const bias = 1e-6 * Math.max(1, Math.abs(primitive.cameraDepth));
+      return {
+        points: primitive.points,
+        color: outlineStyle.color,
+        shade: 0,
+        cameraDepth: primitive.cameraDepth + bias,
+        cameraDepths: primitive.cameraDepths?.map(depth => depth + bias),
+        cameraWeights: primitive.cameraWeights,
+        outline: false,
+      };
+    }));
+  }
+  for (const junction of topology.junctions) {
+    const centerPoint = projection.project(
+      junction.point.x, junction.point.y, junction.point.depth,
+    );
+    const center: ProjectedStrokePoint = {
+      ...centerPoint,
+      cameraDepth: projection.cameraDepth(
+        junction.point.x, junction.point.y, junction.point.depth,
+      ),
+      cameraWeight: projection.cameraProjectionWeight(
+        junction.point.x, junction.point.y, junction.point.depth,
+      ),
+    };
+    const neighbours: ProjectedStrokePoint[] = junction.neighbours.map(point => ({
+      ...projection.project(point.x, point.y, point.depth),
+      cameraDepth: projection.cameraDepth(point.x, point.y, point.depth),
+      cameraWeight: projection.cameraProjectionWeight(point.x, point.y, point.depth),
+    }));
+    const primitive = buildProjectedStrokeJunction(center, neighbours, {
+      width: outlineStyle.width,
+      lineJoin: outlineStyle.join,
+    });
+    if (!primitive) continue;
+    if (budget && budget.remaining < 1) {
+      budget.exceeded = true;
+      return [];
+    }
+    if (budget) budget.remaining -= 1;
+    const bias = 1e-6 * Math.max(1, Math.abs(primitive.cameraDepth));
+    visibleFaces.push({
       points: primitive.points,
       color: outlineStyle.color,
       shade: 0,
-      cameraDepth: primitive.cameraDepth,
-      cameraDepths: primitive.cameraDepths,
+      cameraDepth: primitive.cameraDepth + bias,
+      cameraDepths: primitive.cameraDepths?.map(depth => depth + bias),
       cameraWeights: primitive.cameraWeights,
       outline: false,
-    })));
+    });
   }
   return visibleFaces;
+}
+
+interface ThreeDPieOutlineSlice {
+  readonly start: number;
+  readonly end: number;
+  readonly segments: number;
+  readonly centerX: number;
+  readonly centerDepth: number;
+}
+
+/** Build a pie outline from semantic curves instead of the generic mesh-edge
+ * graph. A pie has four meaningful stroke families: the visible cap rim,
+ * radial separators, the visible lower wall rim, and exposed outer vertical
+ * separators. Keeping them as independent continuous paths avoids high-degree
+ * graph junctions that create spikes and locally doubled widths. */
+function projectThreeDPieOutline(
+  projection: ChartThreeDProjection,
+  slices: readonly ThreeDPieOutlineSlice[],
+  centerY: number,
+  radius: number,
+  thickness: number,
+  style: MeshOutlineStyle,
+  budget: ScenePrimitiveBudget,
+): SceneFace[] {
+  if (!slices.length || budget.exceeded) return [];
+  // `threeDPieSliceAngles` stores each clockwise slice as an ascending model
+  // interval, so source order runs from high angles toward low angles. Curved
+  // paths must be traversed in geometric angle order; concatenating source
+  // order inserts long chords between slices and paints those chords again as
+  // radial separators—the severe doubled lines seen in enlarged pies.
+  const orderedSlices = [...slices].sort((left, right) => left.start - right.start);
+  const topY = centerY - thickness / 2;
+  const bottomY = centerY + thickness / 2;
+  const reference = orderedSlices[0];
+  const capY = projection.cameraDepth(reference.centerX, topY, reference.centerDepth)
+    >= projection.cameraDepth(reference.centerX, bottomY, reference.centerDepth)
+    ? topY : bottomY;
+  const lowerY = capY === topY ? bottomY : topY;
+  const pointAt = (slice: ThreeDPieOutlineSlice, angle: number, y: number): ThreeDScenePoint => ({
+    x: slice.centerX + Math.cos(angle) * radius,
+    y,
+    depth: slice.centerDepth + Math.sin(angle) * radius / projection.modelDepth,
+  });
+  const centerAt = (slice: ThreeDPieOutlineSlice): ThreeDScenePoint => ({
+    x: slice.centerX, y: capY, depth: slice.centerDepth,
+  });
+  const result: SceneFace[] = [];
+  const addPath = (scenePath: readonly ThreeDScenePoint[], closed = false): void => {
+    if (scenePath.length < 2 || budget.exceeded) return;
+    const first = scenePath[0];
+    const last = scenePath.at(-1)!;
+    const alreadyClosed = Math.hypot(
+      first.x - last.x, first.y - last.y, first.depth - last.depth,
+    ) <= 1e-9;
+    const points = closed && !alreadyClosed ? [...scenePath, first] : [...scenePath];
+    const projected: ProjectedStrokePoint[] = points.map(point => ({
+      ...projection.project(point.x, point.y, point.depth),
+      cameraDepth: projection.cameraDepth(point.x, point.y, point.depth),
+      cameraWeight: projection.cameraProjectionWeight(point.x, point.y, point.depth),
+    }));
+    const primitives = buildProjectedStrokePrimitives(projected, {
+      width: style.width,
+      dash: style.dash,
+      lineCap: style.cap,
+      startCap: 'butt',
+      endCap: 'butt',
+      lineJoin: style.join,
+    });
+    if (!primitives || primitives.length > budget.remaining) {
+      budget.exceeded = true;
+      return;
+    }
+    budget.remaining -= primitives.length;
+    for (const primitive of primitives) {
+      const bias = 1e-6 * Math.max(1, Math.abs(primitive.cameraDepth));
+      result.push({
+        points: primitive.points,
+        color: style.color,
+        shade: 0,
+        cameraDepth: primitive.cameraDepth + bias,
+        cameraDepths: primitive.cameraDepths?.map(depth => depth + bias),
+        cameraWeights: primitive.cameraWeights,
+        outline: false,
+      });
+    }
+  };
+
+  const capRim: ThreeDScenePoint[] = [];
+  const lowerRuns: ThreeDScenePoint[][] = [];
+  let lowerRun: ThreeDScenePoint[] = [];
+  const visibleBoundaryAngles = new Set<string>();
+  const angleKey = (angle: number) => {
+    const turn = Math.PI * 2;
+    const normalized = ((angle % turn) + turn) % turn;
+    return (normalized < 1e-8 || turn - normalized < 1e-8 ? 0 : normalized).toFixed(8);
+  };
+  const boundarySlices = new Map<string, { slice: ThreeDPieOutlineSlice; angle: number }>();
+  for (const slice of orderedSlices) {
+    boundarySlices.set(angleKey(slice.start), { slice, angle: slice.start });
+    boundarySlices.set(angleKey(slice.end), { slice, angle: slice.end });
+    for (let segment = 0; segment <= slice.segments; segment++) {
+      const angle = slice.start + (slice.end - slice.start) * segment / slice.segments;
+      const capPoint = pointAt(slice, angle, capY);
+      if (!capRim.length || Math.hypot(
+        capRim.at(-1)!.x - capPoint.x,
+        capRim.at(-1)!.y - capPoint.y,
+        capRim.at(-1)!.depth - capPoint.depth,
+      ) > 1e-9) capRim.push(capPoint);
+      if (segment === slice.segments) continue;
+      const nextAngle = slice.start + (slice.end - slice.start) * (segment + 1)
+        / slice.segments;
+      const topStart = pointAt(slice, angle, topY);
+      const bottomStart = pointAt(slice, angle, bottomY);
+      const bottomEnd = pointAt(slice, nextAngle, bottomY);
+      const topEnd = pointAt(slice, nextAngle, topY);
+      const sideVisible = projection.cameraFacing([
+        topStart, bottomStart, bottomEnd, topEnd,
+      ]);
+      if (sideVisible) {
+        const lowerStart = pointAt(slice, angle, lowerY);
+        const lowerEnd = pointAt(slice, nextAngle, lowerY);
+        if (!lowerRun.length) lowerRun.push(lowerStart);
+        lowerRun.push(lowerEnd);
+        visibleBoundaryAngles.add(angleKey(angle));
+        visibleBoundaryAngles.add(angleKey(nextAngle));
+      } else if (lowerRun.length) {
+        lowerRuns.push(lowerRun);
+        lowerRun = [];
+      }
+    }
+  }
+  if (lowerRun.length) lowerRuns.push(lowerRun);
+  if (lowerRuns.length > 1) {
+    const first = lowerRuns[0];
+    const last = lowerRuns.at(-1)!;
+    const firstPoint = first[0];
+    const lastPoint = last.at(-1)!;
+    if (Math.hypot(
+      firstPoint.x - lastPoint.x,
+      firstPoint.y - lastPoint.y,
+      firstPoint.depth - lastPoint.depth,
+    ) <= 1e-9) {
+      lowerRuns[0] = [...last, ...first.slice(1)];
+      lowerRuns.pop();
+    }
+  }
+
+  addPath(capRim, true);
+  const verticalAngles = new Map<string, { slice: ThreeDPieOutlineSlice; angle: number }>();
+  for (const { slice, angle } of boundarySlices.values()) {
+    addPath([centerAt(slice), pointAt(slice, angle, capY)]);
+    if (visibleBoundaryAngles.has(angleKey(angle))) {
+      verticalAngles.set(angleKey(angle), { slice, angle });
+    }
+  }
+  for (const run of lowerRuns) {
+    addPath(run);
+    // The visible cylindrical wall ends at two silhouette generators. They
+    // are not necessarily slice boundaries, but they must connect the upper
+    // and lower rims; omitting them leaves the two short black stubs visible
+    // at the left and right extremes of the pie.
+    for (const endpoint of [run[0], run.at(-1)!]) {
+      const angle = Math.atan2(
+        (endpoint.depth - reference.centerDepth) * projection.modelDepth,
+        endpoint.x - reference.centerX,
+      );
+      verticalAngles.set(angleKey(angle), { slice: reference, angle });
+    }
+  }
+  for (const { slice, angle } of verticalAngles.values()) {
+    addPath([pointAt(slice, angle, capY), pointAt(slice, angle, lowerY)]);
+  }
+  return result;
 }
 
 function paintSceneFace(ctx: CanvasRenderingContext2D, item: SceneFace): void {
@@ -512,19 +754,20 @@ function drawAngledCategoryLabel(
   rotation: number,
   horizontal: boolean,
   outwardY = 1,
+  offset = 6,
 ): void {
   if (horizontal || rotation === 0) {
     ctx.textAlign = horizontal ? 'right' : 'center';
     ctx.textBaseline = horizontal ? 'middle' : outwardY < 0 ? 'bottom' : 'top';
     ctx.fillText(
       label,
-      point.x + (horizontal ? -6 : 0),
-      point.y + (horizontal ? 0 : outwardY * 6),
+      point.x + (horizontal ? -offset : 0),
+      point.y + (horizontal ? 0 : outwardY * offset),
     );
     return;
   }
   ctx.save();
-  ctx.translate(point.x, point.y + outwardY * 6);
+  ctx.translate(point.x, point.y + outwardY * offset);
   ctx.rotate(rotation);
   ctx.textAlign = outwardY < 0 ? 'left' : 'right';
   ctx.textBaseline = 'middle';
@@ -629,6 +872,7 @@ function drawThreeDDataLabel(
   defaultPosition = 't',
   leaderAnchor: Point = anchor,
   leaderLineEligible = true,
+  valueDisplayUnits?: ChartDisplayUnits | null,
 ): void {
   // Callers resolve indexed overrides through their per-series Map before the
   // paint loop. Falling back to Array.find here would quietly reintroduce
@@ -651,6 +895,7 @@ function drawThreeDDataLabel(
       ?? chart.categories[categoryIndex] ?? `${categoryIndex + 1}`,
     seriesName: series.name || `Series ${seriesIndex + 1}`,
     sourceValue: value,
+    valueDivisor: valueDisplayUnits?.divisor,
     percentRatio: percentValue != null && Number.isFinite(percentValue) ? percentValue : undefined,
     formatCode: override?.formatCode
       ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? series.valFormatCode,
@@ -665,7 +910,9 @@ function drawThreeDDataLabel(
     ptToPx,
   ) ?? 9 * ptToPx;
   const bold = override?.fontBold ?? defaults?.fontBold ?? chart.dataLabelFontBold ?? false;
-  const fallbackFamily = chartFontFamily(chart, chart.dataLabelFontFace);
+  const fallbackFamily = chartFontFamily(
+    chart, override?.fontFace ?? defaults?.fontFace ?? chart.dataLabelFontFace,
+  );
   ctx.font = `${bold ? 'bold ' : ''}${fontPx}px ${fallbackFamily}`;
   const fallbackColor = `#${override?.fontColor ?? defaults?.fontColor
     ?? series.labelColor ?? chart.dataLabelFontColor ?? '111111'}`;
@@ -944,6 +1191,126 @@ function drawThreeDAxisTitles(
   }
 }
 
+/** Paint `<c:serAx>` for the `standard` 3-D bar arrangement. Unlike a legend,
+ * this is a projected coordinate axis: its rule and tick anchors use the same
+ * model-space depth coordinate as the bar solids. */
+function drawThreeDSeriesAxis(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  chartRect: ChartRect,
+  projection: ChartThreeDProjection,
+  axis: NumericValueAxisPlan,
+  categoryCount: number,
+  categoryBetween: boolean,
+  categoryReversed: boolean,
+  orientation: 'vertical' | 'horizontal',
+  ptToPx: number,
+): void {
+  const spec = chart.threeD?.seriesAxis;
+  if (!spec || spec.hidden || chart.threeD?.barGrouping !== 'standard' || chart.series.length === 0) return;
+  const geometry = threeDAxisGeometry(
+    chart, projection, axis, categoryCount, categoryBetween, categoryReversed, orientation,
+  );
+  const wallGeometry = threeDWallGeometry(projection);
+  // A series axis is the depth edge opposite the visible side wall. In the
+  // default Office view the side wall is on the left and `<c:serAx>` is the
+  // right-hand floor edge; anchoring it to the value-axis corner incorrectly
+  // puts depth ticks and labels on the left.
+  const seriesAxisX = orientation === 'vertical'
+    ? wallGeometry.seriesAxisX : geometry.axisX;
+  const seriesAxisY = orientation === 'horizontal'
+    ? (wallGeometry.floorY === projection.front.y
+      ? projection.front.y + projection.front.h : projection.front.y)
+    : wallGeometry.floorY;
+  const start = projection.project(
+    seriesAxisX, seriesAxisY, projection.topology.nearDepth,
+  );
+  const end = projection.project(
+    seriesAxisX, seriesAxisY, projection.topology.farDepth,
+  );
+  const length = Math.hypot(end.x - start.x, end.y - start.y);
+  if (!(length > 1e-6)) return;
+  const tangent = { x: (end.x - start.x) / length, y: (end.y - start.y) / length };
+  let normal = { x: -tangent.y, y: tangent.x };
+  const sceneCenter = projection.project(
+    projection.front.x + projection.front.w / 2,
+    projection.front.y + projection.front.h / 2,
+    0.5,
+  );
+  const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  if ((midpoint.x - sceneCenter.x) * normal.x + (midpoint.y - sceneCenter.y) * normal.y < 0) {
+    normal = { x: -normal.x, y: -normal.y };
+  }
+  if ((spec.tickLabelPos === 'low' && normal.y < 0)
+    || (spec.tickLabelPos === 'high' && normal.y > 0)) {
+    normal = { x: -normal.x, y: -normal.y };
+  }
+
+  if (!spec.lineHidden) {
+    applyThreeDStroke(ctx, threeDStroke(
+      spec.lineColor, spec.lineWidthEmu, null, ptToPx, '898989', 1,
+    ));
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  }
+
+  const markSkip = Math.max(1, Math.floor(spec.tickMarkSkip ?? 1));
+  const labelSkip = Math.max(1, Math.floor(spec.tickLabelSkip ?? 1));
+  const tickMode = spec.majorTickMark ?? 'out';
+  const fontPx = chartTextFontSizePx(spec.fontSizeHpt, ptToPx) ?? 9 * ptToPx;
+  ctx.font = `${spec.fontItalic ? 'italic ' : ''}${spec.fontBold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, spec.fontFace)}`;
+  ctx.fillStyle = spec.fontColor ? `#${spec.fontColor}` : '#595959';
+  ctx.textAlign = Math.abs(normal.x) < 0.2 ? 'center' : normal.x < 0 ? 'right' : 'left';
+  ctx.textBaseline = Math.abs(normal.y) < 0.2 ? 'middle' : normal.y < 0 ? 'bottom' : 'top';
+  for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
+    const authoredDepth = projection.seriesDepth(seriesIndex, chart.series.length, false);
+    const depth = spec.orientation === 'maxMin' ? 1 - authoredDepth : authoredDepth;
+    const point = projection.project(seriesAxisX, seriesAxisY, depth);
+    if (!spec.lineHidden && seriesIndex % markSkip === 0 && tickMode !== 'none') {
+      const total = 6 * ptToPx;
+      const outer = tickMode === 'cross' ? total / 2 : tickMode === 'out' ? total : 0;
+      const inner = tickMode === 'cross' ? total / 2 : tickMode === 'in' ? total : 0;
+      ctx.beginPath();
+      ctx.moveTo(point.x + normal.x * outer, point.y + normal.y * outer);
+      ctx.lineTo(point.x - normal.x * inner, point.y - normal.y * inner);
+      ctx.stroke();
+    }
+    if (spec.tickLabelPos !== 'none' && seriesIndex % labelSkip === 0) {
+      ctx.fillText(
+        chart.series[seriesIndex].name || `Series ${seriesIndex + 1}`,
+        point.x + normal.x * (6 * ptToPx + 3),
+        point.y + normal.y * (6 * ptToPx + 3),
+      );
+    }
+  }
+  ctx.setLineDash([]);
+
+  if (spec.title) {
+    const titleFontPx = axisTitleFontPx(spec.titleFontSizeHpt, ptToPx);
+    drawThreeDAxisTitle(
+      ctx,
+      spec.title,
+      chartRect,
+      {
+        x: midpoint.x + normal.x * (fontPx + titleFontPx + 12),
+        y: midpoint.y + normal.y * (fontPx + titleFontPx + 12),
+      },
+      'horizontal',
+      titleFontPx,
+      chartFontFamily(chart, spec.titleFontFace, 'major'),
+      spec.titleFontColor,
+      spec.titleFontBold ?? true,
+      spec.titleFontItalic ?? false,
+      spec.titleRotation,
+      spec.titleVerticalMode,
+      spec.titleManualLayout,
+      Math.max(projection.front.w, projection.front.h),
+    );
+  }
+}
+
 function simpleLegend(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
@@ -952,6 +1319,7 @@ function simpleLegend(
   categoryDriven = false,
 ): void {
   if (!bounds) return;
+  paintLegendFrame(ctx, chart, bounds, ptToPx);
   const indexedPoints = new Map<number, ChartDataPointOverride>(
     chart.series[0]?.dataPointOverrides?.map(override => [override.idx, override]) ?? [],
   );
@@ -1116,6 +1484,7 @@ function axisPlan(
   orientation: 'vertical' | 'horizontal',
 ): NumericValueAxisPlan {
   const factor = percent ? 100 : 1;
+  const minorTickMark = chart.valAxisMinorTickMark ?? 'cross';
   return planNumericValueAxis({
     dataMin,
     dataMax,
@@ -1127,8 +1496,11 @@ function axisPlan(
     axisOrientation: orientation,
     logBase: chart.valAxisLogBase,
     reversed: chart.valAxisOrientation === 'maxMin',
-    needMinor: chart.valAxisMinorGridlines === true
-      || (chart.valAxisMinorTickMark != null && chart.valAxisMinorTickMark !== 'none'),
+    // Classic 3-D charts keep <c:minorTickMark> omitted in the package, while
+    // Excel's effective value-axis setting is `cross` with an automatic
+    // major/5 minor unit. This is an application default for 3-D charts, not
+    // CT_TickMark@val's schema default (which only applies to a present node).
+    needMinor: chart.valAxisMinorGridlines === true || minorTickMark !== 'none',
   });
 }
 
@@ -1136,6 +1508,93 @@ interface ThreeDStroke {
   color: string;
   width: number;
   dash: number[];
+}
+
+export interface ThreeDWallGeometry {
+  floor: readonly Point[];
+  sideWall: readonly Point[];
+  backWall: readonly Point[];
+  /** Model-space category coordinate used by the visible side wall. */
+  sideX: number;
+  /** Opposite category coordinate used by the series/depth axis. */
+  seriesAxisX: number;
+  floorY: number;
+  oppositeFloorY: number;
+  nearDepth: 0 | 1;
+  farDepth: 0 | 1;
+}
+
+export interface ThreeDPieSliceAngles {
+  /** Ascending model-angle interval consumed by the sector mesh. */
+  start: number;
+  end: number;
+  middle: number;
+  /** Authored leading ray, where the clockwise slice begins. */
+  leading: number;
+}
+
+/** Convert OOXML's clockwise first-slice angle from screen twelve o'clock into
+ * the X/Z model plane used by the shared 3-D camera. Positive model Z projects
+ * upward for the ordinary positive elevation, so twelve o'clock is +π/2 (not
+ * Canvas' -π/2). The mesh interval stays ascending while retaining the
+ * authored clockwise sector. */
+export function threeDPieSliceAngles(
+  firstSliceAngle: number | null | undefined,
+  cumulativeFraction: number,
+  sliceFraction: number,
+): ThreeDPieSliceAngles {
+  const normalizedFirst = firstSliceAngle != null && Number.isFinite(firstSliceAngle)
+    ? ((firstSliceAngle % 360) + 360) % 360 : 0;
+  const cumulative = Number.isFinite(cumulativeFraction)
+    ? Math.max(0, Math.min(1, cumulativeFraction)) : 0;
+  const fraction = Number.isFinite(sliceFraction)
+    ? Math.max(0, Math.min(1 - cumulative, sliceFraction)) : 0;
+  const leading = Math.PI / 2 - (normalizedFirst * Math.PI / 180 + cumulative * Math.PI * 2);
+  const trailing = leading - fraction * Math.PI * 2;
+  return {
+    start: Math.min(leading, trailing),
+    end: Math.max(leading, trailing),
+    middle: (leading + trailing) / 2,
+    leading,
+  };
+}
+
+/** Resolve the three authored CT_Surface faces from the same projected chart
+ * cuboid used by bars, grids and axes. Keeping the shared edges identical is
+ * what makes the side wall, floor and back-wall separator close as one drawing
+ * instead of a collection of screen-space approximations. */
+export function threeDWallGeometry(
+  projection: ChartThreeDProjection,
+): ThreeDWallGeometry {
+  const { front } = projection;
+  const xMin = front.x;
+  const xMax = front.x + front.w;
+  const sideX = projection.topology.farX === 'min' ? xMin : xMax;
+  const seriesAxisX = sideX === xMin ? xMax : xMin;
+  const floorY = projection.topology.axisY === 'min' ? front.y : front.y + front.h;
+  const oppositeFloorY = floorY === front.y ? front.y + front.h : front.y;
+  const { nearDepth, farDepth } = projection.topology;
+  const floorNearMin = projection.project(xMin, floorY, nearDepth);
+  const floorNearMax = projection.project(xMax, floorY, nearDepth);
+  const floorFarMax = projection.project(xMax, floorY, farDepth);
+  const floorFarMin = projection.project(xMin, floorY, farDepth);
+  const backTopMin = projection.project(xMin, oppositeFloorY, farDepth);
+  const backTopMax = projection.project(xMax, oppositeFloorY, farDepth);
+  const sideNearFloor = projection.project(sideX, floorY, nearDepth);
+  const sideFarFloor = projection.project(sideX, floorY, farDepth);
+  const sideFarTop = projection.project(sideX, oppositeFloorY, farDepth);
+  const sideNearTop = projection.project(sideX, oppositeFloorY, nearDepth);
+  return {
+    floor: [floorNearMin, floorNearMax, floorFarMax, floorFarMin],
+    sideWall: [sideNearFloor, sideFarFloor, sideFarTop, sideNearTop],
+    backWall: [floorFarMin, floorFarMax, backTopMax, backTopMin],
+    sideX,
+    seriesAxisX,
+    floorY,
+    oppositeFloorY,
+    nearDepth,
+    farDepth,
+  };
 }
 
 function threeDStroke(
@@ -1174,21 +1633,25 @@ function walls(
   ptToPx: number,
 ): void {
   const { front } = projection;
-  const farX = projection.topology.farX === 'min' ? front.x : front.x + front.w;
-  const floorY = projection.topology.axisY === 'min' ? front.y : front.y + front.h;
-  const oppositeFloorY = floorY === front.y ? front.y + front.h : front.y;
   const xMin = front.x;
   const xMax = front.x + front.w;
-  const farDepth = projection.topology.farDepth;
-  const nearDepth = projection.topology.nearDepth;
-  const floorNearMin = projection.project(xMin, floorY, nearDepth);
-  const floorNearMax = projection.project(xMax, floorY, nearDepth);
-  const floorFarMax = projection.project(xMax, floorY, farDepth);
-  const floorFarMin = projection.project(xMin, floorY, farDepth);
-  const backTopMin = projection.project(xMin, oppositeFloorY, farDepth);
-  const backTopMax = projection.project(xMax, oppositeFloorY, farDepth);
-  face(ctx, [floorNearMin, floorNearMax, floorFarMax, floorFarMin], '#F2F2F2', 0);
-  face(ctx, [floorFarMin, floorFarMax, backTopMax, backTopMin], '#F7F7F7', 0);
+  const geometry = threeDWallGeometry(projection);
+  const {
+    sideX: farX, floorY, oppositeFloorY, nearDepth, farDepth,
+  } = geometry;
+  const drawSurfaceFill = (
+    points: readonly Point[],
+    surface: NonNullable<ChartModel['threeD']>['floor'],
+  ) => {
+    // CT_Surface does not imply a paint when c:spPr/fill is omitted. Excel's
+    // classic 3-D default leaves these faces unfilled; only an authored fill
+    // creates an opaque wall. The wall/grid rules are painted independently.
+    if (surface?.fillHidden === true || !surface?.fillColor) return;
+    face(ctx, points, `#${surface.fillColor}`, 0);
+  };
+  drawSurfaceFill(geometry.floor, chart.threeD?.floor);
+  drawSurfaceFill(geometry.sideWall, chart.threeD?.sideWall);
+  drawSurfaceFill(geometry.backWall, chart.threeD?.backWall);
   const drawValueGrid = (values: readonly number[], stroke: ThreeDStroke) => {
     applyThreeDStroke(ctx, stroke);
     for (const value of values) {
@@ -1251,13 +1714,30 @@ function walls(
       ctx.beginPath(); ctx.moveTo(near.x, near.y); ctx.lineTo(far.x, far.y); ctx.stroke();
     }
   }
-  for (const [a, b] of [
-    [floorNearMin, floorNearMax], [floorNearMax, floorFarMax],
-    [floorFarMax, backTopMax], [backTopMax, backTopMin],
-    [backTopMin, floorFarMin], [floorFarMin, floorNearMin],
-  ] as const) {
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-  }
+  const strokeSurface = (
+    points: readonly Point[],
+    surface: NonNullable<ChartModel['threeD']>['floor'],
+  ) => {
+    if (surface?.lineHidden === true || points.length < 2) return;
+    applyThreeDStroke(ctx, threeDStroke(
+      surface?.lineColor, surface?.lineWidthEmu, surface?.lineDash,
+      ptToPx, '898989', 1,
+    ));
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length; index++) {
+      ctx.lineTo(points[index].x, points[index].y);
+    }
+    ctx.lineTo(points[0].x, points[0].y);
+    ctx.closePath();
+    ctx.stroke();
+  };
+  // Paint each CT_Surface perimeter in chart order. The back wall is last, so
+  // its authored rule owns the shared floor/back separator without drawing an
+  // extra synthetic line. This also restores the complete side-wall outline.
+  strokeSurface(geometry.floor, chart.threeD?.floor);
+  strokeSurface(geometry.sideWall, chart.threeD?.sideWall);
+  strokeSurface(geometry.backWall, chart.threeD?.backWall);
   ctx.setLineDash([]);
 }
 
@@ -1346,7 +1826,7 @@ function projectedAxisTick(
   const normal = screenAnnotationOutward(
     axisStart, axisEnd, projectedSceneCenter, screenDirection,
   );
-  const length = (level === 'minor' ? 4 : 6) * ptToPx;
+  const length = projectedAxisTickLengthPx(level, ptToPx);
   const sideLength = mode === 'cross' ? length / 2 : length;
   const outer = mode === 'out' || mode === 'cross' ? sideLength : 0;
   const inner = mode === 'in' || mode === 'cross' ? sideLength : 0;
@@ -1354,6 +1834,31 @@ function projectedAxisTick(
   ctx.moveTo(anchor.x + normal.x * outer, anchor.y + normal.y * outer);
   ctx.lineTo(anchor.x - normal.x * inner, anchor.y - normal.y * inner);
   ctx.stroke();
+}
+
+function projectedAxisTickLengthPx(level: 'major' | 'minor', ptToPx: number): number {
+  return (level === 'minor' ? 4 : 6) * ptToPx;
+}
+
+function projectedAxisTickOutwardExtentPx(
+  mode: string | null | undefined,
+  level: 'major' | 'minor',
+  ptToPx: number,
+): number {
+  if (mode !== 'out' && mode !== 'cross') return 0;
+  const length = projectedAxisTickLengthPx(level, ptToPx);
+  return mode === 'cross' ? length / 2 : length;
+}
+
+function projectedAxisTickLabelOffsetPx(
+  mode: string | null | undefined,
+  lineHidden: boolean | null | undefined,
+  ptToPx: number,
+  previousMinimum: number,
+): number {
+  if (lineHidden) return previousMinimum;
+  const tickOutset = projectedAxisTickOutwardExtentPx(mode, 'major', ptToPx);
+  return Math.max(previousMinimum, tickOutset + 3 * ptToPx);
 }
 
 interface ThreeDAxisGeometry {
@@ -1458,6 +1963,7 @@ function cartesianAxisTicks(
     front.y + front.h / 2,
     depth,
   );
+  const valueMinorTickMark = chart.valAxisMinorTickMark ?? 'cross';
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     applyThreeDStroke(ctx, threeDStroke(
       chart.valAxisLineColor, chart.valAxisLineWidthEmu, null, ptToPx, '898989', 1,
@@ -1477,7 +1983,7 @@ function cartesianAxisTicks(
     }
     for (const value of axis.minorTicks) {
       projectedAxisTick(
-        ctx, chart.valAxisMinorTickMark, valueAnchor(value), valueStart, valueEnd,
+        ctx, valueMinorTickMark, valueAnchor(value), valueStart, valueEnd,
         projectedCenter, orientation === 'vertical' ? 'horizontal' : 'vertical', 'minor', ptToPx,
       );
     }
@@ -1542,6 +2048,8 @@ function renderCartesian(
     || chart.chartType === 'clusteredBarH'
     || chart.chartType.startsWith('stackedBar');
   const horizontal = chart.chartType.endsWith('H') || chart.chartType.includes('BarH');
+  const stacked = chart.chartType.startsWith('stacked');
+  const depthArranged = bars && !stacked && chart.threeD.barGrouping === 'standard';
   const { plot, legend } = titleAndPlot(
     ctx, chart, rect, ptToPx, horizontal ? 'horizontal' : 'vertical',
   );
@@ -1549,10 +2057,19 @@ function renderCartesian(
     // Office places bar/column prisms in a compact depth box, while line and
     // area series planes span a substantially deeper Z scene. Projection and
     // view angles remain identical; only the authored family geometry differs.
-    sceneDepthScale: bars ? 0.10 : 0.40,
+    // A clustered/stacked bar group is one compact Z slab because its series
+    // are separated on the category axis (or accumulated on the value axis).
+    // A `standard` bar group instead uses `<c:serAx>` as a real third axis.
+    // ECMA-376 §21.2.2.41 defines the authored model percentage but does not
+    // prescribe Office's final projected auto-fit. For the default
+    // h=100/depth=100/elevation=15/rotation=20/perspective=30 view, measured
+    // Office axes are width:height:depth = 8.1:8.1:2.6. Standard Bar uses the
+    // authored ECMA FOV directly; the stronger line/area compatibility gain
+    // made its convergence visibly too severe.
+    sceneDepthScale: bars ? (depthArranged ? 0.65 : 0.10) : 0.40,
+    perspectiveTangentGain: depthArranged ? 1 : 2,
   });
   if (!projection) return true;
-  const stacked = chart.chartType.startsWith('stacked');
   const percent = chart.chartType.endsWith('Pct');
   const categories = chart.series.find(series => (series.categories?.length ?? 0) > 0)?.categories
     ?? chart.categories;
@@ -1662,10 +2179,11 @@ function renderCartesian(
     series.dataLabelOverrides?.map(override => [override.idx, override]) ?? [],
   ));
   if (bars) {
-    // `gapDepth` describes spacing around the complete 3-D cluster. Series in
-    // a clustered bar/column are adjacent on the category axis and share this
-    // one extruded depth interval; assigning each series its own Z slot makes
-    // them overlap in projection and flattens round/tapered cross-sections.
+    // ECMA-376 §21.2.2.77 keeps two non-stacked 3-D arrangements distinct:
+    // `clustered` series are adjacent on the category axis and share one depth
+    // interval, while `standard` series reuse one category footprint and
+    // occupy separate slots on `<c:serAx>`. Public models that omit the new
+    // carrier retain the pre-existing clustered fallback.
     const clusterDepth = projection.prismInterval(0, 1, true);
     const primitives: Array<{
       x: number; y: number; width: number; height: number;
@@ -1687,9 +2205,15 @@ function renderCartesian(
       : 150;
     for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
       const series = chart.series[seriesIndex];
-      const depthInterval = clusterDepth;
+      const depthInterval = depthArranged
+        ? projection.prismInterval(seriesIndex, seriesCount, false)
+        : clusterDepth;
       const clusterSlot = planThreeDBarClusterSlot(
-        interval, gapWidth, seriesIndex, seriesCount, stacked,
+        interval,
+        gapWidth,
+        depthArranged ? 0 : seriesIndex,
+        depthArranged ? 1 : seriesCount,
+        stacked || depthArranged,
       );
       for (let categoryIndex = 0; categoryIndex < categoryCount; categoryIndex++) {
         if (!hasFiniteValue(seriesIndex, categoryIndex)) continue;
@@ -1778,8 +2302,8 @@ function renderCartesian(
             outline,
             outlineColor: lineColor ? `#${lineColor}` : 'rgba(0,0,0,0.42)',
             outlineWidth: lineWidthEmu != null
-              ? Math.max(0.25, lineWidthEmu / EMU_PER_PT * ptToPx)
-              : 0.75,
+              ? threeDMeshOutlineWidthPx(lineWidthEmu, ptToPx)
+              : 0.75 * ptToPx / PT_TO_PX,
             outlineDash: lineDash,
             outlineCap: lineCap,
             outlineJoin: lineJoin,
@@ -1801,8 +2325,8 @@ function renderCartesian(
             outline,
             outlineColor: lineColor ? `#${lineColor}` : 'rgba(0,0,0,0.42)',
             outlineWidth: lineWidthEmu != null
-              ? Math.max(0.25, lineWidthEmu / EMU_PER_PT * ptToPx)
-              : 0.75,
+              ? threeDMeshOutlineWidthPx(lineWidthEmu, ptToPx)
+              : 0.75 * ptToPx / PT_TO_PX,
             outlineDash: lineDash,
             outlineCap: lineCap,
             outlineJoin: lineJoin,
@@ -1916,6 +2440,7 @@ function renderCartesian(
         deferredDataLabels.push(() => drawThreeDDataLabel(
           ctx, chart, series, item.seriesIndex, item.categoryIndex,
           item.labelValue, anchor, rect, ptToPx, 0, undefined, labelOverride,
+          't', anchor, true, chart.valAxisDisplayUnits,
         ));
       }
     }
@@ -2414,6 +2939,7 @@ function renderCartesian(
               : 0,
             undefined,
             labelOverride,
+            't', point, true, chart.valAxisDisplayUnits,
           ));
         }
       }
@@ -2442,6 +2968,18 @@ function renderCartesian(
   cartesianAxisTicks(
     ctx, chart, projection, axis, categoryCount, categoryBetween, categoryReversed,
     horizontal ? 'horizontal' : 'vertical', ptToPx,
+  );
+  drawThreeDSeriesAxis(
+    ctx,
+    chart,
+    rect,
+    projection,
+    axis,
+    categoryCount,
+    categoryBetween,
+    categoryReversed,
+    horizontal ? 'horizontal' : 'vertical',
+    ptToPx,
   );
   const resolvedAxisGeometry = threeDAxisGeometry(
     chart,
@@ -2507,21 +3045,34 @@ function renderCartesian(
     );
     ctx.textAlign = Math.abs(labelNormal.x) < 0.2 ? 'center' : labelNormal.x < 0 ? 'right' : 'left';
     ctx.textBaseline = Math.abs(labelNormal.y) < 0.2 ? 'middle' : labelNormal.y < 0 ? 'bottom' : 'top';
+    const labelOffset = projectedAxisTickLabelOffsetPx(
+      chart.valAxisMajorTickMark, chart.valAxisLineHidden, ptToPx, 5,
+    );
+    const displayUnitDivisor = chart.valAxisDisplayUnits?.divisor;
     for (const value of axis.majorTicks) {
       const point = horizontal
         ? projection.project(front.x + axis.fraction(value) * front.w, axisY, axisDepth)
         : projection.project(axisX, front.y + front.h - axis.fraction(value) * front.h, axisDepth);
       ctx.fillText(formatChartValWithCode(
-        percent ? value / 100 : value,
+        percent
+          ? value / 100
+          : displayUnitDivisor != null
+              && Number.isFinite(displayUnitDivisor)
+              && displayUnitDivisor > 0
+            ? value / displayUnitDivisor
+            : value,
         percent ? chart.valAxisFormatCode ?? '0%' : chart.valAxisFormatCode,
         chart.date1904,
-      ), point.x + labelNormal.x * 5, point.y + labelNormal.y * 5);
+      ), point.x + labelNormal.x * labelOffset, point.y + labelNormal.y * labelOffset);
     }
   }
   const categoryFontPx = chartTextFontSizePx(chart.catAxisFontSizeHpt, ptToPx) ?? 9 * ptToPx;
   ctx.font = `${chart.catAxisFontItalic ? 'italic ' : ''}${chart.catAxisFontBold ? 'bold ' : ''}${categoryFontPx}px ${fontFamily(chart.catAxisFontFace)}`;
   ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
   if (!chart.catAxisHidden && chart.catAxisTickLabelPos !== 'none') {
+    const labelOffset = projectedAxisTickLabelOffsetPx(
+      chart.catAxisMajorTickMark, chart.catAxisLineHidden, ptToPx, 6,
+    );
     const formattedCategories = Array.from({ length: categoryCount }, (_, index) =>
       formatCategoryLabel(
         String(categories[index] ?? index + 1),
@@ -2578,7 +3129,11 @@ function renderCartesian(
         const onScreenLeft = axisMidpoint.x <= sceneMidpoint.x;
         ctx.textAlign = onScreenLeft ? 'right' : 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(formattedCategories[categoryIndex], point.x + (onScreenLeft ? -6 : 6), point.y);
+        ctx.fillText(
+          formattedCategories[categoryIndex],
+          point.x + (onScreenLeft ? -labelOffset : labelOffset),
+          point.y,
+        );
       } else {
         const sceneMidpoint = projection.project(
           front.x + front.w / 2,
@@ -2598,6 +3153,7 @@ function renderCartesian(
           rotation,
           horizontal,
           outward.y < 0 ? -1 : 1,
+          labelOffset,
         );
       }
     }
@@ -2635,6 +3191,10 @@ function renderPie(
   // the same homogeneous camera as every cartesian mesh.
   let projection = planChartThreeDProjection({
     ...chart.threeD,
+    // Unlike the cartesian compatibility view, an omitted radial yaw starts
+    // at zero: the first-slice ray remains at twelve o'clock. An authored
+    // rotY still rotates the complete solid and its slice seams.
+    rotationY: chart.threeD.rotationY ?? 0,
     depthPercent: 100,
   }, plot, {
     sceneDepthScale: 1,
@@ -2666,12 +3226,9 @@ function renderPie(
   // Office's default pie wall is about .29r. The camera now decides which
   // side is visible; no screen-down wall or abs(rotX) special case remains.
   const thickness = radius * 0.30;
-  // firstSliceAngle is model-space geometry. rotY is already part of the
-  // camera and must not be added to the seam a second time.
-  const first = -Math.PI / 2
-    + (((((chart.firstSliceAngle != null && Number.isFinite(chart.firstSliceAngle)
-      ? chart.firstSliceAngle : 0) % 360) + 360) % 360) * Math.PI) / 180;
-  let angle = first;
+  // rotY is already part of the camera and must not be added to the seam a
+  // second time. Slice angles are resolved in the X/Z model plane below.
+  let cumulativeFraction = 0;
   const slices: Array<{
     index: number;
     start: number;
@@ -2681,6 +3238,7 @@ function renderPie(
     percentValue: number;
     centerX: number;
     centerDepth: number;
+    segments: number;
     mesh: ThreeDMesh;
     lineHidden: boolean;
     lineColor: string | null;
@@ -2692,20 +3250,30 @@ function renderPie(
   const labelOverrides = new Map<number, ChartDataLabelOverride>(
     series.dataLabelOverrides?.map(override => [override.idx, override]) ?? [],
   );
+  // Keep the projected circumference below roughly four pixels per facet,
+  // bounded to 128 segments for synchronous Canvas work. A fixed 32-facet
+  // ring is visibly polygonal on large/zoomed charts and makes an otherwise
+  // constant-width outline appear stepped at every facet boundary.
+  const pieRoundSegments = Math.max(48, Math.min(
+    128, Math.ceil(Math.PI * 2 * radius / 4),
+  ));
   for (const item of values) {
     const percentValue = (item.value / maxMagnitude) / scaledTotal;
-    const end = angle + percentValue * Math.PI * 2;
+    const angles = threeDPieSliceAngles(
+      chart.firstSliceAngle, cumulativeFraction, percentValue,
+    );
     const pointOverride = pointOverrides.get(item.index);
     const authoredColor = pointOverride?.fillHidden === true
       ? '00000000'
       : pointOverride?.color ?? series.dataPointColors?.[item.index] ?? series.color;
-    const middle = (angle + end) / 2;
+    const middle = angles.middle;
     const explosion = pointOverride?.explosion != null && Number.isFinite(pointOverride.explosion)
       ? Math.max(0, Math.min(100, pointOverride.explosion)) / 100
       : 0;
     const sliceCenterX = centerX + Math.cos(middle) * radius * explosion;
     const sliceCenterDepth = centerDepth
       + Math.sin(middle) * radius * explosion / projection.modelDepth;
+    const segments = Math.max(2, Math.ceil(pieRoundSegments * percentValue));
     const mesh = buildThreeDPieSectorMesh({
       centerX: sliceCenterX,
       centerY,
@@ -2713,17 +3281,18 @@ function renderPie(
       radius,
       modelDepth: projection.modelDepth,
       thickness,
-      startAngle: angle,
-      endAngle: end,
+      startAngle: angles.start,
+      endAngle: angles.end,
+      segments,
     });
     if (!mesh) {
-      angle = end;
+      cumulativeFraction += percentValue;
       continue;
     }
     slices.push({
       index: item.index,
-      start: angle,
-      end,
+      start: angles.start,
+      end: angles.end,
       color: authoredColor === '00000000'
         ? 'transparent'
         : authoredColor ? `#${authoredColor}` : colorFor(item.index),
@@ -2731,6 +3300,7 @@ function renderPie(
       percentValue,
       centerX: sliceCenterX,
       centerDepth: sliceCenterDepth,
+      segments,
       mesh,
       lineHidden: pointOverride?.lineHidden ?? series.lineHidden ?? false,
       lineColor: pointOverride?.lineColor ?? series.lineColor ?? null,
@@ -2742,7 +3312,7 @@ function renderPie(
         || series.chartexStyle?.lineJoin === 'bevel'
         ? series.chartexStyle.lineJoin : 'miter',
     });
-    angle = end;
+    cumulativeFraction += percentValue;
   }
   projection = fitChartThreeDProjectionToPoints(
     projection,
@@ -2755,29 +3325,64 @@ function renderPie(
     remaining: MAX_PROJECTED_STROKE_PRIMITIVES,
     exceeded: false,
   };
-  const pieFaces = slices.flatMap(slice => {
+  const outlineStyleForSlice = (slice: (typeof slices)[number]): MeshOutlineStyle | undefined => {
     const width = slice.lineWidthEmu != null
       ? Math.max(0.25, slice.lineWidthEmu / EMU_PER_PT * ptToPx)
       : 0.75 * ptToPx;
-    return projectThreeDMesh(
-      projection,
-      slice.mesh,
-      slice.color,
-      !slice.lineHidden && slice.lineColor ? {
-        color: `#${slice.lineColor}`,
-        width,
-        dash: pptxPresetDashArray(slice.lineDash, width),
-        cap: slice.lineCap,
-        join: slice.lineJoin,
-      } : undefined,
-      pieBudget,
-    );
-  });
+    return !slice.lineHidden && slice.lineColor ? {
+      color: `#${slice.lineColor}`,
+      width,
+      dash: pptxPresetDashArray(slice.lineDash, width),
+      cap: slice.lineCap,
+      join: slice.lineJoin,
+    } : undefined;
+  };
+  // Fill solids remain independently colored and depth-sorted. A uniform,
+  // non-exploded pie uses semantic continuous outline paths; differently
+  // styled or exploded points retain independent authored solid outlines.
+  const pieFillFaces = slices.flatMap(slice => projectThreeDMesh(
+    projection, slice.mesh, slice.color, undefined, pieBudget,
+  ));
+  const pieOutlineFaces: SceneFace[] = [];
+  const outlineStyles = slices.map(outlineStyleForSlice);
+  const firstOutline = outlineStyles[0];
+  const outlineKey = (style: MeshOutlineStyle | undefined) => style == null ? null : [
+    style.color, style.width, style.dash.join(','), style.cap, style.join,
+  ].join('|');
+  const uniformOutline = firstOutline != null
+    && outlineStyles.every(style => outlineKey(style) === outlineKey(firstOutline))
+    && slices.every(slice => Math.abs(slice.centerX - centerX) < 1e-9
+      && Math.abs(slice.centerDepth - centerDepth) < 1e-9);
+  if (uniformOutline) {
+    pieOutlineFaces.push(...projectThreeDPieOutline(
+      projection, slices, centerY, radius, thickness, firstOutline, pieBudget,
+    ));
+  } else {
+    for (let index = 0; index < slices.length; index++) {
+      const style = outlineStyles[index];
+      if (!style) continue;
+      pieOutlineFaces.push(...projectThreeDMesh(
+        projection, slices[index].mesh, 'transparent', style, pieBudget, true,
+      ));
+    }
+  }
   if (pieBudget.exceeded) {
     paintThreeDTooManyDataPoints(ctx, rect);
     return true;
   }
-  for (const item of sortProjectedSceneFaces(pieFaces)) paintSceneFace(ctx, item);
+  if (uniformOutline) {
+    for (const item of sortProjectedSceneFaces(pieFillFaces)) paintSceneFace(ctx, item);
+    // Semantic paths already contain only visible cap/wall boundaries. Paint
+    // them after all colored faces so neither adjacent coplanar slice can hide
+    // half the authored screen-space width.
+    for (const item of sortProjectedSceneFaces(pieOutlineFaces)) paintSceneFace(ctx, item);
+  } else {
+    // Exploded or independently styled slices still require inter-solid depth
+    // ordering because their authored outlines can genuinely occlude peers.
+    for (const item of sortProjectedSceneFaces([
+      ...pieFillFaces, ...pieOutlineFaces,
+    ])) paintSceneFace(ctx, item);
+  }
   for (const slice of slices) {
     const middle = (slice.start + slice.end) / 2;
     const labelOverride = labelOverrides.get(slice.index);
@@ -2789,7 +3394,7 @@ function renderPie(
       ) ?? 9 * ptToPx;
       ctx.font = `${labelOverride?.fontBold ?? defaults?.fontBold
         ?? chart.dataLabelFontBold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(
-        chart, chart.dataLabelFontFace,
+        chart, labelOverride?.fontFace ?? defaults?.fontFace ?? chart.dataLabelFontFace,
       )}`;
       const labelText = effectiveDataLabelText({
         customText: labelOverride?.text,
@@ -2807,7 +3412,9 @@ function renderPie(
         separator: labelOverride?.separator ?? defaults?.separator,
         date1904: chart.date1904,
       });
-      const fallbackFamily = chartFontFamily(chart, chart.dataLabelFontFace);
+      const fallbackFamily = chartFontFamily(
+        chart, labelOverride?.fontFace ?? defaults?.fontFace ?? chart.dataLabelFontFace,
+      );
       const richMeasure = labelOverride?.text && labelOverride.richRuns?.length
         ? resolveRichDataLabelBlock(ctx, {
           runs: labelOverride.richRuns,

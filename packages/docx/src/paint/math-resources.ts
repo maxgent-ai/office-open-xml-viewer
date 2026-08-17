@@ -1,21 +1,14 @@
-import { mathToMathML, recolorSvg } from '@silurus/ooxml-core';
+import { mathToMathML, rasterizeMathSvg } from '@silurus/ooxml-core';
 import type {
   MathLayoutResource,
   MathOccurrence,
   MathRenderer,
 } from '../layout/types.js';
 
-function svgToImage(svg: string): Promise<HTMLImageElement> {
-  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-  const image = new Image();
-  return new Promise((resolve, reject) => {
-    image.onload = () => resolve(image);
-    image.onerror = reject;
-    image.src = url;
-  });
-}
-
-export async function prepareBrowserMathResources(
+/** Prepare the external math-engine outputs consumed by layout and paint.
+ * This is a resource-adapter concern rather than a paint operation: layout
+ * receives immutable extents while paint receives only the decoded drawable. */
+export async function prepareMathResources(
   occurrences: readonly MathOccurrence[],
   math: MathRenderer,
 ) {
@@ -31,7 +24,7 @@ export async function prepareBrowserMathResources(
     seen.add(occurrence.resourceKey);
     try {
       const output = await math.mathMLToSvg(mathToMathML(occurrence.nodes, occurrence.display));
-      const image = await svgToImage(recolorSvg(output.svg, '#000000'));
+      const image = await rasterizeMathSvg(output, '#000000');
       records.push({
         resourceKey: occurrence.resourceKey,
         widthEm: output.widthEm,
@@ -39,7 +32,7 @@ export async function prepareBrowserMathResources(
         descentEm: output.descentEm,
         diagnostics: [],
       });
-      drawables.set(occurrence.resourceKey, image);
+      drawables.set(occurrence.resourceKey, image.source);
     } catch {
       records.push({
         resourceKey: occurrence.resourceKey,

@@ -72,6 +72,9 @@ jobs:
       - name: Guard against base64-inlined WASM
         run: pnpm check:no-inline-wasm
 
+      - name: Verify production render-worker assets
+        run: pnpm check:production-render-workers
+
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,
       # module/type field sanity). attw checks that every entrypoint resolves to

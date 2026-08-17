@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildThreeDOutlinePaths } from './three-d-outline.js';
+import { buildThreeDOutlinePaths, buildThreeDOutlineTopology } from './three-d-outline.js';
 import type { ThreeDScenePoint } from './three-d.js';
 
 const point = (x: number, y: number, depth = 0): ThreeDScenePoint => ({ x, y, depth });
@@ -28,6 +28,21 @@ describe('buildThreeDOutlinePaths', () => {
     expect(first).toHaveLength(3);
     expect(first.every(path => path.length === 2)).toBe(true);
     expect(signature(first)).toEqual(signature(reordered));
+  });
+
+  it('retains one deterministic junction with all incident mesh edges', () => {
+    const center = point(0, 0);
+    const topology = buildThreeDOutlineTopology([
+      [center, point(1, 0)],
+      [point(0, -1), center],
+      [center, point(-1, 0)],
+    ]);
+
+    expect(topology.junctions).toHaveLength(1);
+    expect(topology.junctions[0].point).toEqual(center);
+    expect(topology.junctions[0].neighbours).toEqual([
+      point(-1, 0), point(0, -1), point(1, 0),
+    ]);
   });
 
   it('joins only degree-two vertices into one maximal open path', () => {

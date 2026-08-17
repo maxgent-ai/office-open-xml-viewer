@@ -8,10 +8,10 @@ import type {
 } from './types.js';
 import type { Stroke, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
-import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
+import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { formatA1, parseA1 } from './a1.js';
 import { drawStackedVerticalChar } from './vertical-text.js';
@@ -1403,49 +1403,18 @@ function drawMultiLineRichText(
 ): void {
   const { alignV, cy, cellH, paddingY } = geom;
 
-  // Split runs into lines at LF. A run "A\nB" yields "A" on the current line and
-  // "B" on a new one; an empty piece (consecutive / leading / trailing LF) adds
-  // no segment but the line still exists, so a blank line is preserved.
-  const lineRuns: Run[][] = [[]];
-  for (const run of runs) {
-    const parts = run.text.split('\n');
-    for (let p = 0; p < parts.length; p++) {
-      if (p > 0) lineRuns.push([]);
-      if (parts[p] !== '') lineRuns[lineRuns.length - 1].push({ ...run, text: parts[p] });
-    }
-  }
-
-  // Per-line height source (pt) + the family of that height run. A text line uses
-  // the max run size on it; a blank line inherits the nearest preceding text
-  // run's size AND family — the same seed `layoutRichTextLines` / `drawShapeText`
-  // use for blank lines (PR #585). The family drives the single-line-height floor.
-  let lastTextPt = baseFont.size;
-  let lastTextFamily: string | null = baseFont.name;
-  const lineSizes = lineRuns.map((lr) => {
-    if (lr.length === 0) return { pt: lastTextPt || DEFAULT_FONT_SIZE, family: lastTextFamily };
-    let m = 0;
-    let family: string | null = null;
-    for (const r of lr) {
-      const rf = applyRunFont(baseFont, r);
-      if (rf.size > m) { m = rf.size; family = rf.name; }
-      lastTextPt = rf.size; // nearest preceding text size, for a following blank line
-      lastTextFamily = rf.name;
-    }
-    return { pt: m, family };
-  });
-  const lineHeights = lineSizes.map((s) => vMetricPx(s.pt, cs, 1.2, s.family ?? undefined));
-  const totalH = lineHeights.reduce((a, b) => a + b, 0);
+  const lines = richHardBreakLineMetrics(runs, baseFont, cs);
+  const totalH = lines.reduce((sum, line) => sum + line.heightPx, 0);
 
   let yy: number;
   if (alignV === 'top') yy = cy + paddingY;
   else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
   else yy = cy + cellH - totalH - paddingY;
 
-  for (let li = 0; li < lineRuns.length; li++) {
-    const lr = lineRuns[li];
+  for (const line of lines) {
     // A blank line draws nothing but still reserves its height.
-    if (lr.length > 0) drawRichLine(ctx, lr, baseFont, geom, cs, dpr, opts, yy, 'top');
-    yy += lineHeights[li];
+    if (line.runs.length > 0) drawRichLine(ctx, line.runs, baseFont, geom, cs, dpr, opts, yy, 'top');
+    yy += line.heightPx;
   }
 }
 
@@ -2960,6 +2929,7 @@ interface SheetRenderCache {
   cellMap: Map<string, Cell>;
   nonEmptyColsByRow: Map<number, readonly number[]>;
   cfContext: CfContext;
+  mergeAnchorSet: Set<string>;
   mergeSkipSet: Set<string>;
   autoFilterCells: Set<string>;
   hyperlinkMap: Map<string, string>;
@@ -2994,11 +2964,17 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
   // Merge skip-set is pure topology (no scaled sizes) so it is cacheable; the
   // anchor map's pixel sizes depend on cellScale and stay per-frame.
   const mergeSkipSet = new Set<string>();
+  const mergeAnchorSet = new Set<string>();
+  const mergeAnchorIdentity = coordinateIndexIdentity(
+    'worksheet-merge-anchor-index',
+    'index-merge-anchor-coordinates',
+  );
   const mergeIdentity = coordinateIndexIdentity(
     'worksheet-merge-skip-index',
     'expand-merged-cell-coordinates',
   );
   for (const mc of worksheet.mergeCells ?? []) {
+    addCoordinateIndexEntry(mergeAnchorSet, `${mc.top}:${mc.left}`, mergeAnchorIdentity);
     assertCoordinateRangeArea(mc, mergeIdentity, 1);
     for (let r = mc.top; r <= mc.bottom; r++) {
       for (let c = mc.left; c <= mc.right; c++) {
@@ -3047,6 +3023,7 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
     cellMap,
     nonEmptyColsByRow,
     cfContext: compileCf(worksheet, cellMap),
+    mergeAnchorSet,
     mergeSkipSet,
     autoFilterCells,
     hyperlinkMap,
@@ -3056,6 +3033,374 @@ export function getSheetRenderCache(worksheet: Worksheet): SheetRenderCache {
   };
   sheetRenderCache.set(worksheet, entry);
   return entry;
+}
+
+/** Worksheets whose absent row heights have already been resolved against the
+ * loaded document fonts and effective column widths. Kept outside the public
+ * model: parsed `row.height` / `rowHeights` continue to mean authored OOXML,
+ * while viewer-owned projections may carry the derived display heights. */
+interface AutoRowHeightState {
+  /** Derived point heights keyed by 1-based row. Used to distinguish an
+   * automatic value from a later user resize when column widths change. */
+  derived: Map<number, number>;
+}
+
+const autoRowHeightState = new WeakMap<Worksheet, AutoRowHeightState>();
+
+function effectiveMeasurementFont(
+  base: CellFont,
+  cf: CfResult,
+  tableStyle: TableCellStyle | undefined,
+  styles: Styles,
+): CellFont {
+  const dxfList = styles.dxfs ?? [];
+  const tableFontDxf = tableStyle
+    ? tableStyle.isHeader
+      ? dxfList[tableStyle.headerRowDxf ?? -1]
+      : tableStyle.isTotals
+        ? dxfList[tableStyle.totalRowDxf ?? -1]
+        : tableStyle.isLastCol && tableStyle.lastColumnDxf != null
+          ? dxfList[tableStyle.lastColumnDxf]
+          : tableStyle.isFirstCol && tableStyle.firstColumnDxf != null
+            ? dxfList[tableStyle.firstColumnDxf]
+            : tableStyle.stripeDxf != null
+              ? dxfList[tableStyle.stripeDxf]
+              : dxfList[tableStyle.wholeTableDxf ?? -1]
+    : undefined;
+  const tableBold = tableStyle
+    ? tableStyle.isCustom
+      ? !!tableFontDxf?.font?.bold
+      : tableStyle.isHeader || tableStyle.isTotals
+    : false;
+  const bold = base.bold || !!cf.fontBold || tableBold;
+  const italic = base.italic || !!cf.fontItalic;
+  return bold === base.bold && italic === base.italic
+    ? base
+    : { ...base, bold, italic };
+}
+
+function richHardBreakLineMetrics(
+  runs: Run[],
+  baseFont: CellFont,
+  cs: number,
+): Array<{ runs: Run[]; heightPx: number }> {
+  const lineRuns: Run[][] = [[]];
+  for (const run of runs) {
+    const parts = run.text.split('\n');
+    for (let index = 0; index < parts.length; index++) {
+      if (index > 0) lineRuns.push([]);
+      if (parts[index] !== '') lineRuns[lineRuns.length - 1].push({ ...run, text: parts[index] });
+    }
+  }
+
+  let lastTextPt = baseFont.size;
+  let lastTextFamily: string | null = baseFont.name;
+  return lineRuns.map((line) => {
+    if (line.length === 0) {
+      return {
+        runs: line,
+        heightPx: vMetricPx(lastTextPt || DEFAULT_FONT_SIZE, cs, 1.2, lastTextFamily ?? undefined),
+      };
+    }
+    let maxPt = 0;
+    let maxFamily: string | null = null;
+    for (const run of line) {
+      const font = applyRunFont(baseFont, run);
+      if (font.size > maxPt) {
+        maxPt = font.size;
+        maxFamily = font.name;
+      }
+      lastTextPt = font.size;
+      lastTextFamily = font.name;
+    }
+    return {
+      runs: line,
+      heightPx: vMetricPx(maxPt, cs, 1.2, maxFamily ?? undefined),
+    };
+  });
+}
+
+function requiredAutoCellHeightPx(
+  ctx: CanvasRenderingContext2D,
+  cell: Cell,
+  text: string,
+  font: CellFont,
+  xf: CellXf,
+  cellWidthPx: number,
+  mdw: number,
+  iconSet: CfResult['iconSet'],
+  currentRowHeightPx: number,
+): number {
+  const paddingX = 3;
+  const paddingY = 2;
+  const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
+  const indentPx = xf.indent ? Math.round(xf.indent * 3 * mdw) : 0;
+  // Keep the wrapping width identical to paint: icon-set cells reserve their
+  // current icon square plus 4px. The icon itself scales with the row height,
+  // so the row solver below iterates this monotonic dependency to a fixed point.
+  const iconSize = iconSet
+    ? Math.max(8, Math.round(Math.min(cellWidthPx, currentRowHeightPx) * 0.55))
+    : 0;
+  const iconPad = iconSize > 0 ? iconSize + 4 : 0;
+  const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
+  const availableWidth = Math.max(1, cellWidthPx - leftPad - paddingX);
+  const runs = cell.value.type === 'text' ? cell.value.runs : undefined;
+  const hasRichText = !!runs?.length;
+  const rotation = xf.textRotation ?? 0;
+
+  ctx.font = buildFont(font, 1);
+  if (rotation === 255) {
+    // Paint deliberately uses the compact 1.1 slot without a document-family
+    // design-line floor for stacked glyphs; auto-fit must use the same metric.
+    return [...text].length * vMetricPx(font.size, 1, 1.1) + paddingY * 2;
+  }
+  if (rotation > 0) {
+    const angle = rotation <= 90
+      ? rotation * Math.PI / 180
+      : (rotation - 90) * Math.PI / 180;
+    const lineHeight = vMetricPx(font.size, 1, 1.2, font.name ?? undefined);
+    const textWidth = ctx.measureText(text.replace(/\n/g, ' ')).width;
+    return Math.abs(Math.sin(angle)) * textWidth
+      + Math.abs(Math.cos(angle)) * lineHeight
+      + paddingY * 2;
+  }
+
+  let lineHeights: number[];
+  if (xf.wrapText && hasRichText) {
+    lineHeights = layoutRichTextLines(ctx, runs, font, 1, availableWidth)
+      .map((line) => vMetricPx(line.maxFontSize, 1, 1.2, line.maxFontFamily ?? undefined));
+  } else if (xf.wrapText) {
+    ctx.font = buildFont(font, 1);
+    const lineHeight = vMetricPx(font.size, 1, 1.2, font.name ?? undefined);
+    lineHeights = wrapTextLines(ctx, text, availableWidth).map(() => lineHeight);
+  } else if (hasRichText) {
+    lineHeights = richHardBreakLineMetrics(runs, font, 1).map((line) => line.heightPx);
+  } else {
+    const lineCount = Math.max(1, text.split('\n').length);
+    const lineHeight = vMetricPx(font.size, 1, 1.2, font.name ?? undefined);
+    lineHeights = Array.from({ length: lineCount }, () => lineHeight);
+  }
+
+  const textHeight = lineHeights.reduce((sum, height) => sum + height, 0);
+  // One ordinary 11pt line fits Excel's 15pt default row: its design line box
+  // plus the bottom inset is exactly 20 CSS px. Multi-line blocks need both
+  // top and bottom insets because they use the wrapped top-baseline painter.
+  return textHeight + (lineHeights.length > 1 ? paddingY * 2 : paddingY);
+}
+
+function cellCanGrowAutomaticRow(
+  cell: Cell,
+  font: CellFont,
+  xf: CellXf,
+  defaultFontLineHeightPx: number,
+): boolean {
+  if (xf.wrapText || (xf.textRotation ?? 0) > 0) return true;
+  if (cell.value.type === 'text') {
+    if (cell.value.text.includes('\n')) return true;
+    for (const run of cell.value.runs ?? []) {
+      const runFont = applyRunFont(font, run);
+      if (vMetricPx(runFont.size, 1, 1.2, runFont.name ?? undefined) > defaultFontLineHeightPx) {
+        return true;
+      }
+    }
+  }
+  // Excel's authored/default row height already accommodates a Normal-style
+  // single line. Comparing that design line box with the rounded CSS-pixel row
+  // height can spuriously grow every ordinary row by one pixel (for example a
+  // 14.25pt default row rounds to 19px while Calibri 11pt plus cell inset is
+  // 20px). Only a font whose design line box exceeds the workbook Normal font
+  // can make an otherwise unwrapped, single-line cell eligible for auto-fit.
+  return vMetricPx(font.size, 1, 1.2, font.name ?? undefined) > defaultFontLineHeightPx;
+}
+
+/**
+ * Resolve Excel's display-time row auto-fit for rows that omit `row@ht`.
+ *
+ * ECMA-376 Part 1 §18.3.1.73 defines `customHeight` only as the fact that a row
+ * was manually sized and defines `ht` as the point height; it does not specify
+ * an auto-fit formula. Office behavior therefore supplies the limited
+ * compatibility contract here: explicit/hidden heights and a manually set
+ * sheet default win, merged cells do not drive auto-fit, and unmerged cells use
+ * the exact same Canvas wrapping, rich-run line metrics, font fallback, and
+ * rotation geometry as cell paint. The sheet-default distinction was verified
+ * with an Office boundary workbook that varied only sheetFormatPr@customHeight.
+ * The function mutates only a viewer/render-owned worksheet projection.
+ */
+export function applyAutoRowHeights(
+  ctx: CanvasRenderingContext2D,
+  worksheet: Worksheet,
+  styles: Styles,
+): boolean {
+  if (autoRowHeightState.has(worksheet) || worksheet.isChartSheet) return false;
+  if (worksheet.defaultRowHeightCustom === true) {
+    autoRowHeightState.set(worksheet, { derived: new Map() });
+    return false;
+  }
+
+  const geometry = getGridGeometryForWorksheet(worksheet);
+  const defaultHeightPx = rowHeightToPx(worksheet.defaultRowHeight);
+  const defaultFontLineHeightPx = vMetricPx(
+    worksheet.defaultFontSize ?? DEFAULT_FONT_SIZE,
+    1,
+    1.2,
+    worksheet.defaultFontFamily,
+  );
+  const { cfContext, mergeAnchorSet, mergeSkipSet, tableStyleMap } = getSheetRenderCache(worksheet);
+  const derived = new Map<number, number>();
+  let changed = false;
+  ctx.save();
+  try {
+    for (const row of worksheet.rows) {
+      // `height !== null` is the parser-preserved `row@ht` fact. A pre-existing
+      // view override on an otherwise automatic row (resize/worker projection)
+      // is also authoritative for this projection.
+      if (
+        row.hidden ||
+        row.customHeight === true ||
+        row.height !== null ||
+        Object.hasOwn(worksheet.rowHeights, row.index)
+      ) continue;
+      let requiredPx = defaultHeightPx;
+      const iconMeasurements: Array<{
+        cell: Cell;
+        text: string;
+        font: CellFont;
+        xf: CellXf;
+        cellWidthPx: number;
+        iconSet: CfResult['iconSet'];
+      }> = [];
+      for (const cell of row.cells) {
+        const key = `${row.index}:${cell.col}`;
+        if (
+          cell.value.type === 'empty' ||
+          mergeAnchorSet.has(key) ||
+          mergeSkipSet.has(key)
+        ) continue;
+        const { font, xf } = resolveXf(styles, cell.styleIndex ?? 0);
+        // The common spreadsheet case (ordinary unwrapped default-font cells)
+        // cannot exceed the default row. Avoid number formatting, CF lookup,
+        // and Canvas measurement for those cells so one-time auto-fit remains
+        // O(cells) with a small constant even on a dense virtualized sheet.
+        if (!cellCanGrowAutomaticRow(cell, font, xf, defaultFontLineHeightPx)) continue;
+        const cf = evaluateCf(cell, row.index, cell.col, cfContext, styles.dxfs ?? []);
+        const measuredFont = effectiveMeasurementFont(font, cf, tableStyleMap.get(key), styles);
+        const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
+        const text = formatted.text;
+        if (!text || (text === '0' && worksheet.showZeros === false)) continue;
+        const cellWidthPx = geometry.col.sizeOf(cell.col);
+        requiredPx = Math.max(requiredPx, requiredAutoCellHeightPx(
+          ctx,
+          cell,
+          text,
+          measuredFont,
+          xf,
+          cellWidthPx,
+          geometry.maximumDigitWidth,
+          cf.iconSet,
+          Math.ceil(requiredPx),
+        ));
+        if (cf.iconSet) {
+          iconMeasurements.push({ cell, text, font: measuredFont, xf, cellWidthPx, iconSet: cf.iconSet });
+        }
+      }
+      // Icon size depends on the final row height used by paint. Re-evaluate
+      // icon-bearing cells until their reserved width and row height agree.
+      // The relation is monotonic and saturates once the icon reaches the cell
+      // width. The hard bound prevents malformed input from creating an
+      // unbounded loop; the final conservative pass uses that saturated width.
+      let converged = iconMeasurements.length === 0;
+      for (let iteration = 0; !converged && iteration < 32; iteration++) {
+        // Paint receives the integer CSS-pixel row size reconstructed from the
+        // derived point height. Resolve every icon against that same candidate,
+        // not the pre-rounded floating measurement, or a 0.1px difference can
+        // cross the icon's round() boundary and add an unmeasured wrap line.
+        const candidateHeightPx = Math.ceil(requiredPx);
+        let nextRequiredPx = requiredPx;
+        for (const measurement of iconMeasurements) {
+          nextRequiredPx = Math.max(nextRequiredPx, requiredAutoCellHeightPx(
+            ctx,
+            measurement.cell,
+            measurement.text,
+            measurement.font,
+            measurement.xf,
+            measurement.cellWidthPx,
+            geometry.maximumDigitWidth,
+            measurement.iconSet,
+            candidateHeightPx,
+          ));
+        }
+        requiredPx = nextRequiredPx;
+        converged = Math.ceil(requiredPx) === candidateHeightPx;
+      }
+      if (!converged) {
+        for (const measurement of iconMeasurements) {
+          requiredPx = Math.max(requiredPx, requiredAutoCellHeightPx(
+            ctx,
+            measurement.cell,
+            measurement.text,
+            measurement.font,
+            measurement.xf,
+            measurement.cellWidthPx,
+            geometry.maximumDigitWidth,
+            measurement.iconSet,
+            measurement.cellWidthPx,
+          ));
+        }
+      }
+      const roundedPx = Math.ceil(requiredPx);
+      if (roundedPx > defaultHeightPx) {
+        const pointHeight = pxToRowHeight(roundedPx);
+        worksheet.rowHeights[row.index] = pointHeight;
+        derived.set(row.index, pointHeight);
+        changed = true;
+      }
+    }
+  } finally {
+    ctx.restore();
+  }
+  autoRowHeightState.set(worksheet, { derived });
+  if (changed) GridGeometry.invalidate(worksheet);
+  return changed;
+}
+
+export function hasPreparedAutoRowHeights(worksheet: Worksheet): boolean {
+  return autoRowHeightState.has(worksheet);
+}
+
+/** @internal Viewer/worker transport of display-derived heights. The returned
+ * map is immutable by convention; authored/manual row sizes are deliberately
+ * absent so they remain a separate override class. */
+export function derivedAutoRowHeights(worksheet: Worksheet): ReadonlyMap<number, number> {
+  return autoRowHeightState.get(worksheet)?.derived ?? new Map();
+}
+
+/** @internal Mark a render-local worker projection whose derived row heights
+ * were already supplied by its owning viewer. */
+export function markAutoRowHeightsPrepared(worksheet: Worksheet): void {
+  if (!autoRowHeightState.has(worksheet)) {
+    autoRowHeightState.set(worksheet, { derived: new Map() });
+  }
+}
+
+/** Drop display-derived row heights before refitting after a view-only column
+ * resize. A row manually resized after auto-fit is intentionally preserved:
+ * its current value no longer equals the derived value recorded here. */
+export function invalidateAutoRowHeights(
+  worksheet: Worksheet,
+  preserveRows: Iterable<number> = [],
+): void {
+  const state = autoRowHeightState.get(worksheet);
+  if (!state) return;
+  const preserved = new Set(preserveRows);
+  let changed = false;
+  for (const [row, derived] of state.derived) {
+    if (preserved.has(row)) continue;
+    if (worksheet.rowHeights[row] !== derived) continue;
+    delete worksheet.rowHeights[row];
+    changed = true;
+  }
+  autoRowHeightState.delete(worksheet);
+  if (changed) GridGeometry.invalidate(worksheet);
 }
 
 interface OverflowColumnOverscan {
@@ -4171,7 +4516,7 @@ function drawShape(
 // stored on the instance) and tree-shakes out otherwise.
 interface MathRender {
   /** The equation rasterized as opaque black glyphs on transparent. */
-  img: HTMLImageElement;
+  raster: RasterizedMathSvg;
   /** baseline-relative extents in em (1em = the equation's font size in px). */
   widthEm: number;
   ascentEm: number;
@@ -4185,42 +4530,9 @@ const mathRenders = new WeakMap<MathNode[], MathRender>();
 function tintedMathImage(render: MathRender, color: string): CanvasImageSource {
   const cached = render.tinted.get(color);
   if (cached) return cached;
-  const iw = render.img.naturalWidth || 1;
-  const ih = render.img.naturalHeight || 1;
-  const canvas = document.createElement('canvas');
-  canvas.width = iw;
-  canvas.height = ih;
-  const cx = canvas.getContext('2d');
-  if (!cx) return render.img;
-  cx.drawImage(render.img, 0, 0, iw, ih);
-  cx.globalCompositeOperation = 'source-in';
-  cx.fillStyle = color;
-  cx.fillRect(0, 0, iw, ih);
-  render.tinted.set(color, canvas);
-  return canvas;
-}
-
-function svgToImage(svg: string): Promise<HTMLImageElement> {
-  const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-  const img = new Image();
-  return new Promise((resolve, reject) => {
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
-  });
-}
-
-// px-per-em rasterization resolution for equation SVGs — keeps glyphs crisp on
-// HiDPI canvases (a MathJax SVG otherwise rasterizes at a small intrinsic size
-// and drawImage upscales it). 256 stays crisp past 40pt at devicePixelRatio 3.
-const MATH_RASTER_PX_PER_EM = 256;
-function sizeSvgForRaster(svg: string, widthEm: number, heightEm: number): string {
-  const w = Math.max(1, Math.round(widthEm * MATH_RASTER_PX_PER_EM));
-  const h = Math.max(1, Math.round(heightEm * MATH_RASTER_PX_PER_EM));
-  return svg.replace(/<svg([^>]*?)>/, (_m, attrs: string) => {
-    const cleaned = attrs.replace(/\s(?:width|height)="[^"]*"/g, '');
-    return `<svg${cleaned} width="${w}" height="${h}">`;
-  });
+  const tinted = tintMathRaster(render.raster, color);
+  render.tinted.set(color, tinted);
+  return tinted;
 }
 
 /** Gather every math run reachable from a worksheet's shapes. Equations live
@@ -4267,10 +4579,9 @@ export async function prepareWorksheetMath(ws: Worksheet, math: MathRenderer): P
     if (mathRenders.has(r.nodes)) continue;
     try {
       const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
-      const sized = sizeSvgForRaster(recolorSvg(out.svg, '#000000'), out.widthEm, out.ascentEm + out.descentEm);
-      const img = await svgToImage(sized);
+      const raster = await rasterizeMathSvg(out, '#000000');
       mathRenders.set(r.nodes, {
-        img,
+        raster,
         widthEm: out.widthEm,
         ascentEm: out.ascentEm,
         descentEm: out.descentEm,

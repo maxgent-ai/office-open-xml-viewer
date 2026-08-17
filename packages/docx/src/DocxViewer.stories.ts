@@ -1,14 +1,9 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
-// Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
-// In the monorepo the stories build the same MathRenderer from the core engine.
-import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
-import { renderSimpleThreeDChart } from '../../core/src/chart/three-d-renderer';
-import { renderRegionMapChart } from '../../core/src/chart/region-map-renderer';
-const math = { loadMathJax, mathMLToSvg };
-const threeD = { render: renderSimpleThreeDChart };
-const regionMap = { render: renderRegionMapChart };
+import { math } from '../../../src/math';
+import { threeD } from '../../../src/three-d';
+import { regionMap } from '../../../src/region-map';
 
 type Args = {
   width: number;
@@ -142,18 +137,9 @@ function createCanvasSpinner(): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
-// File-upload viewer
+// File-upload viewer (shared by main-thread and Web Worker stories)
 // ---------------------------------------------------------------------------
-export const FileUpload: Story = {
-  name: 'Load from file',
-  args: { width: 700, debug: true },
-  argTypes: {
-    debug: {
-      control: 'boolean',
-      description: 'Print resource-usage metrics to the browser console',
-    },
-  },
-  render(args) {
+function renderFileUpload(args: Args, mode: 'main' | 'worker'): HTMLElement {
     const root = document.createElement('div');
     root.style.cssText = 'font-family:sans-serif;padding:16px;';
 
@@ -207,6 +193,7 @@ export const FileUpload: Story = {
       const canvas = document.createElement('canvas');
       container.appendChild(canvas);
       viewer = new DocxViewer(canvas, {
+        mode,
         width: args.width,
         dpr: window.devicePixelRatio,
         debug: args.debug,
@@ -244,5 +231,25 @@ export const FileUpload: Story = {
     nextBtn.addEventListener('click', () => { viewer?.nextPage(); updateNav(); });
 
     return root;
+}
+
+const fileUploadArgTypes = {
+  debug: {
+    control: 'boolean' as const,
+    description: 'Print resource-usage metrics to the browser console',
   },
+};
+
+export const FileUpload: Story = {
+  name: 'Load from file — main thread',
+  args: { width: 700, debug: true },
+  argTypes: fileUploadArgTypes,
+  render: (args) => renderFileUpload(args, 'main'),
+};
+
+export const FileUploadWorker: Story = {
+  name: 'Load from file — Web Worker',
+  args: { width: 700, debug: true },
+  argTypes: fileUploadArgTypes,
+  render: (args) => renderFileUpload(args, 'worker'),
 };

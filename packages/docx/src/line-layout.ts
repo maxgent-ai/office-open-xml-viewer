@@ -661,9 +661,10 @@ export interface LineLayoutEnvironment {
 }
 
 // ── Math (OMML) rendering via MathJax ───────────────────────────────────────
-// Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized to
-// an <img> once (async, before pagination). Layout reads cached em-extents
-// synchronously; drawing blits the image. Skipped entirely for math-free documents.
+// Each equation is converted OMML AST -> MathML -> MathJax SVG, then rasterized
+// to an auxiliary Canvas once (async, before pagination). Layout reads cached
+// em-extents synchronously; drawing blits the Canvas. Skipped entirely for
+// math-free documents.
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
  *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
  *  list MUST mirror the Arabic entries there). A source run whose font is one

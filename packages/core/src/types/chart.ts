@@ -203,8 +203,11 @@ export interface ChartTrendline {
   /** Trendline-label `<c:txPr>` run properties. */
   labelFontSizeHpt?: number | null;
   labelFontBold?: boolean | null;
+  labelFontItalic?: boolean | null;
   labelFontColor?: string | null;
   labelFontFace?: string | null;
+  /** `<c:trendlineLbl><c:spPr>` fill/border. */
+  labelBox?: ChartLabelBox | null;
   /** First authored paragraph alignment from `<c:trendlineLbl><c:txPr>`. */
   labelTextAlign?: string | null;
   /** `<c:spPr><a:ln><a:solidFill>` trendline color (hex without '#'). null =
@@ -269,6 +272,8 @@ export interface ChartDataLabelOverride {
   position?: string;
   fontColor?: string;
   fontSizeHpt?: number;
+  /** Effective per-point `<a:latin typeface>`; undefined inherits the series. */
+  fontFace?: string;
   /** `<a:defRPr b="1">` inside the per-idx rich text. */
   fontBold?: boolean;
   /** Per-point number format; undefined inherits the series default. */
@@ -332,6 +337,8 @@ export interface ChartSeriesDataLabels {
   fontBold?: boolean;
   /** Series-level font size for data labels (OOXML hundredths of a point). */
   fontSizeHpt?: number;
+  /** Series-level `<c:dLbls><c:txPr>…<a:latin typeface>` font face. */
+  fontFace?: string;
   /** Series-default callout box (`<c:dLbls><c:spPr>`, ECMA-376 §21.2.2.49/
    *  §21.2.2.197). When present the pie/doughnut renderer draws Word's boxed
    *  callout layout (box + optional leader line) instead of plain text. */
@@ -459,7 +466,10 @@ export interface ChartModel {
   valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
   /** `<c:catAx><c:majorTickMark>`. */
   catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
-  /** `<c:valAx | catAx><c:minorTickMark>`. ECMA-376 default is "none". */
+  /** `<c:valAx | catAx><c:minorTickMark>`. An omitted element is preserved as
+   *  undefined/null: the renderer applies the host default (none in ordinary
+   *  2-D charts; cross for the value axis in classic 3-D charts). A present
+   *  element without `val` uses CT_TickMark's schema default `cross`. */
   valAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
   catAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
   /** Title font size in OOXML hundredths of a point (1600 = 16pt). null = default. */
@@ -493,6 +503,11 @@ export interface ChartModel {
    * labels (ECMA-376 §21.2.2.21). null = plain numeric formatting.
    */
   valAxisFormatCode?: string | null;
+  /** `<c:valAx><c:dispUnits>` display-only divisor and optional label. Series
+   * values and plot geometry stay in their authored units. */
+  valAxisDisplayUnits?: ChartDisplayUnits | null;
+  /** Display units for a numeric horizontal axis (scatter/bubble). */
+  catAxisDisplayUnits?: ChartDisplayUnits | null;
   /**
    * `<c:barChart><c:gapWidth>` — space between category groups as a
    * percentage of bar width (ECMA-376 §21.2.2.13). Default per spec is 150.
@@ -600,6 +615,12 @@ export interface ChartModel {
   legendFontSizeHpt?: number | null;
   /** `<c:legend><c:txPr>…defRPr@b` legend bold flag. */
   legendFontBold?: boolean | null;
+  /** `<c:legend><c:spPr>` explicit frame fill (hex without '#'). */
+  legendFillColor?: string | null;
+  /** `<c:legend><c:spPr><a:ln>` explicit frame stroke (hex without '#'). */
+  legendLineColor?: string | null;
+  /** `<c:legend><c:spPr><a:ln@w>` frame stroke width in EMU. */
+  legendLineWidthEmu?: number | null;
   /**
    * Theme font-scheme faces (`<a:fontScheme>`, ECMA-376 §20.1.4.2). Latin
    * heading (majorFont) and body (minorFont) typefaces, used as the fallback
@@ -701,8 +722,9 @@ export interface ChartModel {
    * value axis (the common case). See {@link SecondaryValueAxis}.
    */
   secondaryValAxis?: SecondaryValueAxis | null;
-  /** Numeric horizontal `<c:valAx>` used by a scatter/bubble group overlaid
-   *  on a non-scatter primary chart. */
+  /** Secondary horizontal axis: either the numeric `<c:valAx>` used by an
+   *  overlaid scatter/bubble group, or the top/right `<c:catAx>` paired with a
+   *  secondary bar/column group. */
   secondaryCatAxis?: SecondaryValueAxis | null;
   /**
    * `<c:date1904>` (ECMA-376 §21.2.2.38). When true the chart's serial
@@ -956,6 +978,19 @@ export interface ChartOfPie {
   seriesLines: boolean;
 }
 
+/** Supported DrawingML paint authored on a 3-D chart surface (`floor`,
+ * `sideWall`, or `backWall`): solid/no fill and basic line properties. Each
+ * surface is a real face of the shared projected scene, not a renderer
+ * decoration. */
+export interface ChartThreeDSurface {
+  fillColor?: string | null;
+  fillHidden?: boolean | null;
+  lineColor?: string | null;
+  lineWidthEmu?: number | null;
+  lineDash?: string | null;
+  lineHidden?: boolean | null;
+}
+
 export interface ChartThreeD {
   rotationX?: number | null;
   rotationY?: number | null;
@@ -965,6 +1000,43 @@ export interface ChartThreeD {
   rightAngleAxes?: boolean | null;
   gapDepthPercent?: number | null;
   shape?: string | null;
+  /** `<c:bar3DChart><c:grouping val>` (§21.2.2.77). `standard` uses the
+   *  series/depth axis; `clustered` uses adjacent category-axis slots. */
+  barGrouping?: 'standard' | 'clustered' | 'stacked' | 'percentStacked' | string | null;
+  /** `<c:serAx>` (§21.2.2.175), the series/depth axis of a standard 3-D bar. */
+  seriesAxis?: ChartThreeDSeriesAxis | null;
+  /** `<c:floor>` (§21.2.2.69), including direct DrawingML fill/line paint. */
+  floor?: ChartThreeDSurface | null;
+  /** `<c:sideWall>` (§21.2.2.191), including direct DrawingML fill/line paint. */
+  sideWall?: ChartThreeDSurface | null;
+  /** `<c:backWall>` (§21.2.2.11), including direct DrawingML fill/line paint. */
+  backWall?: ChartThreeDSurface | null;
+}
+
+export interface ChartThreeDSeriesAxis {
+  title?: string | null;
+  hidden: boolean;
+  orientation?: 'minMax' | 'maxMin' | string | null;
+  tickLabelPos?: string | null;
+  tickLabelSkip?: number | null;
+  tickMarkSkip?: number | null;
+  majorTickMark: string;
+  fontColor?: string | null;
+  fontSizeHpt?: number | null;
+  fontBold?: boolean | null;
+  fontItalic?: boolean | null;
+  fontFace?: string | null;
+  lineColor?: string | null;
+  lineWidthEmu?: number | null;
+  lineHidden: boolean;
+  titleFontSizeHpt?: number | null;
+  titleFontBold?: boolean | null;
+  titleFontItalic?: boolean | null;
+  titleFontColor?: string | null;
+  titleFontFace?: string | null;
+  titleRotation?: number | null;
+  titleVerticalMode?: ChartModel['catAxisTitleVerticalMode'];
+  titleManualLayout?: ChartManualLayout | null;
 }
 
 /** A formatted DrawingML run inside a chart-relative text box. */
@@ -1145,6 +1217,8 @@ export interface SecondaryValueAxis {
   hidden: boolean;
   /** `<c:numFmt formatCode>` for tick labels. */
   formatCode?: string | null;
+  /** `<c:dispUnits>` for this auxiliary value axis. */
+  displayUnits?: ChartDisplayUnits | null;
   /** `<c:txPr>…<a:solidFill>` tick-label color (hex without '#'). */
   fontColor?: string | null;
   /** `<c:txPr>` tick-label font size (hpt). */
@@ -1192,6 +1266,10 @@ export interface SecondaryValueAxis {
   orientation?: 'minMax' | 'maxMin' | string | null;
   /** `<c:tickLblPos>`; `none` hides tick labels without hiding gridlines. */
   tickLabelPos?: string | null;
+  /** `<c:catAx><c:tickLblSkip>` when used as `secondaryCatAxis`. */
+  tickLabelSkip?: number | null;
+  /** `<c:catAx><c:tickMarkSkip>` when used as `secondaryCatAxis`. */
+  tickMarkSkip?: number | null;
   /** `<c:crosses>` / `<c:crossesAt>` retained for axis placement. */
   crosses?: string | null;
   crossesAt?: number | null;
@@ -1218,6 +1296,33 @@ export interface SecondaryValueAxis {
     | null;
   /** `<c:title><c:layout><c:manualLayout>` for this auxiliary axis. */
   titleManualLayout?: ChartManualLayout | null;
+}
+
+/** ECMA-376 §21.2.2.45 display-unit scaling. The divisor changes displayed
+ * axis-associated values (ticks and generated `showVal` data-label text),
+ * never the source value or value-to-pixel mapping. */
+export interface ChartDisplayUnits {
+  divisor: number;
+  /** Authored `ST_BuiltInUnit` token; absent for `<c:custUnit>`. */
+  builtInUnit?: string | null;
+  /** `<c:dispUnitsLbl>`; absent means the scale is applied without a label. */
+  label?: ChartDisplayUnitsLabel | null;
+}
+
+/** ECMA-376 §21.2.2.46 display-unit label, independently styled and laid out
+ * from the axis title. */
+export interface ChartDisplayUnitsLabel {
+  /** Explicit `<c:tx>` text. null/undefined uses the unit's automatic name. */
+  text?: string | null;
+  manualLayout?: ChartManualLayout | null;
+  fontSizeHpt?: number | null;
+  fontBold?: boolean | null;
+  fontItalic?: boolean | null;
+  fontColor?: string | null;
+  fontFace?: string | null;
+  /** DrawingML `bodyPr@rot`, in 60000ths of a degree. */
+  rotation?: number | null;
+  boxStyle?: ChartLabelBox | null;
 }
 
 /**

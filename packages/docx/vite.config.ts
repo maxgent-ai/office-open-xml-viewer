@@ -3,6 +3,7 @@ import wasm from 'vite-plugin-wasm';
 import topLevelAwait from 'vite-plugin-top-level-await';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { wasmAssetUrl } from '../../vite.config';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -11,8 +12,9 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
   resolve: {
     alias: {
-      '@ooxml-test-three-d-addon': resolve(__dirname, '../../src/three-d.ts'),
-      '@ooxml-test-region-map-addon': resolve(__dirname, '../../src/region-map.ts'),
+      '@ooxml-test-three-d-renderer': resolve(__dirname, '../../src/three-d.ts'),
+      '@ooxml-test-region-map-renderer': resolve(__dirname, '../../src/region-map.ts'),
+      '@ooxml-test-math-renderer': resolve(__dirname, '../../src/math.ts'),
     },
   },
   build: {
@@ -29,6 +31,13 @@ export default defineConfig({
     port: 5179,
     fs: {
       allow: [__dirname, resolve(__dirname, '../..')],
+    },
+  },
+  worker: {
+    format: 'es',
+    plugins: () => [wasmAssetUrl(), wasm()],
+    rollupOptions: {
+      output: { assetFileNames: '[name][extname]' },
     },
   },
 });

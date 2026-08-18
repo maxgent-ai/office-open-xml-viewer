@@ -62,7 +62,7 @@ interface Priv {
   };
   buildHyperlinkMap(ws: Worksheet): void;
   dispatchHyperlink(cell: CellAddress): boolean;
-  navigateInternalHyperlink(location: string): void;
+  navigateInternalHyperlink(location: string): Promise<void>;
 }
 
 /** Mount a viewer, inject the fixture worksheet, and build its hyperlink map so
@@ -169,21 +169,24 @@ describe('XlsxViewer IX1 default hyperlink handler (no callback)', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
-  it('navigates to the referenced sheet for an internal Sheet!Cell location', () => {
+  it('navigates to the referenced sheet and cell for an internal Sheet!Cell location', async () => {
     const ws = makeSheet([{ col: 1, row: 1, url: null, location: 'Sheet2!A1' }]);
     const { v, priv } = mountViewer(ws);
     // Stub the workbook so sheetNames resolves and goToSheet is observable.
     const goSpy = vi.fn().mockResolvedValue(undefined);
+    const scrollSpy = vi.fn().mockResolvedValue(undefined);
     Object.assign(v as unknown as { wb: unknown }, {
       wb: { sheetNames: ['Sheet1', 'Sheet2'], sheetCount: 2 },
     });
     (v as unknown as { goToSheet: unknown }).goToSheet = goSpy;
+    (v as unknown as { scrollToCell: unknown }).scrollToCell = scrollSpy;
 
-    priv.navigateInternalHyperlink('Sheet2!A1');
+    await priv.navigateInternalHyperlink('Sheet2!A1');
     expect(goSpy).toHaveBeenCalledWith(1);
+    expect(scrollSpy).toHaveBeenCalledWith('A1');
   });
 
-  it('is a no-op for an internal location whose sheet is unknown', () => {
+  it('is a no-op for an internal location whose sheet is unknown', async () => {
     const ws = makeSheet([{ col: 1, row: 1, url: null, location: 'Ghost!A1' }]);
     const { v, priv } = mountViewer(ws);
     const goSpy = vi.fn().mockResolvedValue(undefined);
@@ -192,20 +195,26 @@ describe('XlsxViewer IX1 default hyperlink handler (no callback)', () => {
     });
     (v as unknown as { goToSheet: unknown }).goToSheet = goSpy;
 
-    priv.navigateInternalHyperlink('Ghost!A1');
+    await priv.navigateInternalHyperlink('Ghost!A1');
     expect(goSpy).not.toHaveBeenCalled();
   });
 
-  it('is a no-op for a bare defined name (TODO: defined-name resolution)', () => {
-    const ws = makeSheet([{ col: 1, row: 1, url: null, location: 'MyName' }]);
+  it('resolves a bare defined name and navigates to its first cell', async () => {
+    const ws = {
+      ...makeSheet([{ col: 1, row: 1, url: null, location: 'MyName' }]),
+      definedNames: [{ name: 'MyName', formula: "='Sheet 2'!$B$7:$B$9" }],
+    };
     const { v, priv } = mountViewer(ws);
     const goSpy = vi.fn().mockResolvedValue(undefined);
+    const scrollSpy = vi.fn().mockResolvedValue(undefined);
     Object.assign(v as unknown as { wb: unknown }, {
-      wb: { sheetNames: ['Sheet1'], sheetCount: 1 },
+      wb: { sheetNames: ['Sheet1', 'Sheet 2'], sheetCount: 2 },
     });
     (v as unknown as { goToSheet: unknown }).goToSheet = goSpy;
+    (v as unknown as { scrollToCell: unknown }).scrollToCell = scrollSpy;
 
-    priv.navigateInternalHyperlink('MyName');
-    expect(goSpy).not.toHaveBeenCalled();
+    await priv.navigateInternalHyperlink('MyName');
+    expect(goSpy).toHaveBeenCalledWith(1);
+    expect(scrollSpy).toHaveBeenCalledWith('$B$7');
   });
 });

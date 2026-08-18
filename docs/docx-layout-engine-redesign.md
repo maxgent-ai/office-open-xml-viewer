@@ -325,6 +325,11 @@ Failure containment follows the retained-layout ownership boundary:
   public image/chart model is created;
 - corrupt required package parts, non-finite or negative geometry, invalid
   ownership, non-convergence, and invariant violations remain fatal;
+- a recognized `nextColumn` transition that cannot map to a non-overlapping
+  physical column remains fatal on the first page; after at least one page has
+  completed, pagination retains only pages strictly before the rejected
+  transition, discards the uncommitted current-page suffix, and attaches a
+  source-bound `UNSUPPORTED_FEATURE` error diagnostic;
 - a recoverable failure never invokes a legacy renderer, retries with guessed
   defaults, or weakens the validation of fatal state.
 

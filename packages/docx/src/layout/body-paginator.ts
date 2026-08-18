@@ -47,6 +47,7 @@ import {
   beginSection,
   createPageFlowState,
   placeFlowNode,
+  UnsupportedPageFlowTransitionError,
   type PageFlowState,
 } from './paginator.js';
 import {
@@ -741,6 +742,7 @@ function paginateBodyPass(
   allocations: readonly BodyFlowAllocation[];
   footnoteReserveByPage: ReadonlyMap<number, number>;
   footnoteLayoutsByPage: ReadonlyMap<number, readonly NoteLayout[]>;
+  terminalDiagnostic: LayoutDiagnostic | null;
 }> {
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
@@ -955,8 +957,9 @@ function paginateBodyPass(
   );
   let previousParagraph: BodyParagraphSourceInput | null = null;
   const activeColumnBreakIndexes = wordActiveColumnBreakIndexes(input.sequence);
+  let terminalDiagnostic: LayoutDiagnostic | null = null;
 
-  for (let entryIndex = 0; entryIndex < input.sequence.length; entryIndex += 1) {
+  bodyEntries: for (let entryIndex = 0; entryIndex < input.sequence.length; entryIndex += 1) {
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
       continue;
@@ -1000,19 +1003,46 @@ function paginateBodyPass(
         state.flow.pageIndex,
         reserves[state.flow.pageIndex] ?? { top: 0, bottom: 0 },
       );
-      commitTransition(
-        beginSection(
-          state.flow,
-          flowSection(entry.section, state.flow.pageIndex),
-          effectiveStartType,
-          {
-            hasFootnoteReferenceOnCurrentPage: hasFootnoteReferenceOnPage(state.flow.pageIndex),
-            incomingPageContentStartBlockPt: incomingInterval.blockStartPt,
-            incomingPageContentEndBlockPt: incomingInterval.blockEndPt,
-          },
-        ),
-        entryIndex + 1,
-      );
+      try {
+        commitTransition(
+          beginSection(
+            state.flow,
+            flowSection(entry.section, state.flow.pageIndex),
+            effectiveStartType,
+            {
+              hasFootnoteReferenceOnCurrentPage: hasFootnoteReferenceOnPage(state.flow.pageIndex),
+              incomingPageContentStartBlockPt: incomingInterval.blockStartPt,
+              incomingPageContentEndBlockPt: incomingInterval.blockEndPt,
+            },
+          ),
+          entryIndex + 1,
+        );
+      } catch (error) {
+        // beginSection rejects this authored transition before mutating the
+        // immutable flow state. Once at least one physical page is complete,
+        // retain only those committed pages and expose the omitted suffix as a
+        // structured diagnostic. First-page failures and all invariant errors
+        // remain fatal because no safe checkpoint exists for them.
+        if (!(error instanceof UnsupportedPageFlowTransitionError)
+          || state.flow.pageIndex === 0) {
+          throw error;
+        }
+        const failedPageIndex = state.flow.pageIndex;
+        state = Object.freeze({
+          ...state,
+          pages: Object.freeze(state.pages.filter((draft) => (
+            draft.accumulator.pageIndex < failedPageIndex
+          ))),
+        });
+        terminalDiagnostic = Object.freeze({
+          code: 'UNSUPPORTED_FEATURE',
+          severity: 'error',
+          source: entry.source,
+          message: 'Document layout stopped after the last complete page because '
+            + `a nextColumn section could not be placed safely (${error.reason})`,
+        });
+        break bodyEntries;
+      }
       continue;
     }
     const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
@@ -1504,12 +1534,24 @@ function paginateBodyPass(
       );
     }
   }
+  const layout = finalize(state, owners);
+  const retainedPageIndexes = new Set(layout.pages.map((page) => page.pageIndex));
+  const retainedNodeIds = new Set(layout.pages.flatMap((page) => (
+    pageLayerNodes(page).map(({ node }) => node.id)
+  )));
+  const retainedFootnoteReserves = new Map([...footnoteReserveByPage]
+    .filter(([pageIndex]) => retainedPageIndexes.has(pageIndex)));
+  const retainedFootnoteLayouts = new Map([...footnoteLayoutsByPage]
+    .filter(([pageIndex]) => retainedPageIndexes.has(pageIndex)));
   return Object.freeze({
-    layout: finalize(state, owners),
+    layout,
     session,
-    allocations: Object.freeze(allocations),
-    footnoteReserveByPage,
-    footnoteLayoutsByPage,
+    allocations: Object.freeze(allocations.filter((allocation) => (
+      retainedNodeIds.has(allocation.nodeId)
+    ))),
+    footnoteReserveByPage: retainedFootnoteReserves,
+    footnoteLayoutsByPage: retainedFootnoteLayouts,
+    terminalDiagnostic,
   });
 }
 
@@ -2084,6 +2126,7 @@ function paginateBodyWithColumnBalancing(
     reserves,
     plan,
   );
+  if (pass.terminalDiagnostic !== null) return pass;
   for (const boundary of continuousBalanceBoundaries(input)) {
     const baseline = sharedContinuousBoundaryPage(
       pass.layout,
@@ -2112,6 +2155,7 @@ function paginateBodyWithColumnBalancing(
       reserves,
       plan,
     );
+    if (pass.terminalDiagnostic !== null) return pass;
   }
   return pass;
 }
@@ -2190,13 +2234,16 @@ export function paginateBody(
   // Parser diagnostics are immutable source facts and must not participate in
   // header/footer, anchor, or field-geometry convergence. Attach them exactly
   // once to the final graph, before the ordinary invariant/freeze boundary.
-  const parserDiagnostics = input.parserDiagnostics ?? [];
-  const withParserDiagnostics = parserDiagnostics.length === 0
+  const sourceDiagnostics = [
+    ...(input.parserDiagnostics ?? []),
+    ...(converged.terminalDiagnostic === null ? [] : [converged.terminalDiagnostic]),
+  ];
+  const withParserDiagnostics = sourceDiagnostics.length === 0
     ? withEndnotes
     : Object.freeze({
         ...withEndnotes,
         diagnostics: Object.freeze([
-          ...parserDiagnostics,
+          ...sourceDiagnostics,
           ...withEndnotes.diagnostics,
         ]),
       });

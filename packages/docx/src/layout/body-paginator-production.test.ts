@@ -600,11 +600,18 @@ describe('canonical body producer', () => {
     attachBodyLayoutKernel(services, {
       openBodyLayoutSession: () => ({
         hasPaginationFields: false,
-        measureParagraph: ({ input }) => ({
-          layout: paragraph(`p${input.source.path[0]}`, input.source, 20),
-          blockExtentPt: 20,
-          fragmentation: { kind: 'indivisible' },
-        }),
+        measureParagraph: ({ input }) => {
+          const layout = paragraph(`p${input.source.path[0]}`, input.source, 20);
+          return {
+            layout: {
+              ...layout,
+              flowBounds: { ...layout.flowBounds, widthPt: 50 },
+              inkBounds: { ...layout.inkBounds, widthPt: 50 },
+            },
+            blockExtentPt: 20,
+            fragmentation: { kind: 'indivisible' },
+          };
+        },
         measureTable: () => { throw new Error('unused'); },
         measureStoryExtent: () => 0,
         measureFootnoteReserve: () => 0,
@@ -668,6 +675,40 @@ describe('canonical body producer', () => {
     }, services, { currentDateMs: 0 })).toThrow(expect.objectContaining({
       code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
       reason: 'physical-overlap',
+    }));
+
+    const recovered = paginateBody({
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: outgoing,
+      sequence: [
+        {
+          kind: 'body-block',
+          block: {
+            kind: 'paragraph', source: source(0), pageBreakBefore: false,
+            keepLines: false, keepNext: false, widowControl: true,
+            spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+          },
+        },
+        { kind: 'authored-break', source: source(1), break: 'page' },
+        {
+          kind: 'body-block',
+          block: {
+            kind: 'paragraph', source: source(2), pageBreakBefore: false,
+            keepLines: false, keepNext: false, widowControl: true,
+            spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+          },
+        },
+        { kind: 'begin-section', source: source(9), section: incoming },
+      ],
+    }, services, { currentDateMs: 0 });
+
+    expect(recovered.pages).toHaveLength(1);
+    expect(recovered.pages[0]!.pageIndex).toBe(0);
+    expect(recovered.pages[0]!.layers.body.map((node) => node.source.path)).toEqual([[0]]);
+    expect(recovered.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'UNSUPPORTED_FEATURE',
+      severity: 'error',
+      source: source(9),
     }));
   });
 

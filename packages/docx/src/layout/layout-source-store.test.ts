@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DocParagraph, DocxDocumentModel } from '../types.js';
+import type { BodyElement, DocParagraph, DocxDocumentModel } from '../types.js';
 import {
   layoutSourceModelAdapter,
   layoutSourceModelAdapterFromOwnedModel,
@@ -99,6 +99,36 @@ describe('LayoutSourceStore', () => {
     expect(() => store.acquisition.publicAnchorBridge(
       { story: 'body', storyInstance: 'body', path: [0] }, 99,
     )).toThrow(/unknown paragraph anchor bridge index/i);
+  });
+
+  it('retains unavailable drawing geometry inside a complete text-box story', () => {
+    const model = documentWithUnavailableDrawing();
+    const nested = structuredClone(model.body[0]) as Extract<BodyElement, { type: 'paragraph' }>;
+    const outer = structuredClone(model.body[0]) as Extract<BodyElement, { type: 'paragraph' }>;
+    outer.runs = [{
+      type: 'shape', widthPt: 120, heightPt: 60, zOrder: 0,
+      subpaths: [], fill: null, stroke: null,
+      textBoxContent: [nested],
+    }] as unknown as DocParagraph['runs'];
+    model.body = [outer];
+
+    const adapted = layoutSourceModelAdapter(model);
+    const root = adapted.source.blocks.storyRoot({
+      story: 'textbox', storyInstance: 'body:body:0.0', path: [],
+    });
+    expect(root).toHaveLength(1);
+    expect(root[0]?.type).toBe('paragraph');
+    if (root[0]?.type !== 'paragraph') throw new Error('Expected text-box paragraph fixture');
+    expect(root[0].runs).toMatchObject([{
+      type: 'unavailableDrawing',
+      resourceKind: 'image',
+      widthPt: 24,
+      heightPt: 12,
+    }]);
+    expect((adapted.document.body[0] as DocParagraph).runs[0]).not.toHaveProperty(
+      'textBoxContent.0.runs.0.type',
+      'unavailableDrawing',
+    );
   });
 
   it('keeps the builder-owned stream adapter semantically equal to the model adapter', () => {

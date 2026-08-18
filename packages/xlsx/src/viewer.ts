@@ -25,6 +25,7 @@ import {
 } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
+import { resolveXlsxInternalHyperlink } from './internal-hyperlink.js';
 import type {
   CellAddress,
   XlsxSelectionArea,
@@ -3369,38 +3370,30 @@ class XlsxViewerEngine implements ZoomableViewer {
     if (target.kind === 'external') {
       openExternalHyperlink(target.url, undefined, this.hostWindow);
     } else {
-      this.navigateInternalHyperlink(target.ref);
+      void this.navigateInternalHyperlink(target.ref).catch(
+        (error) => this._reportRenderError(error),
+      );
     }
     return true;
   }
 
   /**
-   * IX1 default handler for an internal `location` target (§18.3.1.47): a defined
-   * name or a cell ref like `Sheet1!A1`. Best-effort: if the part before `!`
-   * names a sheet in the workbook, switch to it. There is no scroll-to-cell
-   * primitive on this viewer, so the cell part is not yet honoured (switching the
-   * sheet already lands the user on the right surface). A bare defined name that
-   * does not resolve to a sheet is a documented no-op.
+   * IX1 default handler for an internal `location` target (§18.3.1.47): resolve
+   * a direct cell/range or an in-scope defined name (§18.2.5), switch sheets when
+   * needed, then scroll the first referenced cell into view.
    */
-  private navigateInternalHyperlink(location: string): void {
-    const bang = location.lastIndexOf('!');
-    if (bang < 0) {
-      // TODO IX1: resolve defined name → sheet/cell (needs a workbook
-      // definedNames lookup the parser does not yet surface). Inert for now
-      // rather than guessing a destination.
-      return;
+  private async navigateInternalHyperlink(location: string): Promise<void> {
+    const target = resolveXlsxInternalHyperlink(
+      location,
+      this.currentSheet,
+      this.sheetNames,
+      this.currentWorksheet?.definedNames ?? [],
+    );
+    if (!target) return;
+    if (target.sheetIndex !== this.currentSheet) {
+      await this.goToSheet(target.sheetIndex);
     }
-    // Sheet names with special chars are quoted (`'My Sheet'!A1`) and inner
-    // single quotes doubled per ECMA-376 §18.17.2.4; unwrap for the name match.
-    let sheetPart = location.slice(0, bang);
-    if (sheetPart.startsWith("'") && sheetPart.endsWith("'")) {
-      sheetPart = sheetPart.slice(1, -1).replace(/''/g, "'");
-    }
-    const idx = this.sheetNames.indexOf(sheetPart);
-    if (idx >= 0) {
-      void this.goToSheet(idx).catch((error) => this._reportRenderError(error));
-    }
-    // Unknown sheet → no-op (do not invent scrolling math; §CLAUDE spec-first).
+    await this.scrollToCell(target.cellRef);
   }
 
   /** Show the popup for the comment on `cell` after the hover dwell, anchored to

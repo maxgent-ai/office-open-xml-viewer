@@ -431,8 +431,9 @@ overlay is enabled, links are interactive by default. XLSX hit-tests cells
 directly, so links are interactive out of the box. An external link opens in a
 new tab (scheme-sanitized to `http` / `https` / `mailto` / `tel`, `noopener`),
 and an internal target navigates within the document (docx bookmark, pptx slide
-jump, xlsx sheet). Pass `onHyperlinkClick(target)` to take over the click
-yourself.
+jump, xlsx defined name or cell reference). XLSX references may switch sheets
+and then scroll the destination cell into view; a range navigates to its first
+cell. Pass `onHyperlinkClick(target)` to take over the click yourself.
 Pass `enableHyperlinks: false` to disable hyperlink interactivity entirely — no
 hit-testing, no pointer cursor over links, no default navigation, and
 `onHyperlinkClick` is never called; links still render as authored but are inert.
@@ -706,7 +707,7 @@ file without uploading it.
 | | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
 | | Runtime fit / zoom API (`fitWidth` / `fitPage` / `getScale` / `setScale`, in addition to the slider) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with sheet + cell) | ✅ |
-| | Clickable hyperlinks (`onHyperlinkClick`; internal defined-name / cell navigation) | ✅ |
+| | Clickable hyperlinks (`onHyperlinkClick`; internal defined-name / sheet-and-cell navigation, ranges use the first cell) | ✅ |
 | | Drag-to-resize columns / rows by dragging header borders (`resizable` option, default on) — **view-only: changes the on-screen view only and never modifies the loaded file** | ✅ |
 | | Customizable cell-selection color (`selectionColor` option, `setSelectionColor()`) | ✅ |
 | **Loading** | Password-protected files ([MS-OFFCRYPTO] Agile Encryption — `load(bytes, { password })`, decrypted client-side via WebCrypto; legacy Standard / Extensible encryption → typed `unsupported-encryption`) | ✅ |

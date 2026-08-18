@@ -1,7 +1,12 @@
 # 改善計画 実行チェックリスト(2026-07 第2次)
 
+> **履歴資料 (2026-08-17 更新):** 実行時の判断と根拠を残すための記録。
+> 未チェック項目を現行バックログとして扱わないこと。現在の機能はルート README、
+> 実装、テスト、open issue を参照し、資料の位置付けは [`README.md`](README.md)
+> を参照する。
+
 `docs/improvement-plan-2026-07b.md` の実行トラッカー。項目 ID(CH1, XF2, WD3, IX1, SC5, RB1, PD1, QA6, AR1 …)は計画本文の表を参照。
-ローカルセッションで進める際は、完了した項目にチェックを入れてこのファイルを更新していく。
+チェック状態はこの履歴資料が最後に更新された時点の記録であり、今後の作業管理には使用しない。
 
 ## 前提・引き継ぎ事項
 
@@ -86,7 +91,7 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 
 ## Phase 2 — チャートエンジンの制覇
 
-- [x] CH5: チャート XML パース ooxml-common 一本化(enabling step、byte-stable oracle) — **完了**: PR1 #736(parse_chart_part を ooxml-common に集約、pptx 切替)+ PR2 #742(スーパーセット化・xlsx 切替・重複 ChartData 撤去)。PR3(chartEx 共有化)は進行中(chartEx share in flight)。
+- [x] CH5: チャート XML パース ooxml-common 一本化(enabling step、byte-stable oracle) — **完了**: PR1 #736(parse_chart_part を ooxml-common に集約、pptx 切替)+ PR2 #742(スーパーセット化・xlsx 切替・重複 ChartData 撤去)。chartEx も共有パーサー経路へ統合済み。
 - [x] CH6: 軸モデル完成(gridlines / units / log / orientation / rot / trendline) — **完了**(PR #735 feat/chart-axes-pie-fonts、commit 4264413/4001d02/d386928 + PR #737 auto major-unit density 修正 + PR #743 gridline 色/幅)。majorGridlines 有無(§21.2.2.102、既定=描画継続で byte-stable)/majorUnit・minorUnit(§21.2.2.116/.126、auto 上書き)/logBase(§21.2.2.104、log スケール値→px + decade gridline)/orientation maxMin(§21.2.2.130、値軸・カテゴリ軸反転)/ラベル rot(§ST_Angle ÷60000 = XSD 確認)/tickLblPos none/trendline(§21.2.2.212、linear 最小二乗+movingAvg 描画、exp/log/power/poly はパースのみ非描画=注記)。bar+line に配線(area/radar/scatter は byte-stable 据置)。ooxml-common に extractor + ChartTrendline 集約。follow-up issue: #738(explicit majorUnit が secondary/area/radar/scatter 値軸で無視される)、#744(カテゴリ軸(縦)の major gridline が描画されない)。
 - [x] CH7: 第2軸の全ファミリー化 — **完了**(PR #732)。bar の第2軸を純ヘルパー computeSecondaryAxis に抽出(bar byte-identical を snapshot で証明)、line/area に配線。scatter は spec 上 Y 第2軸なしで対象外。
 - [x] CH8: pie / doughnut 完成 — **完了**(PR #735 feat/chart-axes-pie-fonts、commit fdb8237/b3efbd5)。holeSize(§21.2.2.60、% 除去 1-90 clamp、absent→50% で byte-stable)/firstSliceAngle(§21.2.2.52、既定 0=12時=旧-90°)/explosion(dPt §21.2.2.61、mid-angle 方向オフセット、doc は de-facto Office %)/多重リング(doughnut 複数 series を同心リング)/dLbls(per-slice showVal/CatName/SerName/Percent)/穴透明化。pie(非 doughnut)byte-stable、snapshot は doughnut のみ変化。
@@ -96,8 +101,8 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 > CH6-CH10 は PR feat/chart-axes-pie-fonts(#735、6 commits)+ CH7 #732 + CH9 #734 + #737 + #739 + #743。検証 = cargo 各パーサー / core 860 / typecheck / VRT 163 全 green・**参照画像差分ゼロ**(byte-stability: CH6/8 既定不変・snapshot は doughnut のみ・CH10 は fontless no-op)。独立2観点レビュー(spec 忠実性+byte-stability / テスト+wire+横断)ともに APPROVE、XSD で spec 値全照合。別トラック: CH6 は bar+line のみ(area/radar/scatter 第2軸/軸モデルの全ファミリー化)、trendline の exp/log/power/poly 描画 + dispEq/dispRSqr テキスト。
 - [x] CH12: docx チャート(参照画像承認とセット) — **完了**(PR #746、埋め込み DrawingML チャート描画。DocxColorResolver 新規、実 Word sample-24 で参照画像検証済み + PR #745 line/area データラベルの dLblPos 準拠(既定 right))。follow-up issue: #747(sample-24.docx のインライン画像が 0 image runs にパースされる、pre-existing)、#748(カテゴリ軸ラベルが Office 出力に対し回転/重複する)。
 - [ ] CH13: 3D 平坦化 + stock + ofPie
-- [ ] CH14: xlsx chartEx 認識
-- [ ] CH15: chartEx レンダラー(funnel/histogram → treemap → sunburst → boxWhisker)
+- [x] CH14: xlsx chartEx 認識 — **完了**: xlsx/pptx の chartEx を共有モデルへ取り込み、README の対応表と parser テストで固定。
+- [x] CH15: chartEx レンダラー(funnel/histogram → treemap → sunburst → boxWhisker) — **完了**: waterfall を含む各 renderer と correctness test を core に集約。
 
 ## Phase 3 — DrawingML 横断パリティと埋め込みフォント
 
@@ -129,7 +134,7 @@ node packages/node/src/bench-handle.mjs  # handle 反復 work ベンチ
 
 ## Phase 5 — インタラクション層とアクセシビリティ
 
-- [x] IX1: ハイパーリンク(3フォーマット、sanitizer 必須、内部アンカー収集込み) — **完了**(PR #775 = clickable link + sanitizer、PR #778 = internal-target 解決層)。#775: docx/pptx/xlsx でリンクが clickable に(canvas 描画ゼロ・色/下線はファイル指定のまま、clickability は overlay/hit-test のみ)。共有 core `interaction/hyperlink.ts` の `HyperlinkTarget` = `{external,url}|{internal,ref,slideIndex?}`、`sanitizeHyperlinkUrl` が http/https/mailto/tel を allowlist・javascript:/data:/vbscript:/file:/about:/blob: をブロック・scheme 読み取り前に leading whitespace + 埋め込み C0 制御文字を除去(`java\tscript:` も reject)。parser は既存 rels TargetMode 経由(docx §17.16.22/.23、pptx §21.1.2.3.5 `ppaction://`→internal、xlsx §18.3.1.47)。overlay は `<a href>` でなく plain `<span>`(browser が sanitize を bypass 不可)。`onHyperlinkClick?` を 3 viewer + 両 scroll viewer に追加。#778: #775 が no-op TODO とした internal-navigation の解決層(bookmark→page / slide-part→index map + public API)を構築(core `nav/internal-target.ts` の `resolveOpcPartName`/`parseRelativeSlideJump`、pptx `Slide.part_name` stamp + `getSlideIndexByPartName`、docx `DocParagraph.bookmarks` 収集 + `getBookmarkPage`、main/worker 両対応)。`onHyperlinkClick` デフォルトを resolver へ配線するのは別 follow-up。
+- [x] IX1: ハイパーリンク(3フォーマット、sanitizer 必須、内部アンカー収集込み) — **完了**(PR #775 = clickable link + sanitizer、PR #778 = internal-target 解決層、その後 default navigation を全 viewer へ配線)。外部 URL は http/https/mailto/tel の allowlist を通し、内部リンクは DOCX bookmark、PPTX slide jump、XLSX の定義名または `Sheet!A1`/同一シート `A1` を解決する。XLSX の範囲参照は先頭セルへ移動し、別シート参照は sheet 切替完了後にスクロールする。`onHyperlinkClick` を指定した場合は引き続きホストが click を完全に所有する。
 - [x] IX2: 文書内検索(findText API + ハイライト + next/prev) — **完了**(PR #783)。3 viewer(Docx/Pptx/Xlsx)に findText を追加、純粋な string/index math を `@silurus/ooxml-core` に集約。API: `findText(query, opts?)`(全文検索・全ヒットをハイライト・各マッチを natural location = docx page / pptx slide / xlsx sheet+cell でタグ付け・default case-insensitive)/`findNext()`/`findPrev()`(active マッチを wrap-around で巡回・navigate/scroll・強調色)/`clearFind()`。共有 core `search/`: `buildTextIndex`/`findMatches`(cross-run マッチ含む run-slice 解決)、`sliceHorizontalExtent`、`find-cursor`(wrap-around 算術)、generic `FindMatch<Loc>`(DOM/geometry 非依存)。ハイライトは IX1 の DOM-overlay 機構に相乗り(新 canvas draw pass なし)。run 収集は `onTextRun` stream 再利用(可視ページは on-screen render、他は throwaway offscreen へ1回 render)、xlsx は cell の rendered display text を検索。**worker モード**: docx/pptx は `[]` + 一度だけ warn(`onTextRun` が worker 境界を越えない)、xlsx は model-based で両モード動作。scope は 3 single-canvas pager viewer(scroll variant への配線は follow-up)。
 - [ ] IX3: キーボード(host focusable + ナビゲーション + xlsx 矢印移動)
 - [ ] IX4: a11y テキストレイヤー(PDF.js 型)

@@ -350,8 +350,8 @@ pub(crate) fn line_properties_to_stroke(
         Some(LineDash::Custom(stops)) => stops
             .iter()
             .map(|stop| StrokeDashSegment {
-                dash: stop.dash as f64 / 100_000.0,
-                space: stop.space as f64 / 100_000.0,
+                dash: stop.dash / 100_000.0,
+                space: stop.space / 100_000.0,
             })
             .collect(),
         _ => Vec::new(),

@@ -34,6 +34,7 @@ describe('axis-title authored properties', () => {
     expect(axisTitleRotationRad('left', 1_800_000, 'vert270')).toBeCloseTo(-Math.PI / 3);
     expect(axisTitleRotationRad('left', null, 'eaVert')).toBeCloseTo(Math.PI / 2);
     expect(axisTitleRotationRad('right', null, 'horz')).toBe(0);
+    expect(axisTitleRotationRad('right', null, null)).toBeCloseTo(-Math.PI / 2);
   });
 });
 
@@ -175,6 +176,18 @@ describe('chartLegendReserve + bands', () => {
       legTopH: 0,
       legBottomH: 0,
     });
+  });
+  it('keeps the legend paint rectangle but removes every reserved band for overlay', () => {
+    for (const legendPos of ['r', 'l', 't', 'b', 'tr'] as const) {
+      const leg = chartLegendReserve(model({ showLegend: true, legendPos }), W, H, 0.22);
+      expect(leg, legendPos).not.toBeNull();
+      expect(chartLegendBands(leg, true), legendPos).toEqual({
+        legRightW: 0,
+        legLeftW: 0,
+        legTopH: 0,
+        legBottomH: 0,
+      });
+    }
   });
   it('honors the wider pie side fraction (0.28)', () => {
     const leg = chartLegendReserve(model({ showLegend: true, legendPos: 'l' }), W, H, 0.28);

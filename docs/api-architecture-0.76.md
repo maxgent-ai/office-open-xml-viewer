@@ -1,7 +1,5 @@
 # OOXML public API convergence for 0.76
 
-日本語版: [`api-architecture-0.76.ja.md`](api-architecture-0.76.ja.md)
-
 Status: implemented in 0.76.0. This document is the architecture baseline for
 maintaining the public API, ownership model, and responsibility boundaries in
 0.76 and later releases.

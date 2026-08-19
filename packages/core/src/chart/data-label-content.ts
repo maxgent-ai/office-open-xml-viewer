@@ -6,6 +6,7 @@ export interface EffectiveDataLabelTextOptions {
   showSeries?: boolean;
   showValue?: boolean;
   showPercent?: boolean;
+  showBubbleSize?: boolean;
   category?: string;
   seriesName?: string;
   sourceValue?: number;
@@ -14,6 +15,7 @@ export interface EffectiveDataLabelTextOptions {
    * source value and value-to-pixel geometry unchanged. */
   valueDivisor?: number | null;
   percentRatio?: number;
+  bubbleSize?: number;
   formatCode?: string | null;
   percentFormatCode?: string | null;
   date1904?: boolean;
@@ -42,6 +44,11 @@ export function effectiveDataLabelText(options: EffectiveDataLabelTextOptions): 
       options.percentRatio,
       options.percentFormatCode ?? options.formatCode ?? '0%',
       options.date1904,
+    ));
+  }
+  if (options.showBubbleSize && options.bubbleSize != null) {
+    parts.push(formatChartValWithCode(
+      options.bubbleSize, options.formatCode ?? null, options.date1904,
     ));
   }
   return parts.filter(part => part !== '').join(

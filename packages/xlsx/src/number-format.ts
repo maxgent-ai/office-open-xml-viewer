@@ -1,24 +1,10 @@
-import { excelSerialToUtcDate, roundDecimalHalfUp } from '@silurus/ooxml-core';
+import {
+  excelSerialToUtcDate,
+  formatLocalizedExcelShortDate,
+  roundDecimalHalfUp,
+} from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
 import { todaySerial, nowSerial } from './formula.js';
-
-const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function localizedShortDateFormatter(locale: string | undefined): Intl.DateTimeFormat {
-  const cacheKey = locale ?? '';
-  const cached = localizedShortDateFormatters.get(cacheKey);
-  if (cached) return cached;
-
-  const formatter = new Intl.DateTimeFormat(locale, {
-    year: 'numeric',
-    month: 'numeric',
-    day: 'numeric',
-    timeZone: 'UTC',
-  });
-  localizedShortDateFormatters.set(cacheKey, formatter);
-  return formatter;
-}
-
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
@@ -522,10 +508,8 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
   // UTC fields so the Excel serial cannot cross a calendar-day boundary in a
   // non-UTC timezone.
   if (numFmtId === 14 && !formatCode) {
-    const locale = typeof navigator === 'undefined' ? undefined : navigator.language;
-    const date = excelSerialToUtcDate(num, date1904);
     return {
-      text: localizedShortDateFormatter(locale).format(date),
+      text: formatLocalizedExcelShortDate(num, date1904),
     };
   }
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)

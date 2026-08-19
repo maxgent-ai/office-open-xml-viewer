@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   dashArray,
   docxBorderDashArray,
+  drawingmlLineDashArray,
   xlsxBorderDashArray,
   pptxUnderlineDashArray,
   pptxPresetDashArray,
@@ -134,6 +135,40 @@ describe('pptxPresetDashArray (§20.1.10.49 ST_PresetLineDashVal, shape borders)
   it('scales with the line width', () => {
     expect(pptxPresetDashArray('sysDash', 3)).toEqual([12, 6]);
     expect(pptxPresetDashArray('dash', 1)).toEqual([6, 3]);
+  });
+});
+
+describe('drawingmlLineDashArray (§20.1.8.21-22 custom dash)', () => {
+  it('scales every authored dash and space by the rendered line width', () => {
+    expect(drawingmlLineDashArray([
+      { dash: 1.25, space: 0.75 },
+      { dash: 3, space: 1 },
+    ], 'dot', 4)).toEqual([5, 3, 12, 4]);
+  });
+
+  it('keeps an authored empty custom list authoritative over a preset', () => {
+    expect(drawingmlLineDashArray([], 'dash', 2)).toEqual([]);
+  });
+
+  it('uses the preset only when custom dash is absent', () => {
+    expect(drawingmlLineDashArray(undefined, 'dash', 2)).toEqual([12, 6]);
+  });
+
+  it('retains a zero-length round-cap dot and rejects only a zero-advance pair', () => {
+    expect(drawingmlLineDashArray([{ dash: 0, space: 2 }], 'dash', 3))
+      .toEqual([0, 6]);
+    expect(drawingmlLineDashArray([{ dash: 0, space: 0 }], 'dash', 3))
+      .toEqual([]);
+  });
+
+  it('bounds public custom-dash work and ignores invalid positive-percentage atoms', () => {
+    const authored = Array.from({ length: 600 }, () => ({ dash: 1, space: 2 }));
+    expect(drawingmlLineDashArray(authored, 'dash', 1)).toHaveLength(1024);
+    expect(drawingmlLineDashArray([
+      { dash: Number.NaN, space: 1 },
+      { dash: 1, space: -1 },
+      { dash: 2, space: 3 },
+    ], 'dash', 2)).toEqual([4, 6]);
   });
 });
 

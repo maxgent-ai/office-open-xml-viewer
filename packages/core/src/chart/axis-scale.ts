@@ -87,6 +87,33 @@ export function automaticRadarMajorUnit(
   return ceilingNiceStep(hi > lo ? spanQuotient(lo, hi, intervals) : (span ?? 1) / intervals);
 }
 
+/** Automatic major unit for classic Surface value bands.
+ *
+ * OOXML leaves an omitted major unit application-defined. The Surface
+ * boundary corpus (ordinary/tall, compact, scaled and 90-degree contour
+ * views) isolates the Office choice to the chart-frame projection of the
+ * value direction: one interval per roughly 28pt, with a five-interval
+ * compact/edge-on floor. This is intentionally measured before title/legend
+ * reserves; using the final plot rect coarsens the verified ordinary S1/S4
+ * boundaries. The result remains on the shared ceiling 1/2/5 ladder and an
+ * authored majorUnit still wins at the caller.
+ */
+export function automaticSurfaceMajorUnit(
+  min: number,
+  max: number,
+  projectedValueAxisLenPt?: number,
+): number {
+  const lo = Number.isFinite(min) ? min : 0;
+  const hi = Number.isFinite(max) ? max : 1;
+  const span = hi > lo ? hi - lo : 1;
+  const intervals = projectedValueAxisLenPt != null
+    && Number.isFinite(projectedValueAxisLenPt)
+    && projectedValueAxisLenPt > 0
+    ? Math.max(5, Math.round(projectedValueAxisLenPt / 28))
+    : 5;
+  return ceilingNiceStep(span / intervals);
+}
+
 /** Hard allocation/paint bound for each numeric-axis tick layer. */
 export const MAX_AXIS_TICKS = 512;
 
@@ -229,16 +256,22 @@ export function planLinearValueAxis(options: LinearValueAxisOptions): LinearValu
       dataMin = Math.min(0, dataMin);
       dataMax = Math.max(0, dataMax);
     }
-    const span = dataMax - dataMin;
+    const anchorPositiveAtZero = dataMin >= 0
+      && (dataMin === 0 || dataMax > 1.2 * dataMin);
+    const anchorNegativeAtZero = dataMax <= 0
+      && (dataMax === 0 || Math.abs(dataMin) > 1.2 * Math.abs(dataMax));
+    const paddedMin = anchorPositiveAtZero ? 0 : dataMin;
+    const paddedMax = anchorNegativeAtZero ? 0 : dataMax;
+    const span = paddedMax - paddedMin;
     const padding = isFinite(span)
       ? span * 0.05
-      : dataMax * 0.05 - dataMin * 0.05;
-    let lo = dataMin - padding;
-    let hi = dataMax + padding;
+      : paddedMax * 0.05 - paddedMin * 0.05;
+    let lo = anchorPositiveAtZero ? 0 : dataMin - padding;
+    let hi = anchorNegativeAtZero ? 0 : dataMax + padding;
     // The 1.2 boundary is intentionally strict: equality remains offset.
-    if (dataMin >= 0 && (dataMin === 0 || dataMax > 1.2 * dataMin)) lo = 0;
-    if (dataMax <= 0 && (dataMax === 0
-      || Math.abs(dataMin) > 1.2 * Math.abs(dataMax))) hi = 0;
+    // Once an endpoint is zero-anchored, padding is computed from that same
+    // effective span. This keeps identical automatic axes family-invariant
+    // and sign-mirrored instead of retaining the pre-anchor offset range.
     // The broad automatic-axis corpus (6,354 finite line-axis cases) selected
     // the 1/2/5 ladder from roughly ten intervals.  Using the plot length here
     // made ordinary vertical charts collapse to only three or four labelled

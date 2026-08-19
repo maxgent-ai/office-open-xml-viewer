@@ -264,7 +264,7 @@ for (const format of formats) {
 }
 
 const documentationMarker = '<!-- viewer-api-symmetry-contract -->';
-for (const relativePath of ['docs/api-architecture-0.76.md', 'docs/api-architecture-0.76.ja.md']) {
+for (const relativePath of ['docs/api-architecture-0.76.md']) {
   const source = readFileSync(path.join(root, relativePath), 'utf8');
   if (!source.includes(documentationMarker)) fail(`${relativePath} is missing the API symmetry contract marker`);
   for (const format of formats) {

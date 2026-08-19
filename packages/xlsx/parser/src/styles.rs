@@ -9,13 +9,7 @@ use ooxml_common::ns::is_x_ns;
 /// None)` if `xl/styles.xml` is missing or malformed. The renderer uses this
 /// to compute the Max Digit Width for column-width pixel conversion
 /// (ECMA-376 §18.3.1.13).
-pub(crate) fn parse_default_font(archive: &mut crate::XlsxZip) -> (Option<String>, Option<f64>) {
-    let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
-        return (None, None);
-    };
-    let Ok(doc) = parse_guarded(&xml) else {
-        return (None, None);
-    };
+fn parse_default_font(doc: &roxmltree::Document) -> (Option<String>, Option<f64>) {
     let mut font_id: usize = 0;
     for n in doc.descendants() {
         if n.tag_name().name() == "cellStyleXfs" && is_x_ns(n.tag_name().namespace()) {
@@ -56,13 +50,26 @@ pub(crate) fn parse_default_font(archive: &mut crate::XlsxZip) -> (Option<String
     (None, None)
 }
 
+pub(crate) struct ParsedStylesPart {
+    pub(crate) styles: Styles,
+    pub(crate) default_font: (Option<String>, Option<f64>),
+    pub(crate) chart_number_formats: crate::chart::ChartNumberFormatCache,
+}
+
+pub(crate) struct ParsedStyleProjection {
+    pub(crate) default_font: (Option<String>, Option<f64>),
+    pub(crate) chart_number_formats: crate::chart::ChartNumberFormatCache,
+}
+
 pub(crate) fn parse_styles(
     archive: &mut crate::XlsxZip,
     theme_colors: &[String],
-) -> Result<Styles, String> {
+) -> Result<ParsedStylesPart, String> {
     let xml = read_zip_string(archive, "xl/styles.xml")?;
     let doc = parse_guarded(&xml).map_err(|e| e.to_string())?;
 
+    let default_font = parse_default_font(&doc);
+    let chart_number_formats = crate::chart::ChartNumberFormatCache::from_document(&doc);
     let num_fmts = parse_num_fmts(&doc);
     let fonts = parse_fonts(&doc, theme_colors);
     let fills = parse_fills(&doc, theme_colors);
@@ -70,13 +77,31 @@ pub(crate) fn parse_styles(
     let cell_xfs = parse_cell_xfs(&doc);
     let dxfs = parse_dxfs(&doc, theme_colors);
 
-    Ok(Styles {
-        fonts,
-        fills,
-        borders,
-        cell_xfs,
-        num_fmts,
-        dxfs,
+    Ok(ParsedStylesPart {
+        styles: Styles {
+            fonts,
+            fills,
+            borders,
+            cell_xfs,
+            num_fmts,
+            dxfs,
+        },
+        default_font,
+        chart_number_formats,
+    })
+}
+
+/// Parse only the workbook-wide style information required while materializing
+/// individual sheets. This deliberately avoids constructing fills, borders,
+/// DXFs, and other full-workbook output that a sheet projection never returns.
+pub(crate) fn parse_style_projection(
+    archive: &mut crate::XlsxZip,
+) -> Result<ParsedStyleProjection, String> {
+    let xml = read_zip_string(archive, "xl/styles.xml")?;
+    let doc = parse_guarded(&xml).map_err(|e| e.to_string())?;
+    Ok(ParsedStyleProjection {
+        default_font: parse_default_font(&doc),
+        chart_number_formats: crate::chart::ChartNumberFormatCache::from_document(&doc),
     })
 }
 

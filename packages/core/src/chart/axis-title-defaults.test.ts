@@ -164,7 +164,7 @@ describe('axis-title compatibility defaults', () => {
         majorTickMark: 'out',
       },
     }), WIDE, 1);
-    expect(titleCall(secondary.texts, 'Right').rotation).toBeCloseTo(Math.PI / 2);
+    expect(titleCall(secondary.texts, 'Right').rotation).toBeCloseTo(-Math.PI / 2);
   });
 
   it('keeps authored size/orientation and theme face authoritative', () => {

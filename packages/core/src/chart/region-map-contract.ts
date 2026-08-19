@@ -9,5 +9,6 @@ export interface ChartRegionMapRenderer {
     chart: ChartModel,
     rect: ChartRect,
     ptToPx: number,
+    shapeRotationDeg?: number,
   ): boolean;
 }

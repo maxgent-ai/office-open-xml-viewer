@@ -647,8 +647,8 @@ fn xlsx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> XlsxL
             stops
                 .iter()
                 .map(|stop| ShapeLineDashSegment {
-                    dash: stop.dash as f64 / 100_000.0,
-                    space: stop.space as f64 / 100_000.0,
+                    dash: stop.dash / 100_000.0,
+                    space: stop.space / 100_000.0,
                 })
                 .collect(),
         ),

@@ -1,0 +1,136 @@
+# Chart support matrix
+
+This document is a summarized implementation view for DrawingML charts. The
+specification-derived source of truth is
+[#1276](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1276).
+A chart family can be generally available while individual authored properties
+remain partial; the issue therefore tracks the finer-grained audit and work
+items that are intentionally collapsed here.
+
+## Inventory method
+
+The audit starts from the Strict and Transitional `dml-chart.xsd` contracts in
+ECMA-376, then follows every referenced chart type and group into the shared
+parser, wire model, and renderer. DrawingML paint/text contracts, MS-ODRAWXML
+ChartEx and linked style parts, extension-list contracts, and host package
+relationships are audited as separate workstreams. Office-produced output is
+used only to establish a bounded compatibility rule where the specification
+leaves behavior application-defined.
+
+The matrix is not considered exhaustive until every specification workstream
+in #1276 is classified. New implementation findings must be recorded in that
+issue before this summary is promoted to `Supported`.
+
+## Status and completion criteria
+
+| Status | Meaning |
+| --- | --- |
+| Supported | The parser preserves the authored property, the shared model exposes it, the shared renderer consumes it, and focused tests cover the supported boundary. |
+| Partial | A documented subset is implemented. The Notes column states the exact boundary. |
+| Missing | Valid authored markup is discarded or retained without a renderer. |
+| Unverified | The implementation exists, but its Office compatibility boundary has not been established. |
+| Not applicable | The property does not affect browser rendering or is intentionally outside the product scope. |
+
+A row becomes **Supported** only when all of the following are present:
+
+1. parser-to-model contract coverage in `packages/ooxml-common`;
+2. shared rendering coverage in `packages/core` where the concept is common to
+   DOCX, XLSX, and PPTX;
+3. a focused geometry/style regression test;
+4. an Office-produced fidelity comparison for behavior left application-defined
+   by ECMA-376 or MS-ODRAWXML.
+
+Specification-defined behavior does not require a compatibility heuristic.
+Application-defined behavior must stay **Partial** or **Unverified** until its
+observed input boundary is recorded in
+[`chart-compatibility-evidence.md`](chart-compatibility-evidence.md).
+
+## Classic chart families
+
+| ID | Family / property | Parser | Model | Renderer | Status | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| C-LINE-001 | `lineChart` standard, stacked, percent-stacked lines | Yes | Yes | Yes | Supported | Includes markers, smoothing, blank-cell policy, data labels, error bars, and trendlines. |
+| C-LINE-002 | `lineChart/dropLines` | Yes | Yes | Yes | Supported | One owning-group envelope per category spans the effective category-axis crossing and all plotted group points. Interior crossings and paint order are Office-verified. |
+| C-LINE-003 | `lineChart/hiLowLines` | Yes | Yes | Yes | Supported | Valid on ordinary line charts as well as stock charts. |
+| C-LINE-004 | `lineChart/upDownBars` | Yes | Yes | Yes | Partial | Direct paint is supported. Empty-paint automatic white/black styling is limited to the retained legacy Style 2 observation. |
+| C-LINE-005 | Multiple `lineChart` groups in one plot area | Yes | Yes | Partial | Partial | Decoration ownership is retained and consumed; other group-level line properties still require individual provenance rows. |
+| C-LINE-006 | Group-level `marker` and `smooth` defaults | Yes | Yes | Yes | Supported | Group defaults are retained; an explicit series-level marker or smooth value remains authoritative. |
+| C-AREA-001 | `areaChart` standard, stacked, percent-stacked areas | Yes | Yes | Yes | Supported | Series fill, labels, axes, and stacking are shared across hosts. |
+| C-AREA-002 | `areaChart/dropLines` | Yes | Yes | Yes | Supported | `EG_AreaChartShared` ownership and direct line paint are preserved. One envelope line per category spans the axis crossing and all standard or cumulative stacked points, with Office-verified paint order. |
+| C-BAR-001 | `barChart` direction, grouping, overlap, and gap | Yes | Yes | Yes | Supported | Each bar group retains its own provenance and geometry. |
+| C-BAR-002 | `barChart/serLines` | Yes | Yes | Yes | Supported | All group-owned line paints are preserved. A single authored element joins adjacent points at facing value-end edges for both directions. Excel rejects multiple authored elements, so the renderer preserves them but fails closed instead of inventing a style-association rule. |
+| C-STOCK-001 | Stock drop lines, high-low lines, and up/down bars | Yes | Yes | Yes | Partial | Stock drop/high-low lines preserve direct and linked line paint. Up/down bars use the shared solid/gradient/pattern fill model and preserve full preset outline formatting. Empty-paint application defaults remain under compatibility audit. |
+| C-SCATTER-001 | Scatter style, X/Y values, markers, and smoothing | Yes | Yes | Yes | Supported | Numeric axes and the six `scatterStyle` modes are represented. |
+| C-RADAR-001 | Standard, marker, and filled radar styles | Yes | Yes | Yes | Supported | Direct series paint and marker controls are consumed. |
+| C-PIE-001 | Pie/doughnut point explosion | Yes | Yes | Yes | Supported | Per-point explosion is retained. |
+| C-PIE-002 | Pie/doughnut series-level explosion | Yes | Yes | Yes | Supported | `CT_PieSer/explosion` supplies the default; a point-level `dPt/explosion` overrides it. |
+| C-PIE-003 | First-slice angle and doughnut hole size | Yes | Yes | Yes | Supported | Authored schema bounds are preserved. |
+| C-OFPIE-001 | Pie-of-pie/bar-of-pie split, sizing, and connector geometry | Yes | Yes | Yes | Partial | Position, value, percent, and custom splits render. Automatic split selection remains application-defined. |
+| C-BUBBLE-001 | Bubble size, scale, negative bubbles, and size representation | Yes | Yes | Yes | Supported | Resource-bounded and shared across hosts. |
+| C-BUBBLE-002 | `bubble3D` | No | No | No | Missing | The current local corpus only exercises `false`; `true` remains unsupported. |
+| C-SURFACE-001 | Surface/surface3D mesh, bands, camera, and authored band formatting | Yes | Yes | Yes | Partial | Supported camera/material boundaries are recorded in the compatibility evidence document. |
+| C-3D-001 | Classic bar/column 3-D shapes and camera projection | Yes | Yes | Yes | Partial | Box, cylinder, cone, and pyramid geometry is bounded; compatibility evidence limits camera/material approximations. |
+| C-3D-002 | Classic line, area, and pie 3-D projection | Yes | Yes | Yes | Partial | The authored 3-D group is retained and dispatched through the shared 3-D renderer; family-specific formatting remains under audit. |
+| C-COMBO-001 | Multiple classic chart families and primary/secondary axes | Yes | Yes | Partial | Partial | Common bar/line/area/scatter/bubble combinations render. Arbitrary plot-area group order and every mixed grouping/direction boundary are not yet certified. |
+
+## Shared axes, labels, legends, and chart-space properties
+
+| ID | Property | Parser | Model | Renderer | Status | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| C-AXIS-001 | Linear/date/log axes, authored bounds and units | Yes | Yes | Yes | Partial | Fractional month/year date-axis units require an Office compatibility boundary. |
+| C-AXIS-002 | Category `lblAlgn` and `lblOffset` | Yes | Yes | Yes | Supported | Category/date and auxiliary category axes retain both properties; the shared renderer applies interval alignment and the specified percentage of its family-specific default label gap. |
+| C-AXIS-003 | Axis crossing (`crosses`, `crossesAt`, and `crossBetween`) | Yes | Yes | Partial | Partial | Bar/column, line, area, and Surface use one effective crossing for axis geometry, ticks, labels, and group decorations. Remaining numeric-X and arbitrary combination boundaries are still under audit. |
+| C-LABEL-001 | Value/category/series/percent labels, separators, leader lines, and manual layout | Yes | Yes | Yes | Supported | Per-point and series-level overrides are retained. |
+| C-LABEL-002 | `showBubbleSize` | Yes | Yes | Yes | Supported | Series and point-level flags compose the authored bubble-size cache value into the label. |
+| C-LABEL-003 | `showLegendKey` | Yes | Yes | Yes | Supported | Series- and point-level flags use the effective series/point key paint in bounded, rich, callout, and manually positioned labels. |
+| C-LABEL-004 | `showDLblsOverMax` | Yes | Yes | Yes | Supported | Labels beyond the effective primary or secondary value-axis maximum are suppressed consistently, including stacked endpoints and classic 3-D Cartesian charts. |
+| C-LEGEND-001 | Position, text, fill, line, and manual layout | Yes | Yes | Yes | Supported | |
+| C-LEGEND-002 | `legend/overlay` and per-entry delete/style | Yes | Yes | Yes | Supported | Overlay legends do not reserve plot space; source-indexed deletion and text overrides share one measured legend model in 2-D and 3-D paths. |
+| C-SPACE-001 | `roundedCorners` | Yes | Yes | Yes | Supported | The authored flag applies one bounded Office-compatible outer geometry to fill, clipping, and border; structured chart-space fill remains authoritative. |
+| C-SPACE-002 | `plotVisOnly` hidden-source behavior | Yes | Yes | Yes | Supported | Worksheet row/column visibility is projected over caches before shared layout, stacking, labels, legends, and extent planning. |
+| C-TABLE-001 | Plot-area data table content and borders | Yes | Yes | Yes | Supported | One measured layout serves column, horizontal bar, line, area, stock, and combination charts. Scatter's authored table is ignored according to the retained Office boundary. |
+
+## Chart Style roles
+
+The shared parser retains the paint-bearing `CT_ChartStyle` roles defined by
+MS-ODRAWXML §2.8.3.1 for both classic and ChartEx parts. The three hosts resolve
+the same linked `styleN.xml` and `colorsN.xml` relationships; the remaining
+status differences below are renderer-consumption gaps, not lost package data.
+
+| ID | Role group | Status | Notes |
+| --- | --- | --- | --- |
+| S-STYLE-001 | Shared role parsing and package wiring | Supported | Paint recipes, fixed/relative Chart Colors indices, `NoStyle`, and bounded palette expansion are retained through DOCX, XLSX, and PPTX. |
+| S-STYLE-002 | `chartArea`, `plotArea`, `legend` | Partial | Direct paint, `noFill`, and `noLine` remain authoritative. Linked solid, gradient, and pattern fill/outline recipes are consumed through shared frame painters across classic 2-D, optional 3-D, ChartEx, and offline Region Map paths, including host rotation and partial manual-layout dimensions. Preset and bounded custom dash, width, cap, and join are supported. Compound-line tokens are retained, but their application-defined rail geometry remains unpainted pending bounded Office-reference evidence. |
+| S-STYLE-003 | `categoryAxis`, `valueAxis`, tick labels, `seriesAxis` | Supported | Linked line and text defaults are consumed for primary, secondary, and 3-D series axes. Direct chart formatting remains authoritative. |
+| S-STYLE-004 | `seriesLine`, `dropLine`, `hiLoLine`, `upBar`, `downBar` | Supported | Direct formatting wins; the linked role supplies only omitted fill/line properties. Decoration lines retain visibility, color, width, preset dash, cap, and join. |
+| S-STYLE-005 | `errorBar`, `leaderLine` | Supported | Direct line paint and `noFill` win; the linked role supplies omitted color, width, dash, and visibility in shared 2-D and optional 3-D paths. |
+| S-STYLE-006 | `trendline` | Supported | Direct trendline paint and `noFill` win; the linked role supplies omitted color, width, dash, and visibility to the plot and legend. |
+| S-STYLE-007 | `dataTable` | Supported | The linked line role supplies omitted grid color, width, dash, and `noFill`; direct table formatting remains authoritative. |
+| S-STYLE-008 | `gridlineMajor`, `gridlineMinor` | Supported | Linked line fallback applies to enabled primary and secondary gridlines; direct paint and `noFill` retain precedence. |
+| S-STYLE-009 | `dataLabelCallout`, `trendlineLabel` | Partial | Paint is retained; text/shape style inheritance is incomplete. |
+| S-STYLE-010 | `dataPoint3D`, `dataPointWireframe`, `floor`, `wall`, `plotArea3D` | Partial | Paint is retained; authored direct 3-D surface formatting remains authoritative where already modeled. |
+| S-STYLE-011 | `dataPointMarker` and marker layout | Partial | Direct and linked solid, gradient, and pattern marker fills share the DrawingML paint model across classic marker-bearing series and ChartEx box markers. Outline, width, `noFill`, symbol, and size are retained; picture-marker image content remains unsupported. |
+
+## ChartEx layouts
+
+| ID | Layout | Status | Notes |
+| --- | --- | --- |
+| X-LAYOUT-001 | Waterfall, histogram/Pareto, funnel | Supported | Includes bounded layout data and shared Chart Style paint. |
+| X-LAYOUT-002 | Box-and-whisker | Supported | Includes mean/outlier/non-outlier roles and visibility controls. |
+| X-LAYOUT-003 | Treemap and sunburst | Supported | Hierarchy depth/slot budgets apply before tree construction. |
+| X-LAYOUT-004 | Region Map | Partial | Deterministic offline country geometry only; external geocoding is out of scope. |
+| X-LAYOUT-005 | Unknown or future `layoutId` values | Missing | Fail closed with a placeholder; no layout is guessed from sample data. |
+
+## Maintenance rules
+
+- Update #1276 and this summary in the same pull request that changes support
+  status.
+- Do not mark a row Supported from a single screenshot or sample-specific
+  adjustment.
+- Keep self-VRT and Office-fidelity validation separate: self-VRT detects
+  regressions, while Office exports adjudicate compatibility.
+- Add a new row when valid authored markup is intentionally deferred. Silently
+  discarding a newly discovered rendering property is not an acceptable steady
+  state.
+- Private workbooks and Office exports remain local. Public tests must use small,
+  synthetic fixtures that isolate the relevant OOXML contract.

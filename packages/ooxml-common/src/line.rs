@@ -10,6 +10,12 @@ use crate::fill::{parse_grad_fill, parse_patt_fill, GradientFill, PatternFill};
 use crate::ns::is_a_ns;
 use roxmltree::Node;
 
+/// Availability ceiling for one DrawingML custom dash list. The schema leaves
+/// `<a:custDash><a:ds>` unbounded, while every consumer expands the stops into
+/// a Canvas dash array. This bounds input work without changing authored
+/// cadence for ordinary documents.
+pub const MAX_LINE_DASH_STOPS: usize = 512;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinePaint {
     NoFill,
@@ -21,15 +27,16 @@ pub enum LinePaint {
     Pattern(PatternFill),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LineDashStop {
-    /// Raw `ST_PositivePercentage` value (100000 = 100%).
-    pub dash: i64,
-    /// Raw `ST_PositivePercentage` value (100000 = 100%).
-    pub space: i64,
+    /// Raw DrawingML percentage units (100000 = 100%). Strict OOXML decimal
+    /// percentage lexical values are normalized to the same scale.
+    pub dash: f64,
+    /// Raw DrawingML percentage units (100000 = 100%).
+    pub space: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LineDash {
     /// The optional `val` is preserved; hosts may apply their compatibility
     /// default only when converting to an effective renderer model.
@@ -102,13 +109,41 @@ fn parse_end(node: Node<'_, '_>) -> LineEnd {
     }
 }
 
-/// Parse one DrawingML `<a:ln>` into a presence-preserving descriptor.
-pub fn parse_line_properties<R: ThemeResolver + ?Sized>(
+/// DrawingML percentages are integer thousandths of a percent in common
+/// Transitional files, while Strict OOXML uses a decimal `%` lexical form.
+/// Normalize both to the historical 100000-per-100% scale used by the shared
+/// line model.
+fn parse_positive_percentage(value: &str) -> Option<f64> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let mut parts = percent.split('.');
+        let whole = parts.next()?;
+        let fraction = parts.next();
+        if whole.is_empty()
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || fraction.is_some_and(|digits| {
+                digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            || parts.next().is_some()
+        {
+            return None;
+        }
+        let parsed = percent.parse::<f64>().ok()? * 1000.0;
+        parsed.is_finite().then_some(parsed)
+    } else {
+        let parsed = value.parse::<i32>().ok()?;
+        (parsed >= 0).then_some(f64::from(parsed))
+    }
+}
+
+/// Parse only the paint choice of one DrawingML `<a:ln>`. Chart Style palette
+/// expansion uses this narrower path so a long custom dash recipe is not
+/// reparsed once per palette color.
+pub fn parse_line_paint<R: ThemeResolver + ?Sized>(
     line: Node<'_, '_>,
     resolver: &R,
     tint_mode: TintMode,
-) -> LineProperties {
-    let paint = line.children().find_map(|child| {
+) -> Option<LinePaint> {
+    line.children().find_map(|child| {
         if !child.is_element() || !is_a_ns(child.tag_name().namespace()) {
             return None;
         }
@@ -125,7 +160,16 @@ pub fn parse_line_properties<R: ThemeResolver + ?Sized>(
             ))),
             _ => None,
         }
-    });
+    })
+}
+
+/// Parse one DrawingML `<a:ln>` into a presence-preserving descriptor.
+pub fn parse_line_properties<R: ThemeResolver + ?Sized>(
+    line: Node<'_, '_>,
+    resolver: &R,
+    tint_mode: TintMode,
+) -> LineProperties {
+    let paint = parse_line_paint(line, resolver, tint_mode);
 
     let dash = if let Some(preset) = a_child(line, "prstDash") {
         Some(LineDash::Preset(preset.attribute("val").map(str::to_owned)))
@@ -139,10 +183,11 @@ pub fn parse_line_properties<R: ThemeResolver + ?Sized>(
                             && node.tag_name().name() == "ds"
                             && is_a_ns(node.tag_name().namespace())
                     })
+                    .take(MAX_LINE_DASH_STOPS)
                     .filter_map(|stop| {
                         Some(LineDashStop {
-                            dash: stop.attribute("d")?.parse().ok()?,
-                            space: stop.attribute("sp")?.parse().ok()?,
+                            dash: parse_positive_percentage(stop.attribute("d")?)?,
+                            space: parse_positive_percentage(stop.attribute("sp")?)?,
                         })
                     })
                     .collect(),
@@ -218,8 +263,8 @@ mod tests {
         assert_eq!(
             line.dash,
             Some(LineDash::Custom(vec![LineDashStop {
-                dash: 125000,
-                space: 75000
+                dash: 125000.0,
+                space: 75000.0
             }]))
         );
         assert_eq!(
@@ -295,5 +340,74 @@ mod tests {
                 color: Some("010203".into())
             })
         );
+    }
+
+    #[test]
+    fn normalizes_strict_decimal_percent_custom_dash_values() {
+        let xml = r#"<a:ln xmlns:a="http://purl.oclc.org/ooxml/drawingml/main">
+          <a:custDash><a:ds d="125.5%" sp="75.25%"/></a:custDash>
+        </a:ln>"#;
+        let doc = Document::parse(xml).unwrap();
+        let line = parse_line_properties(doc.root_element(), &Resolver, TintMode::WordLiteral);
+        assert_eq!(
+            line.dash,
+            Some(LineDash::Custom(vec![LineDashStop {
+                dash: 125_500.0,
+                space: 75_250.0,
+            }]))
+        );
+    }
+
+    #[test]
+    fn rejects_custom_dash_percentages_outside_the_schema_lexical_space() {
+        let xml = r#"<a:ln xmlns:a="http://purl.oclc.org/ooxml/drawingml/main">
+          <a:custDash>
+            <a:ds d="1e2%" sp="75%"/>
+            <a:ds d="+1%" sp="75%"/>
+            <a:ds d="1.5" sp="75"/>
+            <a:ds d="1e3" sp="75"/>
+            <a:ds d="2147483648" sp="75"/>
+            <a:ds d="100000" sp="75000"/>
+          </a:custDash>
+        </a:ln>"#;
+        let doc = Document::parse(xml).unwrap();
+        let line = parse_line_properties(doc.root_element(), &Resolver, TintMode::WordLiteral);
+        assert_eq!(
+            line.dash,
+            Some(LineDash::Custom(vec![LineDashStop {
+                dash: 100_000.0,
+                space: 75_000.0,
+            }]))
+        );
+    }
+
+    #[test]
+    fn retains_zero_length_dashes_allowed_by_positive_percentage() {
+        let xml = r#"<a:ln xmlns:a="http://purl.oclc.org/ooxml/drawingml/main">
+          <a:custDash><a:ds d="0%" sp="75%"/></a:custDash>
+        </a:ln>"#;
+        let doc = Document::parse(xml).unwrap();
+        let line = parse_line_properties(doc.root_element(), &Resolver, TintMode::WordLiteral);
+        assert_eq!(
+            line.dash,
+            Some(LineDash::Custom(vec![LineDashStop {
+                dash: 0.0,
+                space: 75_000.0,
+            }]))
+        );
+    }
+
+    #[test]
+    fn bounds_custom_dash_stops_before_building_the_wire_list() {
+        let stops = (0..MAX_LINE_DASH_STOPS + 1)
+            .map(|_| r#"<a:ds d="100000" sp="100000"/>"#)
+            .collect::<String>();
+        let xml = format!(r#"<a:ln xmlns:a="{NS}"><a:custDash>{stops}</a:custDash></a:ln>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let line = parse_line_properties(doc.root_element(), &Resolver, TintMode::WordLiteral);
+        let Some(LineDash::Custom(stops)) = line.dash else {
+            panic!("expected bounded custom dash list");
+        };
+        assert_eq!(stops.len(), MAX_LINE_DASH_STOPS);
     }
 }

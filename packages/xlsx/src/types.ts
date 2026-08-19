@@ -447,6 +447,7 @@ export type {
   ChartSeries,
   ChartSeriesDataLabels,
   ChartDataLabelOverride,
+  ChartDataTable,
   ChartDataPointOverride,
   ChartErrBars,
   ChartManualLayout,

@@ -66,18 +66,37 @@ pub(crate) fn parse_legacy_chart(
     parse_legacy_chart_with_user_shapes(xml, None, theme)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_legacy_chart_with_user_shapes(
     xml: &str,
     user_shapes_xml: Option<&str>,
     theme: &HashMap<String, String>,
 ) -> Option<ChartElement> {
+    parse_legacy_chart_with_style_parts(xml, None, None, user_shapes_xml, theme, None)
+}
+
+pub(crate) fn parse_legacy_chart_with_style_parts(
+    xml: &str,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+    user_shapes_xml: Option<&str>,
+    theme: &HashMap<String, String>,
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+) -> Option<ChartElement> {
     let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
     let resolver = PptxColorResolver {
         theme,
-        theme_format_scheme: None,
+        theme_format_scheme,
     };
-    let mut chart = ooxml_common::chart::parse_chart_part(root, &resolver)?;
+    let style_xml = style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
+    let color_style_xml = color_style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
+    let mut chart = ooxml_common::chart::parse_chart_part_with_style_parts(
+        root,
+        &resolver,
+        style_xml,
+        color_style_xml,
+    )?;
     if let Some(user_shapes_xml) = user_shapes_xml {
         if let Ok(user_shapes_doc) = parse_preflighted_pptx_xml(user_shapes_xml) {
             let text_boxes = ooxml_common::chart::parse_chart_user_shapes_for_chart(

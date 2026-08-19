@@ -67,68 +67,82 @@ set font=11px sans-serif
 set textBaseline=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,312.95
 lineTo 88.8,312.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 set fillStyle=#555
 set textAlign=right
 fillText "0" 82.8,312.95 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,271.3208
 lineTo 88.8,271.3208
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 fillText "2" 82.8,271.3208 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,229.6917
 lineTo 88.8,229.6917
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 fillText "4" 82.8,229.6917 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,188.0625
 lineTo 88.8,188.0625
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 fillText "6" 82.8,188.0625 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,146.4333
 lineTo 88.8,146.4333
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 fillText "8" 82.8,146.4333 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,104.8042
 lineTo 88.8,104.8042
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 fillText "10" 82.8,104.8042 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,63.175
 lineTo 88.8,63.175
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#4472C4
 set lineWidth=1.5
+setLineDash
 fillText "12" 82.8,63.175 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
@@ -136,58 +150,84 @@ beginPath
 moveTo 88.8,312.95
 lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 88.8,319.25
 lineTo 88.8,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 126.4,319.25
 lineTo 126.4,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 164,319.25
 lineTo 164,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 201.6,319.25
 lineTo 201.6,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 239.2,319.25
 lineTo 239.2,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 276.8,319.25
 lineTo 276.8,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 314.4,319.25
 lineTo 314.4,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 352,319.25
 lineTo 352,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 389.6,319.25
 lineTo 389.6,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 427.2,319.25
 lineTo 427.2,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 464.8,319.25
 lineTo 464.8,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 502.4,319.25
 lineTo 502.4,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 540,319.25
 lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
 set textAlign=center
 set textBaseline=top
 fillText "Jan" 107.6,315.95 fs=#555 font=11px sans-serif al=center bl=top
@@ -234,12 +274,14 @@ set textBaseline=middle
 fillText "0" 78.5,335.45 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,335.45
 lineTo 88.8,335.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,301.5222
 lineTo 620,301.5222
@@ -247,12 +289,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "0.5" 78.5,301.5222 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,301.5222
 lineTo 88.8,301.5222
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,267.5944
 lineTo 620,267.5944
@@ -260,12 +304,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "1" 78.5,267.5944 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,267.5944
 lineTo 88.8,267.5944
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,233.6667
 lineTo 620,233.6667
@@ -273,12 +319,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "1.5" 78.5,233.6667 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,233.6667
 lineTo 88.8,233.6667
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,199.7389
 lineTo 620,199.7389
@@ -286,12 +334,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "2" 78.5,199.7389 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,199.7389
 lineTo 88.8,199.7389
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,165.8111
 lineTo 620,165.8111
@@ -299,12 +349,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "2.5" 78.5,165.8111 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,165.8111
 lineTo 88.8,165.8111
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,131.8833
 lineTo 620,131.8833
@@ -312,12 +364,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "3" 78.5,131.8833 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,131.8833
 lineTo 88.8,131.8833
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,97.9556
 lineTo 620,97.9556
@@ -325,12 +379,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "3.5" 78.5,97.9556 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,97.9556
 lineTo 88.8,97.9556
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,64.0278
 lineTo 620,64.0278
@@ -338,12 +394,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "4" 78.5,64.0278 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,64.0278
 lineTo 88.8,64.0278
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 88.8,30.1
 lineTo 620,30.1
@@ -351,12 +409,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "4.5" 78.5,30.1 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,30.1
 lineTo 88.8,30.1
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 save
 set strokeStyle=#888
 set lineWidth=1
@@ -374,45 +434,61 @@ restore
 set textAlign=center
 set textBaseline=top
 fillText "0" 88.8,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 88.8,341.75
 lineTo 88.8,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "0.5" 164.6857,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 164.6857,341.75
 lineTo 164.6857,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "1" 240.5714,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 240.5714,341.75
 lineTo 240.5714,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "1.5" 316.4571,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 316.4571,341.75
 lineTo 316.4571,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "2" 392.3429,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 392.3429,341.75
 lineTo 392.3429,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "2.5" 468.2286,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 468.2286,341.75
 lineTo 468.2286,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "3" 544.1143,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 544.1143,341.75
 lineTo 544.1143,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "3.5" 620,345.75 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 620,341.75
 lineTo 620,335.45
 stroke ss=#888 lw=1 dash=
+setLineDash
 save
 set fillStyle=#4472C4
 beginPath
@@ -557,50 +633,72 @@ beginPath
 moveTo 68.5,312.95
 lineTo 552.8,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 62.2,312.95
 lineTo 68.5,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 62.2,271.3208
 lineTo 68.5,271.3208
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 62.2,229.6917
 lineTo 68.5,229.6917
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 62.2,188.0625
 lineTo 68.5,188.0625
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 62.2,146.4333
 lineTo 68.5,146.4333
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 62.2,104.8042
 lineTo 68.5,104.8042
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 62.2,63.175
 lineTo 68.5,63.175
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 68.5,319.25
 lineTo 68.5,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 229.9333,319.25
 lineTo 229.9333,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 391.3667,319.25
 lineTo 391.3667,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 552.8,319.25
 lineTo 552.8,312.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
 set font=10.5px sans-serif
 set textBaseline=middle
 set fillStyle=#4472C4
@@ -749,50 +847,72 @@ beginPath
 moveTo 30.775,63.175
 lineTo 30.775,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 30.775,341.75
 lineTo 30.775,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 117.7792,341.75
 lineTo 117.7792,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 204.7833,341.75
 lineTo 204.7833,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 291.7875,341.75
 lineTo 291.7875,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 378.7917,341.75
 lineTo 378.7917,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 465.7958,341.75
 lineTo 465.7958,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 552.8,341.75
 lineTo 552.8,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 24.475,63.175
 lineTo 30.775,63.175
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 24.475,153.9333
 lineTo 30.775,153.9333
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 24.475,244.6917
 lineTo 30.775,244.6917
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 24.475,335.45
 lineTo 30.775,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 set font=10.5px sans-serif
 set fillStyle=#4472C4
 fillRect 576,188.3875,7.35,7.35 fs=#4472C4
@@ -928,58 +1048,84 @@ beginPath
 moveTo 47.8,335.45
 lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 41.5,335.45
 lineTo 47.8,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,301.4156
 lineTo 47.8,301.4156
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,267.3813
 lineTo 47.8,267.3813
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,233.3469
 lineTo 47.8,233.3469
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,199.3125
 lineTo 47.8,199.3125
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,165.2781
 lineTo 47.8,165.2781
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,131.2438
 lineTo 47.8,131.2438
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,97.2094
 lineTo 47.8,97.2094
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.5,63.175
 lineTo 47.8,63.175
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 47.8,341.75
 lineTo 47.8,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 199.5667,341.75
 lineTo 199.5667,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 351.3333,341.75
 lineTo 351.3333,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 503.1,341.75
 lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 503.1,63.175
 lineTo 503.1,335.45
@@ -987,65 +1133,87 @@ stroke ss=#aaa lw=1 dash=
 set fillStyle=#555
 set textAlign=left
 set textBaseline=middle
+setLineDash
 beginPath
 moveTo 509.4,335.45
 lineTo 503.1,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "0" 517.1,335.45 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,308.2225
 lineTo 503.1,308.2225
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "2" 517.1,308.2225 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,280.995
 lineTo 503.1,280.995
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "4" 517.1,280.995 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,253.7675
 lineTo 503.1,253.7675
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "6" 517.1,253.7675 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,226.54
 lineTo 503.1,226.54
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "8" 517.1,226.54 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,199.3125
 lineTo 503.1,199.3125
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "10" 517.1,199.3125 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,172.085
 lineTo 503.1,172.085
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "12" 517.1,172.085 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,144.8575
 lineTo 503.1,144.8575
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "14" 517.1,144.8575 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,117.63
 lineTo 503.1,117.63
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "16" 517.1,117.63 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,90.4025
 lineTo 503.1,90.4025
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "18" 517.1,90.4025 fs=#555 font=11px sans-serif al=left bl=middle
+setLineDash
 beginPath
 moveTo 509.4,63.175
 lineTo 503.1,63.175
 stroke ss=#aaa lw=1 dash=
+setLineDash
 fillText "20" 517.1,63.175 fs=#555 font=11px sans-serif al=left bl=middle
 save
 set font=bold 10.5px sans-serif
 translate 540.6,199.3125
-rotate 1.5708
+rotate -1.5708
 set textAlign=center
 fillText "Margin %" 0,0 fs=#555 font=bold 10.5px sans-serif al=center bl=middle
 restore
@@ -1140,11 +1308,13 @@ moveTo 84.94,312.95
 lineTo 540,312.95
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#888
+setLineDash
 beginPath
 moveTo 78.64,312.95
 lineTo 84.94,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#aaa
+setLineDash
 set fillStyle=#555
 set textAlign=right
 fillText "0" 78.94,312.95 fs=#555 font=16.2px sans-serif al=right bl=middle
@@ -1156,12 +1326,14 @@ lineTo 540,271.3208
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 78.64,271.3208
 lineTo 84.94,271.3208
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "2" 78.94,271.3208 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 84.94,229.6917
@@ -1169,12 +1341,14 @@ lineTo 540,229.6917
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 78.64,229.6917
 lineTo 84.94,229.6917
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "4" 78.94,229.6917 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 84.94,188.0625
@@ -1182,12 +1356,14 @@ lineTo 540,188.0625
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 78.64,188.0625
 lineTo 84.94,188.0625
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "6" 78.94,188.0625 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 84.94,146.4333
@@ -1195,12 +1371,14 @@ lineTo 540,146.4333
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 78.64,146.4333
 lineTo 84.94,146.4333
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "8" 78.94,146.4333 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 84.94,104.8042
@@ -1208,12 +1386,14 @@ lineTo 540,104.8042
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 78.64,104.8042
 lineTo 84.94,104.8042
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "10" 78.94,104.8042 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 84.94,63.175
@@ -1221,12 +1401,14 @@ lineTo 540,63.175
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 78.64,63.175
 lineTo 84.94,63.175
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "12" 78.94,63.175 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
@@ -1544,100 +1726,124 @@ set textAlign=center
 set textBaseline=top
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 103.9008,319.25
 lineTo 103.9008,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 141.8225,319.25
 lineTo 141.8225,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 179.7442,319.25
 lineTo 179.7442,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 217.6658,319.25
 lineTo 217.6658,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 255.5875,319.25
 lineTo 255.5875,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 293.5092,319.25
 lineTo 293.5092,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 331.4308,319.25
 lineTo 331.4308,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 369.3525,319.25
 lineTo 369.3525,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 407.2742,319.25
 lineTo 407.2742,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 445.1958,319.25
 lineTo 445.1958,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 483.1175,319.25
 lineTo 483.1175,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 521.0392,319.25
 lineTo 521.0392,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 fillText "Jan" 103.9008,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
 fillText "Feb" 141.8225,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
 fillText "Mar" 179.7442,317.95 fs=#555 font=16.2px sans-serif al=center bl=top
@@ -1896,111 +2102,135 @@ set textAlign=right
 set textBaseline=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,213.6415
 lineTo 292,213.6415
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "0.5" 289,213.6415 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,203.733
 lineTo 292,203.733
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "1" 289,203.733 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,193.8245
 lineTo 292,193.8245
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "1.5" 289,193.8245 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,183.916
 lineTo 292,183.916
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "2" 289,183.916 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,174.0075
 lineTo 292,174.0075
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "2.5" 289,174.0075 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,164.099
 lineTo 292,164.099
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "3" 289,164.099 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,154.1905
 lineTo 292,154.1905
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "3.5" 289,154.1905 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,144.282
 lineTo 292,144.282
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "4" 289,144.282 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,134.3735
 lineTo 292,134.3735
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "4.5" 289,134.3735 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,124.465
 lineTo 292,124.465
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "5" 289,124.465 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,114.5565
 lineTo 292,114.5565
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "5.5" 289,114.5565 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 285.7,104.648
 lineTo 292,104.648
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#bbb
 set lineWidth=0.5
+setLineDash
 fillText "6" 289,104.648 fs=#555 font=16.2px sans-serif al=right bl=middle
 set font=11px sans-serif
 set fillStyle=#444
@@ -2087,12 +2317,14 @@ set textBaseline=middle
 fillText "0" 105.8,312.95 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,312.95
 lineTo 116.1,312.95
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,277.2679
 lineTo 540,277.2679
@@ -2100,12 +2332,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "1" 105.8,277.2679 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,277.2679
 lineTo 116.1,277.2679
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,241.5857
 lineTo 540,241.5857
@@ -2113,12 +2347,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "2" 105.8,241.5857 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,241.5857
 lineTo 116.1,241.5857
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,205.9036
 lineTo 540,205.9036
@@ -2126,12 +2362,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "3" 105.8,205.9036 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,205.9036
 lineTo 116.1,205.9036
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,170.2214
 lineTo 540,170.2214
@@ -2139,12 +2377,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "4" 105.8,170.2214 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,170.2214
 lineTo 116.1,170.2214
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,134.5393
 lineTo 540,134.5393
@@ -2152,12 +2392,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "5" 105.8,134.5393 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,134.5393
 lineTo 116.1,134.5393
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,98.8571
 lineTo 540,98.8571
@@ -2165,12 +2407,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "6" 105.8,98.8571 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,98.8571
 lineTo 116.1,98.8571
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 116.1,63.175
 lineTo 540,63.175
@@ -2178,12 +2422,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "7" 105.8,63.175 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 109.8,63.175
 lineTo 116.1,63.175
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 save
 set strokeStyle=#888
 set lineWidth=1
@@ -2201,40 +2447,54 @@ restore
 set textAlign=center
 set textBaseline=top
 fillText "0" 116.1,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 116.1,319.25
 lineTo 116.1,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "1" 186.75,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 186.75,319.25
 lineTo 186.75,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "2" 257.4,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 257.4,319.25
 lineTo 257.4,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "3" 328.05,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 328.05,319.25
 lineTo 328.05,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "4" 398.7,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 398.7,319.25
 lineTo 398.7,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "5" 469.35,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 469.35,319.25
 lineTo 469.35,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 fillText "6" 540,323.25 fs=#555 font=11px sans-serif al=center bl=top
+setLineDash
 beginPath
 moveTo 540,319.25
 lineTo 540,312.95
 stroke ss=#888 lw=1 dash=
+setLineDash
 save
 set strokeStyle=#4472C4
 set lineWidth=1.5
@@ -2406,95 +2666,115 @@ set font=11px sans-serif
 set textBaseline=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,335.45
 lineTo 88.8,335.45
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 set fillStyle=#555
 set textAlign=right
 fillText "0" 82.8,335.45 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,303.5778
 lineTo 88.8,303.5778
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "5" 82.8,303.5778 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,271.7056
 lineTo 88.8,271.7056
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "10" 82.8,271.7056 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,239.8333
 lineTo 88.8,239.8333
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "15" 82.8,239.8333 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,207.9611
 lineTo 88.8,207.9611
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "20" 82.8,207.9611 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,176.0889
 lineTo 88.8,176.0889
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "25" 82.8,176.0889 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,144.2167
 lineTo 88.8,144.2167
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "30" 82.8,144.2167 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,112.3444
 lineTo 88.8,112.3444
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "35" 82.8,112.3444 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,80.4722
 lineTo 88.8,80.4722
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "40" 82.8,80.4722 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 82.5,48.6
 lineTo 88.8,48.6
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=1.5
+setLineDash
 fillText "45" 82.8,48.6 fs=#555 font=11px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
@@ -2502,22 +2782,30 @@ beginPath
 moveTo 88.8,335.45
 lineTo 620,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 88.8,341.75
 lineTo 88.8,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 265.8667,341.75
 lineTo 265.8667,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 442.9333,341.75
 lineTo 442.9333,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 620,341.75
 lineTo 620,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 set textAlign=center
 set textBaseline=top
 fillText "Q1" 177.3333,338.45 fs=#555 font=11px sans-serif al=center bl=top
@@ -2632,62 +2920,90 @@ beginPath
 moveTo 41.2,316.95
 lineTo 632.8,316.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 34.9,316.95
 lineTo 41.2,316.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,288.7528
 lineTo 41.2,288.7528
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,260.5556
 lineTo 41.2,260.5556
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,232.3583
 lineTo 41.2,232.3583
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,204.1611
 lineTo 41.2,204.1611
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,175.9639
 lineTo 41.2,175.9639
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,147.7667
 lineTo 41.2,147.7667
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,119.5694
 lineTo 41.2,119.5694
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,91.3722
 lineTo 41.2,91.3722
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 34.9,63.175
 lineTo 41.2,63.175
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 41.2,323.25
 lineTo 41.2,316.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 238.4,323.25
 lineTo 238.4,316.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 435.6,323.25
 lineTo 435.6,316.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 632.8,323.25
 lineTo 632.8,316.95
 stroke ss=#aaa lw=1 dash=
+setLineDash
 set font=10.5px sans-serif
 set textBaseline=middle
 set fillStyle=#4472C4
@@ -2797,66 +3113,96 @@ beginPath
 moveTo 134.4,335.45
 lineTo 632.8,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 beginPath
 moveTo 128.1,335.45
 lineTo 134.4,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,304.915
 lineTo 134.4,304.915
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,274.38
 lineTo 134.4,274.38
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,243.845
 lineTo 134.4,243.845
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,213.31
 lineTo 134.4,213.31
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,182.775
 lineTo 134.4,182.775
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,152.24
 lineTo 134.4,152.24
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,121.705
 lineTo 134.4,121.705
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,91.17
 lineTo 134.4,91.17
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,60.635
 lineTo 134.4,60.635
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 128.1,30.1
 lineTo 134.4,30.1
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 134.4,341.75
 lineTo 134.4,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 300.5333,341.75
 lineTo 300.5333,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 466.6667,341.75
 lineTo 466.6667,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
+setLineDash
 beginPath
 moveTo 632.8,341.75
 lineTo 632.8,335.45
 stroke ss=#aaa lw=1 dash=
+setLineDash
 set font=10.5px sans-serif
 set textBaseline=middle
 set fillStyle=#4472C4
@@ -2881,11 +3227,13 @@ moveTo 57.64,335.45
 lineTo 620,335.45
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#888
+setLineDash
 beginPath
 moveTo 51.34,335.45
 lineTo 57.64,335.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#aaa
+setLineDash
 set fillStyle=#555
 set textAlign=right
 fillText "0" 51.64,335.45 fs=#555 font=16.2px sans-serif al=right bl=middle
@@ -2897,12 +3245,14 @@ lineTo 620,301.5222
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,301.5222
 lineTo 57.64,301.5222
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "5" 51.64,301.5222 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,267.5944
@@ -2910,12 +3260,14 @@ lineTo 620,267.5944
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,267.5944
 lineTo 57.64,267.5944
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "10" 51.64,267.5944 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,233.6667
@@ -2923,12 +3275,14 @@ lineTo 620,233.6667
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,233.6667
 lineTo 57.64,233.6667
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "15" 51.64,233.6667 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,199.7389
@@ -2936,12 +3290,14 @@ lineTo 620,199.7389
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,199.7389
 lineTo 57.64,199.7389
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "20" 51.64,199.7389 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,165.8111
@@ -2949,12 +3305,14 @@ lineTo 620,165.8111
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,165.8111
 lineTo 57.64,165.8111
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "25" 51.64,165.8111 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,131.8833
@@ -2962,12 +3320,14 @@ lineTo 620,131.8833
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,131.8833
 lineTo 57.64,131.8833
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "30" 51.64,131.8833 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,97.9556
@@ -2975,12 +3335,14 @@ lineTo 620,97.9556
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,97.9556
 lineTo 57.64,97.9556
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "35" 51.64,97.9556 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,64.0278
@@ -2988,12 +3350,14 @@ lineTo 620,64.0278
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,64.0278
 lineTo 57.64,64.0278
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "40" 51.64,64.0278 fs=#555 font=16.2px sans-serif al=right bl=middle
 beginPath
 moveTo 57.64,30.1
@@ -3001,12 +3365,14 @@ lineTo 620,30.1
 stroke ss=#e0e0e0 lw=0.5 dash=
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 51.34,30.1
 lineTo 57.64,30.1
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 fillText "45" 51.64,30.1 fs=#555 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
@@ -3058,28 +3424,34 @@ set textAlign=center
 set textBaseline=top
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 57.64,341.75
 lineTo 57.64,335.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 338.82,341.75
 lineTo 338.82,335.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 set strokeStyle=#888
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 620,341.75
 lineTo 620,335.45
 stroke ss=#888 lw=1 dash=
 set strokeStyle=#ED7D31
 set lineWidth=2.3625
+setLineDash
 fillText "Q1" 57.64,340.45 fs=#555 font=16.2px sans-serif al=center bl=top
 fillText "Q2" 338.82,340.45 fs=#555 font=16.2px sans-serif al=center bl=top
 fillText "Q3" 620,340.45 fs=#555 font=16.2px sans-serif al=center bl=top
@@ -3102,12 +3474,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "0" 45.16,357.8 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,357.8
 lineTo 49.16,357.8
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,310.9857
 lineTo 639.2,310.9857
@@ -3115,12 +3489,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "20" 45.16,310.9857 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,310.9857
 lineTo 49.16,310.9857
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,264.1714
 lineTo 639.2,264.1714
@@ -3128,12 +3504,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "40" 45.16,264.1714 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,264.1714
 lineTo 49.16,264.1714
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,217.3571
 lineTo 639.2,217.3571
@@ -3141,12 +3519,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "60" 45.16,217.3571 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,217.3571
 lineTo 49.16,217.3571
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,170.5429
 lineTo 639.2,170.5429
@@ -3154,12 +3534,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "80" 45.16,170.5429 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,170.5429
 lineTo 49.16,170.5429
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,123.7286
 lineTo 639.2,123.7286
@@ -3167,12 +3549,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "100" 45.16,123.7286 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,123.7286
 lineTo 49.16,123.7286
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,76.9143
 lineTo 639.2,76.9143
@@ -3180,12 +3564,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "120" 45.16,76.9143 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,76.9143
 lineTo 49.16,76.9143
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 beginPath
 moveTo 49.16,30.1
 lineTo 639.2,30.1
@@ -3193,12 +3579,14 @@ stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "140" 45.16,30.1 fs=#595959 font=16.2px sans-serif al=right bl=middle
 set strokeStyle=#aaa
 set lineWidth=1
+setLineDash
 beginPath
 moveTo 42.86,30.1
 lineTo 49.16,30.1
 stroke ss=#aaa lw=1 dash=
 set strokeStyle=#e0e0e0
 set lineWidth=0.5
+setLineDash
 set strokeStyle=#aaa
 set lineWidth=1
 beginPath

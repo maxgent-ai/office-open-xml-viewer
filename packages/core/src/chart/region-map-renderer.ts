@@ -5,7 +5,9 @@ import type {
   ChartexRegionMapColors,
   ChartexValueColorStop,
 } from '../types/chart.js';
-import { chartTitleBand } from './layout.js';
+import { chartTitleBand, resolveManualLayoutRect } from './layout.js';
+import { paintLegendFrame } from './legend-frame.js';
+import { paintPlotAreaFrame } from './plot-area-frame.js';
 import { formatChartValWithCode } from './chart-number-format.js';
 import {
   NATURAL_EARTH_110M,
@@ -340,6 +342,7 @@ export function renderRegionMapChart(
   chart: ChartModel,
   rect: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): boolean {
   if (chart.chartType !== 'regionMap' || !chart.chartexRegionMap) return false;
   const map = chart.chartexRegionMap;
@@ -379,15 +382,42 @@ export function renderRegionMapChart(
   const title = chartTitleBand(chart, rect.h, ptToPx, .02, .015);
   drawTitle(ctx, chart, rect, title.fontPx, title.topPad);
   const legendH = chart.showLegend ? Math.max(32, rect.h * .16) : 0;
+  const defaultLegendRect = chart.showLegend ? {
+    x: rect.x,
+    y: rect.y + title.bandH,
+    w: rect.w,
+    h: legendH,
+  } : null;
+  const legendRect = defaultLegendRect && chart.legendManualLayout
+    ? resolveManualLayoutRect(chart.legendManualLayout, rect, defaultLegendRect)
+      ?? defaultLegendRect
+    : defaultLegendRect;
+  const reservedLegendH = chart.legendOverlay === true ? 0 : legendH;
   const insetX = rect.w * .03;
   const insetBottom = rect.h * .035;
-  const mapRect = {
+  const automaticMapRect = {
     x: rect.x + insetX,
-    y: rect.y + title.bandH + legendH,
+    y: rect.y + title.bandH + reservedLegendH,
     w: Math.max(1, rect.w - insetX * 2),
-    h: Math.max(1, rect.h - title.bandH - legendH - insetBottom),
+    h: Math.max(1, rect.h - title.bandH - reservedLegendH - insetBottom),
   };
-  if (chart.showLegend) drawLegend(ctx, chart, colorScale, rect.x, rect.y + title.bandH, rect.w, legendH, ptToPx);
+  const mapRect = chart.plotAreaManualLayout
+    ? resolveManualLayoutRect(chart.plotAreaManualLayout, rect, automaticMapRect)
+      ?? automaticMapRect
+    : automaticMapRect;
+  paintPlotAreaFrame(
+    ctx, chart, mapRect.x, mapRect.y, mapRect.w, mapRect.h, ptToPx, shapeRotationDeg,
+  );
+  if (legendRect) {
+    paintLegendFrame(
+      ctx, chart, legendRect, ptToPx, shapeRotationDeg,
+    );
+    drawLegend(
+      ctx, chart, colorScale,
+      legendRect.x, legendRect.y, legendRect.w, legendRect.h,
+      ptToPx,
+    );
+  }
 
   const projection = map.geography?.projectionType;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;

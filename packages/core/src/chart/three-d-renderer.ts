@@ -2,10 +2,20 @@ import type {
   ChartDataLabelOverride,
   ChartDataPointOverride,
   ChartDisplayUnits,
+  ChartLegendEntryOverride,
   ChartModel,
   ChartRect,
   ChartSeries,
 } from '../types/chart.js';
+import type { Fill } from '../types/common.js';
+import {
+  effectiveMarkerSymbol,
+  hasVisiblePointMarkerOverride,
+  markerFillColorFor,
+  markerFillPaintFor,
+  seriesMarkerFillColor,
+  seriesMarkerFillPaint,
+} from './marker-style.js';
 
 /** Stable bundle-audit marker. Re-exported only by the opt-in package entry so
  * build verification can prove the mesh/camera implementation is absent from
@@ -41,6 +51,8 @@ import {
   type ChartThreeDProjection,
   type ThreeDScenePoint,
 } from './three-d.js';
+import { scaleHexColor } from './material-color.js';
+import { categoryLabelOffsetPx, categoryPositionFraction } from './category-spacing.js';
 import {
   buildThreeDAreaStripMeshes,
   buildThreeDPieSectorMesh,
@@ -63,6 +75,46 @@ import {
 } from './three-d-stroke.js';
 import { buildThreeDOutlineTopology } from './three-d-outline.js';
 import { paintLegendFrame } from './legend-frame.js';
+import { paintPlotAreaFrame } from './plot-area-frame.js';
+import { resolveFill } from '../shape/paint.js';
+
+interface ThreeDLegendTextStyle {
+  fontPx: number;
+  font: string;
+  color: string;
+}
+
+interface ThreeDLegendMeasure {
+  labels: string[];
+  styles: ThreeDLegendTextStyle[];
+  itemWidths: number[];
+}
+
+function threeDLegendOverrideMap(chart: ChartModel): Map<number, ChartLegendEntryOverride> {
+  const overrides = new Map<number, ChartLegendEntryOverride>();
+  for (const override of chart.legendEntries ?? []) overrides.set(override.idx, override);
+  return overrides;
+}
+
+function threeDLegendTextStyle(
+  chart: ChartModel,
+  override: ChartLegendEntryOverride | undefined,
+  ptToPx: number,
+): ThreeDLegendTextStyle {
+  const fontPx = chartTextFontSizePx(
+    override?.fontSizeHpt ?? chart.legendFontSizeHpt,
+    ptToPx,
+  ) ?? 9 * ptToPx;
+  const face = override?.fontFace ?? chart.legendFontFace;
+  const bold = override?.fontBold ?? chart.legendFontBold ?? false;
+  return {
+    fontPx,
+    font: `${bold ? 'bold ' : ''}${fontPx}px ${fontFamily(face)}`,
+    color: override?.fontColor
+      ? `#${override.fontColor}`
+      : chart.legendFontColor ? `#${chart.legendFontColor}` : '#595959',
+  };
+}
 
 const PALETTE = ['4472C4', 'ED7D31', '70AD47', 'A5A5A5', 'FFC000', '5B9BD5'] as const;
 const SUPPORTED_CARTESIAN_THREE_D_TYPES = new Set([
@@ -170,15 +222,6 @@ function hasAuthoredDatumOutline(
     || style?.lineCap != null
     || style?.lineJoin != null;
   return authored && series.lineHidden !== true && style?.lineHidden !== true;
-}
-
-function scaleHexColor(color: string, factor: number): string {
-  const value = color.replace(/^#/, '');
-  if (!/^[0-9a-f]{6}$/i.test(value)) return color;
-  const channel = (offset: number) => Math.max(0, Math.min(255,
-    Math.round(parseInt(value.slice(offset, offset + 2), 16) * factor)
-  )).toString(16).padStart(2, '0');
-  return `#${channel(0)}${channel(2)}${channel(4)}`;
 }
 
 /** Automatic 3-D chart material evaluated from a real camera-space face
@@ -726,20 +769,6 @@ function paintThreeDTooManyDataPoints(
   ctx.fillText('(too many data points)', rect.x + rect.w / 2, rect.y + rect.h / 2);
 }
 
-function categoryPositionFraction(
-  index: number,
-  count: number,
-  bars: boolean,
-  reversed = false,
-): number {
-  const last = Math.max(0, count - 1);
-  const safeIndex = Number.isFinite(index) ? Math.max(0, Math.min(last, index)) : 0;
-  const fraction = bars
-    ? (safeIndex + 0.5) / Math.max(1, count)
-    : count === 1 ? 0.5 : safeIndex / last;
-  return reversed ? 1 - fraction : fraction;
-}
-
 function authoredCategoryRotation(chart: ChartModel): number | null {
   const raw = chart.catAxisLabelRotation;
   if (raw == null) return null;
@@ -783,6 +812,8 @@ function paintThreeDMarker(
   fill: string,
   line: string,
   lineWidth: number,
+  fillPaint: Fill | null | undefined = undefined,
+  shapeRotationDeg = 0,
 ): void {
   if (!(size > 0) || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
   const radius = size / 2;
@@ -847,8 +878,15 @@ function paintThreeDMarker(
       ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
       break;
   }
-  if (fill !== 'transparent') {
-    ctx.fillStyle = fill;
+  const resolved = fillPaint === undefined
+    ? (fill === 'transparent' ? null : fill)
+    : fillPaint == null
+      ? null
+      : resolveFill(
+          fillPaint, ctx, point.x - radius, point.y - radius, size, size, shapeRotationDeg,
+        );
+  if (resolved != null) {
+    ctx.fillStyle = resolved;
     ctx.fill();
   }
   ctx.strokeStyle = line;
@@ -873,12 +911,18 @@ function drawThreeDDataLabel(
   leaderAnchor: Point = anchor,
   leaderLineEligible = true,
   valueDisplayUnits?: ChartDisplayUnits | null,
+  axisMaximum?: number,
+  plottedValueForAxis = value,
 ): void {
   // Callers resolve indexed overrides through their per-series Map before the
   // paint loop. Falling back to Array.find here would quietly reintroduce
   // quadratic work for a fully-authored maximum-size public model.
   const override = resolvedOverride;
   if (override?.deleted) return;
+  if (chart.showDataLabelsOverMax !== true
+    && axisMaximum != null
+    && Number.isFinite(axisMaximum)
+    && plottedValueForAxis > axisMaximum) return;
   const defaults = series.seriesDataLabels;
   const showVal = override?.showVal ?? defaults?.showVal ?? chart.showDataLabels;
   const showCat = override?.showCatName ?? defaults?.showCatName ?? false;
@@ -949,7 +993,7 @@ function drawThreeDDataLabel(
   );
   if (!placement) return;
   const labelBox = override?.labelBox ?? defaults?.labelBox;
-  if (defaults?.showLeaderLines && leaderLineEligible) {
+  if (defaults?.showLeaderLines && defaults.leaderLineHidden !== true && leaderLineEligible) {
     ctx.beginPath();
     ctx.moveTo(leaderAnchor.x, leaderAnchor.y);
     ctx.lineTo(
@@ -960,6 +1004,7 @@ function drawThreeDDataLabel(
     ctx.lineWidth = defaults.leaderLineWidthEmu != null
       ? Math.max(0.25, defaults.leaderLineWidthEmu / EMU_PER_PT * ptToPx)
       : 0.75 * ptToPx;
+    ctx.setLineDash(pptxPresetDashArray(defaults.leaderLineDash ?? 'solid', ctx.lineWidth));
     ctx.stroke();
   }
   if (labelBox) {
@@ -1015,7 +1060,8 @@ function titleAndPlot(
   rect: ChartRect,
   ptToPx: number,
   orientation: 'vertical' | 'horizontal' | 'radial',
-): { plot: ChartRect; legend: ChartRect | null } {
+  shapeRotationDeg: number,
+): { plot: ChartRect; legend: ChartRect | null; legendMeasure: ThreeDLegendMeasure } {
   const band = cartesianTitleBand(chart, rect.h, ptToPx);
   if (chart.title) {
     ctx.font = `${chart.titleFontBold === false ? '' : 'bold '}${band.fontPx}px ${fontFamily(chart.titleFontFace)}`;
@@ -1042,21 +1088,31 @@ function titleAndPlot(
       authored?.y ?? automatic.y,
     );
   }
-  const legendFontPx = chartTextFontSizePx(chart.legendFontSizeHpt, ptToPx) ?? 9 * ptToPx;
+  const legendOverrides = threeDLegendOverrideMap(chart);
   ctx.save();
-  ctx.font = `${chart.legendFontBold ? 'bold ' : ''}${legendFontPx}px ${fontFamily(chart.legendFontFace)}`;
-  const legendLabels = chart.chartType === 'pie'
+  const rawLegendLabels = chart.chartType === 'pie'
     ? (chart.series[0]?.categories?.length ? chart.series[0].categories : chart.categories)
     : chart.series.map((series, index) => series.name || `Series ${index + 1}`);
+  const legendLabels = rawLegendLabels.flatMap((label, index) =>
+    legendOverrides.get(index)?.deleted === true ? [] : [{ label, index }]
+  );
+  const legendStyles = legendLabels.map(entry =>
+    threeDLegendTextStyle(chart, legendOverrides.get(entry.index), ptToPx)
+  );
+  const legendFontPx = Math.max(0, ...legendStyles.map(style => style.fontPx));
+  const itemWidths = legendLabels.map((entry, index) => {
+      ctx.font = legendStyles[index].font;
+      return 7 * ptToPx + 4 + ctx.measureText(entry.label).width;
+    });
   const legendReserve = chartLegendReserve(chart, rect.w, rect.h, 0.23, {
-    itemWidths: legendLabels.map(label => 7 * ptToPx + 4 + ctx.measureText(label).width),
+    itemWidths,
     rowHeight: Math.max(legendFontPx * 1.45, 12),
     itemGap: 12,
     horizontalPadding: 8,
     verticalPadding: 4,
   });
   ctx.restore();
-  const legendBands = chartLegendBands(legendReserve);
+  const legendBands = chartLegendBands(legendReserve, chart.legendOverlay === true);
   const axisBands = chartAxisTitleBands(chart, rect.w, rect.h, ptToPx);
   const leftTitleBand = orientation === 'horizontal'
     ? chart.catAxisTitle ? axisBands.catFontPx + axisTitleMargin(rect.w) + 4 : 0
@@ -1088,6 +1144,9 @@ function titleAndPlot(
     w: Math.max(1, frame.plotRect.pw),
     h: Math.max(1, frame.plotRect.ph),
   };
+  paintPlotAreaFrame(
+    ctx, chart, plot.x, plot.y, plot.w, plot.h, ptToPx, shapeRotationDeg,
+  );
   const defaultLegend = !legendReserve ? null
     : legendReserve.side === 'r'
       ? { x: rect.x + rect.w - legendReserve.reserveW, y: plot.y, w: legendReserve.reserveW, h: plot.h }
@@ -1102,6 +1161,11 @@ function titleAndPlot(
   return {
     plot,
     legend: manualLegend ?? defaultLegend,
+    legendMeasure: {
+      labels: legendLabels.map(entry => entry.label),
+      styles: legendStyles,
+      itemWidths,
+    },
   };
 }
 
@@ -1248,7 +1312,7 @@ function drawThreeDSeriesAxis(
 
   if (!spec.lineHidden) {
     applyThreeDStroke(ctx, threeDStroke(
-      spec.lineColor, spec.lineWidthEmu, null, ptToPx, '898989', 1,
+      spec.lineColor, spec.lineWidthEmu, spec.lineDash, ptToPx, '898989', 1,
     ));
     ctx.beginPath();
     ctx.moveTo(start.x, start.y);
@@ -1311,19 +1375,68 @@ function drawThreeDSeriesAxis(
   }
 }
 
+function paintThreeDLineLegendKey(
+  ctx: CanvasRenderingContext2D,
+  series: ChartSeries,
+  color: string,
+  x: number,
+  y: number,
+  key: number,
+  ptToPx: number,
+  shapeRotationDeg: number,
+): void {
+  if (series.lineHidden !== true) {
+    const lineWidth = series.lineWidthEmu != null
+      ? Math.max(0.5, series.lineWidthEmu / EMU_PER_PT * ptToPx)
+      : Math.max(1, 2 * ptToPx);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + key, y);
+    ctx.strokeStyle = series.lineColor ? `#${series.lineColor}` : scaleHexColor(color, 0.70);
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash(pptxPresetDashArray(series.chartexStyle?.lineDash ?? 'solid', lineWidth));
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (series.showMarker !== true || series.markerSymbol === 'none') return;
+  const symbol = series.markerSymbol ?? 'circle';
+  const fill = seriesMarkerFillColor(series, color.replace(/^#/, ''));
+  const fillCss = fill === '00000000'
+    ? 'transparent' : fill.startsWith('#') ? fill : `#${fill}`;
+  const markerLine = series.markerLine ?? series.lineColor ?? color.replace(/^#/, '');
+  const lineCss = markerLine === '00000000'
+    ? 'rgba(0,0,0,0)' : markerLine.startsWith('#') ? markerLine : `#${markerLine}`;
+  const markerLineWidth = series.markerLineWidthEmu != null
+    ? Math.max(0.25, series.markerLineWidthEmu / EMU_PER_PT * ptToPx)
+    : Math.max(0.75, ptToPx);
+  paintThreeDMarker(
+    ctx,
+    { x: x + key / 2, y },
+    symbol,
+    Math.min(key, Math.max(2, (series.markerSize ?? 5) * ptToPx)),
+    fillCss,
+    lineCss,
+    markerLineWidth,
+    seriesMarkerFillPaint(series),
+    shapeRotationDeg,
+  );
+}
+
 function simpleLegend(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
   bounds: ChartRect | null,
   ptToPx: number,
   categoryDriven = false,
+  measured?: ThreeDLegendMeasure,
+  shapeRotationDeg = 0,
 ): void {
   if (!bounds) return;
-  paintLegendFrame(ctx, chart, bounds, ptToPx);
+  paintLegendFrame(ctx, chart, bounds, ptToPx, shapeRotationDeg);
   const indexedPoints = new Map<number, ChartDataPointOverride>(
     chart.series[0]?.dataPointOverrides?.map(override => [override.idx, override]) ?? [],
   );
-  const entries = categoryDriven
+  const rawEntries = categoryDriven
     ? (chart.series[0]?.categories?.length ? chart.series[0].categories : chart.categories)
       .map((label, index) => {
         const authored = chart.series[0]?.dataPointColors?.[index];
@@ -1334,6 +1447,7 @@ function simpleLegend(
             : authored ? `#${authored}` : colorFor(index),
           series: chart.series[0],
           point: indexedPoints.get(index),
+          sourceIndex: index,
         };
       })
     : chart.series.map((series, index) => ({
@@ -1341,17 +1455,33 @@ function simpleLegend(
       color: colorFor(index, series),
       series,
       point: undefined,
+      sourceIndex: index,
     }));
-  const fontPx = chartTextFontSizePx(chart.legendFontSizeHpt, ptToPx) ?? 9 * ptToPx;
-  ctx.font = `${chart.legendFontBold ? 'bold ' : ''}${fontPx}px ${fontFamily(chart.legendFontFace)}`;
+  const legendOverrides = threeDLegendOverrideMap(chart);
+  const entries = rawEntries.filter(entry =>
+    legendOverrides.get(entry.sourceIndex)?.deleted !== true
+  );
+  const canReuseMeasure = measured != null
+    && measured.labels.length === entries.length
+    && measured.labels.every((label, index) => label === entries[index].label);
+  const entryStyles = canReuseMeasure
+    ? measured.styles
+    : entries.map(entry =>
+        threeDLegendTextStyle(chart, legendOverrides.get(entry.sourceIndex), ptToPx)
+      );
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  const row = Math.max(fontPx * 1.45, 12);
+  const row = Math.max(Math.max(0, ...entryStyles.map(style => style.fontPx)) * 1.45, 12);
   const key = Math.min(7 * ptToPx, row * 0.7);
   const horizontal = chart.legendPos === 't' || chart.legendPos === 'b'
     || (chart.legendManualLayout != null && bounds.w >= bounds.h);
   if (horizontal) {
-    const itemWidths = entries.map(entry => key + 4 + ctx.measureText(entry.label).width);
+    const itemWidths = canReuseMeasure
+      ? measured.itemWidths
+      : entries.map((entry, index) => {
+          ctx.font = entryStyles[index].font;
+          return key + 4 + ctx.measureText(entry.label).width;
+        });
     const rows = packLegendRows(itemWidths, Math.max(1, bounds.w - 8), 12);
     const visibleRows = rows.slice(
       0,
@@ -1366,23 +1496,14 @@ function simpleLegend(
       for (let position = 0; position < indices.length; position++) {
         const index = indices[position];
         const entry = entries[index];
+        const textStyle = entryStyles[index];
+        ctx.font = textStyle.font;
         const available = Math.max(0, widths[position] - key - 4);
         const lineKey = !categoryDriven && chart.chartType.toLowerCase().includes('line');
-        if (lineKey && entry.series?.lineHidden !== true) {
-          const lineWidth = entry.series?.lineWidthEmu != null
-            ? Math.max(0.5, entry.series.lineWidthEmu / EMU_PER_PT * ptToPx)
-            : Math.max(1, 2 * ptToPx);
-          ctx.beginPath();
-          ctx.moveTo(itemX, rowY);
-          ctx.lineTo(itemX + key, rowY);
-          ctx.strokeStyle = entry.series?.lineColor
-            ? `#${entry.series.lineColor}` : scaleHexColor(entry.color, 0.70);
-          ctx.lineWidth = lineWidth;
-          ctx.setLineDash(pptxPresetDashArray(
-            entry.series?.chartexStyle?.lineDash ?? 'solid', lineWidth,
-          ));
-          ctx.stroke();
-          ctx.setLineDash([]);
+        if (lineKey && entry.series) {
+          paintThreeDLineLegendKey(
+            ctx, entry.series, entry.color, itemX, rowY, key, ptToPx, shapeRotationDeg,
+          );
         } else {
           if (entry.color !== 'transparent') {
             ctx.fillStyle = entry.color;
@@ -1407,7 +1528,7 @@ function simpleLegend(
             ctx.setLineDash([]);
           }
         }
-        ctx.fillStyle = chart.legendFontColor ? `#${chart.legendFontColor}` : '#595959';
+        ctx.fillStyle = textStyle.color;
         ctx.fillText(elideToWidth(ctx, entry.label, available), itemX + key + 4, rowY);
         itemX += widths[position] + 12;
       }
@@ -1418,9 +1539,11 @@ function simpleLegend(
   let rowTop = bounds.y;
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
+    const textStyle = entryStyles[index];
+    ctx.font = textStyle.font;
     const textX = bounds.x + 8 + key;
     const availableTextWidth = Math.max(0, bounds.x + bounds.w - 4 - textX);
-    const lineHeight = Math.max(fontPx * 1.2, 10);
+    const lineHeight = Math.max(textStyle.fontPx * 1.2, 10);
     const lines = fitDataLabelLines(
       entry.label,
       availableTextWidth,
@@ -1433,21 +1556,10 @@ function simpleLegend(
     if (rowTop + itemHeight > bounds.y + bounds.h + 1e-6) break;
     const cy = rowTop + itemHeight / 2;
     const lineKey = !categoryDriven && chart.chartType.toLowerCase().includes('line');
-    if (lineKey) {
-      const lineWidth = entry.series?.lineWidthEmu != null
-        ? Math.max(0.5, entry.series.lineWidthEmu / EMU_PER_PT * ptToPx)
-        : Math.max(1, 2 * ptToPx);
-      if (entry.series?.lineHidden !== true) {
-        ctx.beginPath();
-        ctx.moveTo(bounds.x + 4, cy);
-        ctx.lineTo(bounds.x + 4 + key, cy);
-        ctx.strokeStyle = entry.series?.lineColor
-          ? `#${entry.series.lineColor}` : scaleHexColor(entry.color, 0.70);
-        ctx.lineWidth = lineWidth;
-        ctx.setLineDash(pptxPresetDashArray(entry.series?.chartexStyle?.lineDash ?? 'solid', lineWidth));
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
+    if (lineKey && entry.series) {
+      paintThreeDLineLegendKey(
+        ctx, entry.series, entry.color, bounds.x + 4, cy, key, ptToPx, shapeRotationDeg,
+      );
     } else {
       if (entry.color !== 'transparent') {
         ctx.fillStyle = entry.color;
@@ -1468,7 +1580,7 @@ function simpleLegend(
         ctx.setLineDash([]);
       }
     }
-    ctx.fillStyle = chart.legendFontColor ? `#${chart.legendFontColor}` : '#595959';
+    ctx.fillStyle = textStyle.color;
     const firstY = cy - (lines.length - 1) * lineHeight / 2;
     lines.forEach((line, lineIndex) => ctx.fillText(line, textX, firstY + lineIndex * lineHeight));
     rowTop += itemHeight;
@@ -1484,7 +1596,7 @@ function axisPlan(
   orientation: 'vertical' | 'horizontal',
 ): NumericValueAxisPlan {
   const factor = percent ? 100 : 1;
-  const minorTickMark = chart.valAxisMinorTickMark ?? 'cross';
+  const minorTickMark = chart.valAxisMinorTickMark ?? 'none';
   return planNumericValueAxis({
     dataMin,
     dataMax,
@@ -1496,10 +1608,6 @@ function axisPlan(
     axisOrientation: orientation,
     logBase: chart.valAxisLogBase,
     reversed: chart.valAxisOrientation === 'maxMin',
-    // Classic 3-D charts keep <c:minorTickMark> omitted in the package, while
-    // Excel's effective value-axis setting is `cross` with an automatic
-    // major/5 minor unit. This is an application default for 3-D charts, not
-    // CT_TickMark@val's schema default (which only applies to a present node).
     needMinor: chart.valAxisMinorGridlines === true || minorTickMark !== 'none',
   });
 }
@@ -1767,7 +1875,8 @@ function frontAxes(
     applyThreeDStroke(ctx, threeDStroke(
       orientation === 'vertical' ? chart.catAxisLineColor : chart.valAxisLineColor,
       orientation === 'vertical' ? chart.catAxisLineWidthEmu : chart.valAxisLineWidthEmu,
-      null, ptToPx, '898989', 1,
+      orientation === 'vertical' ? chart.catAxisLineDash : chart.valAxisLineDash,
+      ptToPx, '898989', 1,
     ));
     ctx.beginPath();
     ctx.moveTo(geometry.horizontalStart.x, geometry.horizontalStart.y);
@@ -1778,7 +1887,8 @@ function frontAxes(
     applyThreeDStroke(ctx, threeDStroke(
       orientation === 'vertical' ? chart.valAxisLineColor : chart.catAxisLineColor,
       orientation === 'vertical' ? chart.valAxisLineWidthEmu : chart.catAxisLineWidthEmu,
-      null, ptToPx, '898989', 1,
+      orientation === 'vertical' ? chart.valAxisLineDash : chart.catAxisLineDash,
+      ptToPx, '898989', 1,
     ));
     ctx.beginPath();
     ctx.moveTo(geometry.verticalStart.x, geometry.verticalStart.y);
@@ -1963,10 +2073,11 @@ function cartesianAxisTicks(
     front.y + front.h / 2,
     depth,
   );
-  const valueMinorTickMark = chart.valAxisMinorTickMark ?? 'cross';
+  const valueMinorTickMark = chart.valAxisMinorTickMark ?? 'none';
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     applyThreeDStroke(ctx, threeDStroke(
-      chart.valAxisLineColor, chart.valAxisLineWidthEmu, null, ptToPx, '898989', 1,
+      chart.valAxisLineColor, chart.valAxisLineWidthEmu, chart.valAxisLineDash,
+      ptToPx, '898989', 1,
     ));
     const valueAnchor = (value: number) => orientation === 'horizontal'
       ? projection.project(front.x + axis.fraction(value) * front.w, axisY, depth)
@@ -1990,7 +2101,8 @@ function cartesianAxisTicks(
   }
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
     applyThreeDStroke(ctx, threeDStroke(
-      chart.catAxisLineColor, chart.catAxisLineWidthEmu, null, ptToPx, '898989', 1,
+      chart.catAxisLineColor, chart.catAxisLineWidthEmu, chart.catAxisLineDash,
+      ptToPx, '898989', 1,
     ));
     const categoryStart = orientation === 'vertical'
       ? geometry.horizontalStart : geometry.verticalStart;
@@ -2042,6 +2154,7 @@ function renderCartesian(
   chart: ChartModel,
   rect: ChartRect,
   ptToPx: number,
+  shapeRotationDeg: number,
 ): boolean {
   if (!chart.threeD) return false;
   const bars = chart.chartType === 'clusteredBar'
@@ -2050,8 +2163,8 @@ function renderCartesian(
   const horizontal = chart.chartType.endsWith('H') || chart.chartType.includes('BarH');
   const stacked = chart.chartType.startsWith('stacked');
   const depthArranged = bars && !stacked && chart.threeD.barGrouping === 'standard';
-  const { plot, legend } = titleAndPlot(
-    ctx, chart, rect, ptToPx, horizontal ? 'horizontal' : 'vertical',
+  const { plot, legend, legendMeasure } = titleAndPlot(
+    ctx, chart, rect, ptToPx, horizontal ? 'horizontal' : 'vertical', shapeRotationDeg,
   );
   const projection = planChartThreeDProjection(chart.threeD, plot, {
     // Office places bar/column prisms in a compact depth box, while line and
@@ -2194,6 +2307,7 @@ function renderCartesian(
       outline: boolean; outlineColor: string; outlineWidth: number;
       outlineDash: string; outlineCap: CanvasLineCap; outlineJoin: CanvasLineJoin;
       labelValue: number;
+      plottedLabelValue: number;
     }> = [];
     const positiveBase = new Array(categoryCount).fill(0) as number[];
     const negativeBase = new Array(categoryCount).fill(0) as number[];
@@ -2308,6 +2422,7 @@ function renderCartesian(
             outlineCap: lineCap,
             outlineJoin: lineJoin,
             labelValue: percent ? value / 100 : value,
+            plottedLabelValue: end,
           });
         } else {
           const y0 = front.y + front.h - axis.fraction(visibleBase) * front.h;
@@ -2331,6 +2446,7 @@ function renderCartesian(
             outlineCap: lineCap,
             outlineJoin: lineJoin,
             labelValue: percent ? value / 100 : value,
+            plottedLabelValue: end,
           });
         }
       }
@@ -2440,7 +2556,7 @@ function renderCartesian(
         deferredDataLabels.push(() => drawThreeDDataLabel(
           ctx, chart, series, item.seriesIndex, item.categoryIndex,
           item.labelValue, anchor, rect, ptToPx, 0, undefined, labelOverride,
-          't', anchor, true, chart.valAxisDisplayUnits,
+          't', anchor, true, chart.valAxisDisplayUnits, axis.max, item.plottedLabelValue,
         ));
       }
     }
@@ -2895,19 +3011,25 @@ function renderCartesian(
           );
         }
       }
-      const hasMarkerOverride = series.dataPointOverrides?.some(override =>
-        override.markerSymbol != null && override.markerSymbol !== 'none'
-      ) === true;
-      if (chart.chartType.toLowerCase().includes('line') && (series.showMarker === true || hasMarkerOverride)) {
+      const seriesMarkersVisible = series.showMarker === true && series.markerSymbol !== 'none';
+      if (chart.chartType.toLowerCase().includes('line')
+        && (seriesMarkersVisible || hasVisiblePointMarkerOverride(series))) {
         for (let categoryIndex = 0; categoryIndex < points.length; categoryIndex++) {
           const point = points[categoryIndex];
           if (!point) continue;
           const override = pointOverrides[seriesIndex].get(categoryIndex);
-          const symbol = override?.markerSymbol
-            ?? (series.showMarker === true ? series.markerSymbol ?? 'circle' : 'none');
+          const symbol = effectiveMarkerSymbol(
+            series, override, 'circle', seriesMarkersVisible,
+          );
           if (symbol === 'none') continue;
           const sizePt = override?.markerSize ?? series.markerSize ?? 5;
-          const markerFill = override?.markerFill ?? series.markerFill ?? series.color ?? PALETTE[seriesIndex % PALETTE.length];
+          const markerFill = markerFillColorFor(
+            series,
+            override,
+            categoryIndex,
+            series.color ?? PALETTE[seriesIndex % PALETTE.length],
+          );
+          const markerFillPaint = markerFillPaintFor(series, override, categoryIndex);
           const markerLine = override?.markerLine ?? series.markerLine ?? series.lineColor ?? series.color
             ?? PALETTE[seriesIndex % PALETTE.length];
           const markerLineWidth = (override?.markerLineWidthEmu ?? series.markerLineWidthEmu) != null
@@ -2919,6 +3041,7 @@ function renderCartesian(
               ctx, point, symbol, Math.max(2, sizePt) * ptToPx,
               markerFill === '00000000' ? 'transparent' : `#${markerFill}`,
               `#${markerLine}`, markerLineWidth,
+              markerFillPaint, shapeRotationDeg,
             ));
         }
       }
@@ -2939,7 +3062,8 @@ function renderCartesian(
               : 0,
             undefined,
             labelOverride,
-            't', point, true, chart.valAxisDisplayUnits,
+            't', point, true, chart.valAxisDisplayUnits, axis.max,
+            stacked ? stackedUpper[seriesIndex][categoryIndex] : sourceValue,
           ));
         }
       }
@@ -3070,8 +3194,11 @@ function renderCartesian(
   ctx.font = `${chart.catAxisFontItalic ? 'italic ' : ''}${chart.catAxisFontBold ? 'bold ' : ''}${categoryFontPx}px ${fontFamily(chart.catAxisFontFace)}`;
   ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
   if (!chart.catAxisHidden && chart.catAxisTickLabelPos !== 'none') {
-    const labelOffset = projectedAxisTickLabelOffsetPx(
-      chart.catAxisMajorTickMark, chart.catAxisLineHidden, ptToPx, 6,
+    const labelOffset = categoryLabelOffsetPx(
+      projectedAxisTickLabelOffsetPx(
+        chart.catAxisMajorTickMark, chart.catAxisLineHidden, ptToPx, 6,
+      ),
+      chart.catAxisLabelOffsetPercent,
     );
     const formattedCategories = Array.from({ length: categoryCount }, (_, index) =>
       formatCategoryLabel(
@@ -3163,7 +3290,7 @@ function renderCartesian(
   // walls, faces, lines, markers, axes, ticks and tick labels, so later scene
   // primitives cannot cross a label belonging to an earlier series.
   for (const drawLabel of deferredDataLabels) drawLabel();
-  simpleLegend(ctx, chart, legend, ptToPx);
+  simpleLegend(ctx, chart, legend, ptToPx, false, legendMeasure, shapeRotationDeg);
   return true;
 }
 
@@ -3172,6 +3299,7 @@ function renderPie(
   chart: ChartModel,
   rect: ChartRect,
   ptToPx: number,
+  shapeRotationDeg: number,
 ): boolean {
   if (!chart.threeD || chart.chartType !== 'pie') return false;
   const series = chart.series[0];
@@ -3184,7 +3312,9 @@ function renderPie(
   if (!(maxMagnitude > 0)) return true;
   const scaledTotal = values.reduce((sum, item) => sum + item.value / maxMagnitude, 0);
   if (!(scaledTotal > 0) || !Number.isFinite(scaledTotal)) return true;
-  const { plot, legend } = titleAndPlot(ctx, chart, rect, ptToPx, 'radial');
+  const { plot, legend, legendMeasure } = titleAndPlot(
+    ctx, chart, rect, ptToPx, 'radial', shapeRotationDeg,
+  );
   // Pie is a cylindrical sector in X/Z with thickness on Y. Its authored
   // depth/gap fields do not control the radial solid (the depth=100/2000
   // Office references are pixel-identical), but rotX/rotY/perspective must use
@@ -3483,7 +3613,7 @@ function renderPie(
     ...chart,
     categories,
     series: [{ ...series, categories, dataPointColors: legendPointColors }],
-  }, legend, ptToPx, true);
+  }, legend, ptToPx, true, legendMeasure, shapeRotationDeg);
   return true;
 }
 
@@ -3494,9 +3624,10 @@ export function renderSimpleThreeDChart(
   chart: ChartModel,
   rect: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): boolean {
   if (!chart.threeD) return false;
-  if (renderPie(ctx, chart, rect, ptToPx)) return true;
+  if (renderPie(ctx, chart, rect, ptToPx, shapeRotationDeg)) return true;
   if (!SUPPORTED_CARTESIAN_THREE_D_TYPES.has(chart.chartType)) return false;
-  return renderCartesian(ctx, chart, rect, ptToPx);
+  return renderCartesian(ctx, chart, rect, ptToPx, shapeRotationDeg);
 }

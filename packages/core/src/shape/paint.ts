@@ -1,6 +1,6 @@
 import type { Fill, GradientFill, PatternFill, Stroke } from '../types/common';
 import { buildPatternBitmap } from './pattern-bitmaps';
-import { shapeStrokeDashArray } from '../draw/dash';
+import { drawingmlLineDashArray, shapeStrokeDashArray } from '../draw/dash';
 import { createAuxCanvasForContext } from '../canvas/aux-canvas';
 
 const MAX_GRADIENT_TILE_EDGE = 512;
@@ -264,11 +264,8 @@ export function applyStroke(
   ctx.strokeStyle = hexToRgba(stroke.color);
   const lw = Math.max(0.5, stroke.width * emuPerPx);
   ctx.lineWidth = lw;
-  const dash = stroke.customDash
-    ? stroke.customDash.flatMap((segment) => [
-        Math.max(0, segment.dash) * lw,
-        Math.max(0, segment.space) * lw,
-      ])
+  const dash = stroke.customDash != null
+    ? drawingmlLineDashArray(stroke.customDash, null, lw)
     : stroke.dashStyle
       ? shapeStrokeDashArray(stroke.dashStyle, lw)
       : [];

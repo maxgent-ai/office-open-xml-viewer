@@ -53,6 +53,14 @@ export interface Camera3d {
     zoom?: number;
     rot?: Rot3d;
 }
+export interface ChartAreaGroupDecorations {
+    groupIndex: number;
+    dropLines?: ChartDecorationLineStyle | null;
+}
+export interface ChartBarGroupDecorations {
+    groupIndex: number;
+    seriesLines?: ChartDecorationLineStyle[] | null;
+}
 export interface ChartDataLabelOverride {
     idx: number;
     text: string;
@@ -70,6 +78,8 @@ export interface ChartDataLabelOverride {
     showCatName?: boolean;
     showSerName?: boolean;
     showPercent?: boolean;
+    showBubbleSize?: boolean;
+    showLegendKey?: boolean;
     deleted?: boolean;
 }
 export interface ChartDataPointOverride {
@@ -83,9 +93,34 @@ export interface ChartDataPointOverride {
     markerSymbol?: string;
     markerSize?: number;
     markerFill?: string;
+    markerFillPaint?: Fill | null;
+    markerFillPaintAuthored?: boolean | null;
     markerLine?: string;
     markerLineWidthEmu?: number;
     explosion?: number;
+}
+export interface ChartDataTable {
+    showHorizontalBorder: boolean;
+    showVerticalBorder: boolean;
+    showOutline: boolean;
+    showKeys: boolean;
+    fontSizeHpt?: number | null;
+    fontFace?: string | null;
+    fontColor?: string | null;
+    fontBold?: boolean | null;
+    fontItalic?: boolean | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
+    lineDash?: string | null;
+    lineHidden?: boolean | null;
+}
+export interface ChartDecorationLineStyle {
+    color?: string | null;
+    widthEmu?: number | null;
+    dash?: string | null;
+    cap?: string | null;
+    join?: string | null;
+    hidden?: boolean | null;
 }
 export interface ChartDisplayUnits {
     divisor: number;
@@ -123,6 +158,7 @@ export interface ChartErrBars {
     color?: string;
     lineWidthEmu?: number;
     dash?: string;
+    hidden?: boolean;
 }
 export interface ChartexBoxSeries {
     name: string;
@@ -144,17 +180,27 @@ export interface ChartexBoxWhisker {
     series: ChartexBoxSeries[];
 }
 export interface ChartExElementStyle {
+    fontSizeHpt?: number | null;
+    fontBold?: boolean | null;
+    fontItalic?: boolean | null;
+    fontColor?: string | null;
+    fontFace?: string | null;
     fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
+    fillPaintAuthored?: boolean | null;
     fillNoStyle?: boolean | null;
     lineColors?: Array<string | null> | null;
+    linePaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
     lineWidthEmu?: number | null;
     lineHidden?: boolean | null;
     lineNoStyle?: boolean | null;
     lineDash?: string | null;
+    lineDashAuthored?: boolean | null;
+    lineCustomDash?: ChartLineDashSegment[] | null;
     lineCap?: string | null;
     lineJoin?: string | null;
+    lineCompound?: string | null;
     fillColorIndex?: number | null;
     lineColorIndex?: number | null;
 }
@@ -214,6 +260,21 @@ export interface ChartLabelBox {
     borderColor?: string;
     borderWidthEmu?: number;
 }
+export interface ChartLegendEntryOverride {
+    idx: number;
+    deleted?: boolean | null;
+    fontFace?: string | null;
+    fontColor?: string | null;
+    fontSizeHpt?: number | null;
+    fontBold?: boolean | null;
+}
+export type ChartLineDashSegment = DrawingMLCustomDashSegment;
+export interface ChartLineGroupDecorations {
+    groupIndex: number;
+    dropLines?: ChartDecorationLineStyle | null;
+    hiLowLines?: ChartDecorationLineStyle | null;
+    upDownBars?: ChartStockUpDownBarStyle | null;
+}
 export interface ChartManualLayout {
     xMode?: string;
     yMode?: string;
@@ -228,8 +289,11 @@ export interface ChartManualLayout {
 export interface ChartModel {
     chartType: ChartType;
     title: string | null;
+    titleRichRuns?: ChartTextRun[] | null;
     titlePresent?: boolean;
     categories: string[];
+    categorySourceHidden?: boolean[] | null;
+    categoryLevels?: string[][] | null;
     series: ChartSeries[];
     chartTextBoxes?: ChartTextBox[] | null;
     varyColors?: boolean | null;
@@ -243,9 +307,31 @@ export interface ChartModel {
     catAxisLineHidden: boolean;
     valAxisLineHidden: boolean;
     plotAreaBg: string | null;
+    plotAreaFill?: Fill | null;
+    plotAreaFillHidden?: boolean | null;
+    plotAreaFillPaintAuthored?: boolean | null;
+    plotAreaLineColor?: string | null;
+    plotAreaLineFill?: SolidFill | GradientFill | PatternFill | null;
+    plotAreaLineWidthEmu?: number | null;
+    plotAreaLineDash?: string | null;
+    plotAreaLineDashAuthored?: boolean | null;
+    plotAreaLineCustomDash?: ChartLineDashSegment[] | null;
+    plotAreaLineCap?: string | null;
+    plotAreaLineJoin?: string | null;
+    plotAreaLineCompound?: string | null;
+    plotAreaLineHidden?: boolean | null;
+    plotAreaLinePaintAuthored?: boolean | null;
     chartBg: string | null;
+    chartFill?: Fill | null;
+    chartFillHidden?: boolean | null;
+    chartFillPaintAuthored?: boolean | null;
+    roundedCorners?: boolean | null;
+    plotVisibleOnly?: boolean | null;
     showLegend: boolean;
+    dataTable?: ChartDataTable | null;
     legendPos: 'r' | 'l' | 't' | 'b' | 'tr' | null;
+    legendOverlay?: boolean | null;
+    legendEntries?: ChartLegendEntryOverride[] | null;
     catAxisCrossBetween: 'between' | 'midCat' | string;
     valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
     catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
@@ -299,20 +385,43 @@ export interface ChartModel {
     legendFontSizeHpt?: number | null;
     legendFontBold?: boolean | null;
     legendFillColor?: string | null;
+    legendFill?: Fill | null;
+    legendFillHidden?: boolean | null;
+    legendFillPaintAuthored?: boolean | null;
     legendLineColor?: string | null;
+    legendLineFill?: SolidFill | GradientFill | PatternFill | null;
     legendLineWidthEmu?: number | null;
+    legendLineDash?: string | null;
+    legendLineDashAuthored?: boolean | null;
+    legendLineCustomDash?: ChartLineDashSegment[] | null;
+    legendLineCap?: string | null;
+    legendLineJoin?: string | null;
+    legendLineCompound?: string | null;
+    legendLineHidden?: boolean | null;
+    legendLinePaintAuthored?: boolean | null;
     themeMajorFontLatin?: string | null;
     themeMinorFontLatin?: string | null;
     chartBorderColor?: string | null;
+    chartBorderLineFill?: SolidFill | GradientFill | PatternFill | null;
     chartBorderWidthEmu?: number | null;
+    chartBorderDash?: string | null;
+    chartBorderDashAuthored?: boolean | null;
+    chartBorderCustomDash?: ChartLineDashSegment[] | null;
+    chartBorderCap?: string | null;
+    chartBorderJoin?: string | null;
+    chartBorderCompound?: string | null;
+    chartBorderHidden?: boolean | null;
+    chartBorderPaintAuthored?: boolean | null;
     catAxisCrosses?: string | null;
     catAxisCrossesAt?: number | null;
     valAxisCrosses?: string | null;
     valAxisCrossesAt?: number | null;
     catAxisLineColor?: string | null;
     catAxisLineWidthEmu?: number | null;
+    catAxisLineDash?: string | null;
     valAxisLineColor?: string | null;
     valAxisLineWidthEmu?: number | null;
+    valAxisLineDash?: string | null;
     catAxisFormatCode?: string | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -329,6 +438,7 @@ export interface ChartModel {
     holeSize?: number | null;
     firstSliceAngle?: number | null;
     dispBlanksAs?: string | null;
+    showDataLabelsOverMax?: boolean | null;
     valAxisMajorGridlines?: boolean | null;
     catAxisMajorGridlines?: boolean | null;
     valAxisGridlineColor?: string | null;
@@ -349,6 +459,11 @@ export interface ChartModel {
     valAxisMinorUnit?: number | null;
     catAxisMajorUnit?: number | null;
     catAxisMinorUnit?: number | null;
+    catAxisIsDate?: boolean | null;
+    catAxisBaseTimeUnit?: 'days' | 'months' | 'years' | string | null;
+    catAxisMajorTimeUnit?: 'days' | 'months' | 'years' | string | null;
+    catAxisMinorTimeUnit?: 'days' | 'months' | 'years' | string | null;
+    catAxisNoMultiLevelLabels?: boolean | null;
     valAxisLogBase?: number | null;
     catAxisLogBase?: number | null;
     valAxisOrientation?: 'minMax' | 'maxMin' | string | null;
@@ -356,12 +471,23 @@ export interface ChartModel {
     catAxisTickLabelPos?: string | null;
     catAxisTickLabelSkip?: number | null;
     catAxisTickMarkSkip?: number | null;
+    catAxisLabelAlignment?: 'l' | 'ctr' | 'r' | string | null;
+    catAxisLabelOffsetPercent?: number | null;
     valAxisTickLabelPos?: string | null;
     catAxisLabelRotation?: number | null;
+    lineGroupDecorations?: ChartLineGroupDecorations[] | null;
+    areaGroupDecorations?: ChartAreaGroupDecorations[] | null;
+    barGroupDecorations?: ChartBarGroupDecorations[] | null;
+    stockDropLines?: ChartDecorationLineStyle | null;
+    stockHiLowLineStyle?: ChartDecorationLineStyle | null;
     stockHiLowLines?: boolean | null;
     stockHiLowLineColor?: string | null;
     stockUpDownBars?: boolean | null;
     stockUpDownBarStyle?: ChartStockUpDownBarStyle | null;
+    surfaceWireframe?: boolean | null;
+    surfaceBandFormats?: ChartSurfaceBandFormat[] | null;
+    legacyChartStyle?: number | null;
+    themeAccentColors?: string[] | null;
     ofPie?: ChartOfPie | null;
     threeD?: ChartThreeD | null;
     chartexBox?: ChartexBoxWhisker | null;
@@ -372,6 +498,11 @@ export interface ChartModel {
     chartexAccents?: string[] | null;
     chartexColorPalette?: Array<string | null> | null;
     chartexColorStyleMethod?: string | null;
+    chartStyleRoles?: Partial<Record<ChartStyleRole, ChartExElementStyle>> | null;
+    chartStyleColorPalette?: Array<string | null> | null;
+    chartStyleColorMethod?: string | null;
+    chartStyleMarkerSizePt?: number | null;
+    chartStyleMarkerSymbol?: string | null;
     chartexDataPointStyle?: ChartExElementStyle | null;
     chartexDataPointLineStyle?: ChartExElementStyle | null;
     chartexSeriesLineStyle?: ChartExElementStyle | null;
@@ -396,31 +527,50 @@ export interface ChartRect {
     h: number;
 }
 export interface ChartRegionMapRenderer {
-    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number): boolean;
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartSeries {
     name: string;
     chartexFormatIdx?: number | null;
     color: string | null;
     fillPattern?: PatternFill | null;
+    invertIfNegative?: boolean | null;
+    automaticNegativeStyle?: boolean | null;
+    invertedFill?: SolidFill | GradientFill | PatternFill | null;
+    invertedFillHidden?: boolean | null;
+    invertedLineColor?: string | null;
+    invertedLineWidthEmu?: number | null;
+    invertedLineHidden?: boolean | null;
     chartexStyle?: ChartExElementStyle | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     threeDShape?: 'box' | 'cylinder' | 'cone' | 'coneToMax' | 'pyramid' | 'pyramidToMax' | string | null;
     values: (number | null)[];
+    sourceHidden?: boolean[] | null;
     dataPointColors?: (string | null)[] | null;
+    explosion?: number | null;
     dataLabelColors?: (string | null)[] | null;
     labelColor?: string | null;
     seriesType?: string | null;
+    lineGroupIndex?: number | null;
+    areaGroupIndex?: number | null;
+    barGroupIndex?: number | null;
+    barGroupDirection?: 'bar' | 'col' | string | null;
+    barGroupGrouping?: 'standard' | 'clustered' | 'stacked' | 'percentStacked' | string | null;
+    barGroupGapWidth?: number | null;
+    barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
     catFormatCode?: string | null;
+    catFormatBuiltinId?: number | null;
     catFormatCodes?: (string | null)[] | null;
     markerSymbol?: string | null;
     markerSize?: number | null;
     markerFill?: string | null;
+    markerFillPaint?: Fill | null;
+    markerFillPaintAuthored?: boolean | null;
     markerLine?: string | null;
     markerLineWidthEmu?: number | null;
     dataPointOverrides?: ChartDataPointOverride[] | null;
@@ -437,6 +587,8 @@ export interface ChartSeriesDataLabels {
     showCatName: boolean;
     showSerName: boolean;
     showPercent: boolean;
+    showBubbleSize?: boolean;
+    showLegendKey?: boolean;
     position?: string;
     fontColor?: string;
     formatCode?: string;
@@ -448,18 +600,33 @@ export interface ChartSeriesDataLabels {
     showLeaderLines?: boolean;
     leaderLineColor?: string;
     leaderLineWidthEmu?: number;
+    leaderLineHidden?: boolean;
+    leaderLineDash?: string;
 }
 export interface ChartStockBarPaint {
     fillColor?: string | null;
+    fill?: SolidFill | GradientFill | PatternFill | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
+    lineDash?: string | null;
+    lineCap?: string | null;
+    lineJoin?: string | null;
     lineHidden?: boolean | null;
 }
 export interface ChartStockUpDownBarStyle {
     gapWidthPercent: number;
     up: ChartStockBarPaint;
     down: ChartStockBarPaint;
+}
+type ChartStyleRole = 'axisTitle' | 'categoryAxis' | 'chartArea' | 'dataLabel' | 'dataLabelCallout' | 'dataPoint' | 'dataPoint3D' | 'dataPointLine' | 'dataPointMarker' | 'dataPointWireframe' | 'dataTable' | 'downBar' | 'dropLine' | 'errorBar' | 'floor' | 'gridlineMajor' | 'gridlineMinor' | 'hiLoLine' | 'leaderLine' | 'legend' | 'plotArea' | 'plotArea3D' | 'seriesAxis' | 'seriesLine' | 'title' | 'trendline' | 'trendlineLabel' | 'upBar' | 'valueAxis' | 'wall';
+export interface ChartSurfaceBandFormat {
+    idx: number;
+    fill?: SolidFill | GradientFill | PatternFill | null;
+    fillHidden?: boolean | null;
+    lineColor?: string | null;
+    lineWidthEmu?: number | null;
+    lineHidden?: boolean | null;
 }
 export interface ChartTextBox {
     x: number;
@@ -482,6 +649,7 @@ export interface ChartTextRun {
     text: string;
     fontSizeHpt?: number | null;
     bold?: boolean | null;
+    italic?: boolean | null;
     color?: string | null;
     fontFace?: string | null;
 }
@@ -501,7 +669,7 @@ export interface ChartThreeD {
     backWall?: ChartThreeDSurface | null;
 }
 export interface ChartThreeDRenderer {
-    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number): boolean;
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartThreeDSeriesAxis {
     title?: string | null;
@@ -518,6 +686,7 @@ export interface ChartThreeDSeriesAxis {
     fontFace?: string | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
+    lineDash?: string | null;
     lineHidden: boolean;
     titleFontSizeHpt?: number | null;
     titleFontBold?: boolean | null;
@@ -537,6 +706,7 @@ export interface ChartThreeDSurface {
     lineHidden?: boolean | null;
 }
 export interface ChartTrendline {
+    name?: string | null;
     trendlineType: string;
     order?: number | null;
     period?: number | null;
@@ -547,6 +717,8 @@ export interface ChartTrendline {
     dispEq?: boolean | null;
     labelManualLayout?: ChartManualLayout | null;
     labelText?: string | null;
+    labelFormatCode?: string | null;
+    labelFormatSourceLinked?: boolean | null;
     labelFontSizeHpt?: number | null;
     labelFontBold?: boolean | null;
     labelFontItalic?: boolean | null;
@@ -559,10 +731,14 @@ export interface ChartTrendline {
     lineDash?: string | null;
     lineHidden?: boolean | null;
 }
-export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
+export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
 export interface DimOptions {
     color: string;
     opacity: number;
+}
+export interface DrawingMLCustomDashSegment {
+    dash: number;
+    space: number;
 }
 export interface Duotone {
     clr1: string;
@@ -642,8 +818,8 @@ export interface LegendManualLayout {
     hMode?: string;
     x: number;
     y: number;
-    w: number;
-    h: number;
+    w?: number;
+    h?: number;
 }
 export interface LightRig {
     rig: string;
@@ -1275,6 +1451,7 @@ export interface SecondaryValueAxis {
     fontFace?: string | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
+    lineDash?: string | null;
     lineHidden: boolean;
     majorTickMark: string;
     minorTickMark?: string | null;
@@ -1291,6 +1468,8 @@ export interface SecondaryValueAxis {
     logBase?: number | null;
     orientation?: 'minMax' | 'maxMin' | string | null;
     tickLabelPos?: string | null;
+    labelAlignment?: 'l' | 'ctr' | 'r' | null;
+    labelOffsetPercent?: number | null;
     tickLabelSkip?: number | null;
     tickMarkSkip?: number | null;
     crosses?: string | null;
@@ -1409,10 +1588,7 @@ export interface Stroke {
         fillType: 'none';
     }>;
     dashStyle?: string;
-    customDash?: ReadonlyArray<{
-        dash: number;
-        space: number;
-    }>;
+    customDash?: ReadonlyArray<DrawingMLCustomDashSegment>;
     lineCap?: 'butt' | 'round' | 'square';
     lineJoin?: 'round' | 'bevel' | 'miter';
     miterLimit?: number;

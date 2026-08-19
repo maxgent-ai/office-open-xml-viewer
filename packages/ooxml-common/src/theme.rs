@@ -837,7 +837,6 @@ mod tests {
         ));
         assert_eq!(scheme.lookup_line_ref(0), StyleMatrixLookup::NoStyle);
         assert_eq!(scheme.lookup_line_ref(2), StyleMatrixLookup::Missing);
-
         let StyleMatrixLookup::Entry(line) = scheme.lookup_line_ref(1) else {
             panic!("line style 1 should exist");
         };

@@ -8,6 +8,26 @@
 import { excelSerialToUtcDate } from '../excel-date';
 import { roundDecimalHalfUp } from '../text/round-decimal';
 
+const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** Excel built-in number format 14 is locale-sensitive rather than the
+ * invariant `m/d/yy` pattern stored in a chart cache. */
+export function formatLocalizedExcelShortDate(
+  serial: number,
+  date1904 = false,
+  locale = typeof navigator === 'undefined' ? undefined : navigator.language,
+): string {
+  const cacheKey = locale ?? '';
+  let formatter = localizedShortDateFormatters.get(cacheKey);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, {
+      year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC',
+    });
+    localizedShortDateFormatters.set(cacheKey, formatter);
+  }
+  return formatter.format(excelSerialToUtcDate(serial, date1904));
+}
+
 /** Excel's default `formatCode="General"` for charts: raw numbers with no
  *  "k"/"M" abbreviation, trailing decimal zeros trimmed. */
 export function formatChartVal(v: number): string {
@@ -160,7 +180,22 @@ function formatExcelDate(serial: number, code: string, date1904 = false): string
       if (prev) {
         out += n >= 2 ? String(mm).padStart(2, '0') : String(mm);
       } else {
-        out += n >= 2 ? String(M).padStart(2, '0') : String(M);
+        // ECMA-376 §18.8.30 date tokens: m/mm are numeric months, mmm is the
+        // abbreviated month name, mmmm the full name, and mmmmm its initial.
+        // Keep this invariant/English just like the existing numeric date
+        // formatter; locale substitution belongs to the host locale layer.
+        const shortMonths = [
+          'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+        ];
+        const longMonths = [
+          'January', 'February', 'March', 'April', 'May', 'June',
+          'July', 'August', 'September', 'October', 'November', 'December',
+        ];
+        out += n >= 5 ? longMonths[M - 1][0]
+          : n === 4 ? longMonths[M - 1]
+            : n === 3 ? shortMonths[M - 1]
+              : n === 2 ? String(M).padStart(2, '0') : String(M);
       }
       continue;
     }

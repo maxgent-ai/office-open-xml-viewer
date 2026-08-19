@@ -217,7 +217,7 @@ export interface Stroke {
    * (`1` = 100% of the rendered line width). When present this takes
    * precedence over {@link Stroke.dashStyle}.
    */
-  customDash?: ReadonlyArray<{ dash: number; space: number }>;
+  customDash?: ReadonlyArray<DrawingMLCustomDashSegment>;
   /** Canvas line cap normalized from DrawingML/VML (`flat` → `butt`). */
   lineCap?: 'butt' | 'round' | 'square';
   /** DrawingML line join (`<a:round>`, `<a:bevel>`, or `<a:miter>`). */
@@ -235,6 +235,12 @@ export interface Stroke {
    * "thinThick" | "thickThin" | "tri". Absent means single line.
    */
   cmpd?: string;
+}
+
+/** One `<a:custDash><a:ds>` atom normalized to line-width multipliers. */
+export interface DrawingMLCustomDashSegment {
+  dash: number;
+  space: number;
 }
 
 export interface TextBody {

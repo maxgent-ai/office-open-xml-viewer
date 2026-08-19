@@ -3,8 +3,19 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartDataLabelOverride, ChartDisplayUnits, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartTextBox, ChartTextRun, ChartTrendline, SecondaryValueAxis } from '../types/chart';
+import type { ChartDataLabelOverride, ChartDecorationLineStyle, ChartDisplayUnits, ChartLegendEntryOverride, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartStockUpDownBarStyle, ChartStyleRole, ChartTextBox, ChartTextRun, ChartTrendline, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
+import {
+  effectiveMarkerSymbol,
+  hasVisiblePointMarkerOverride,
+  markersSuppressedByChartStyle,
+  markerFillColorFor,
+  markerFillPaintFor,
+  markerPaintComponents,
+  seriesMarkerFillColor,
+  seriesMarkerFillPaint,
+  seriesLegendMarkerIsVisible,
+} from './marker-style.js';
 import {
   AXIS_OUTER_TEXT_MARGIN_PT,
   computeChartFrame,
@@ -24,10 +35,13 @@ import {
   valueTickLabelGapPx,
   type ChartLegendReserve,
   type ChartAxisTitleSide,
+  type ChartTitleBand,
 } from './layout.js';
 import {
   automaticPercentMajorUnit,
   automaticRadarMajorUnit,
+  automaticSurfaceMajorUnit,
+  MAX_AXIS_TICKS,
   niceStep,
   planLinearValueAxis,
   planNumericValueAxis,
@@ -36,9 +50,17 @@ import {
   finiteDataExtent,
 } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, resolveGridline, isCrossBetween } from './axis-style.js';
-import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
+import {
+  formatChartVal,
+  formatChartValWithCode,
+  formatCategoryLabel,
+  formatLocalizedExcelShortDate,
+} from './chart-number-format.js';
 import { elideToWidth } from './text-elide.js';
 import {
+  categoryLabelAnchorFraction,
+  categoryLabelOffsetPx,
+  categoryPositionFraction,
   resolveCategoryGapWidthPercent,
   type CategoryGapPolicy,
 } from './category-spacing.js';
@@ -49,6 +71,7 @@ import {
   computeBoxWhiskerStats,
 } from './box-whisker.js';
 import { planParetoLayout } from './pareto-layout.js';
+import { planDateCategoryAxis } from './date-axis.js';
 import {
   THREE_D_MAX_SHAPE_FACES_PER_DATUM,
   type ChartThreeDRenderer,
@@ -63,6 +86,8 @@ import {
 import { effectiveDataLabelText } from './data-label-content.js';
 import { placeTrendlineLabel } from './trendline-label.js';
 import { paintLegendFrame } from './legend-frame.js';
+import { paintPlotAreaFrame } from './plot-area-frame.js';
+import { applyPlotVisibleOnly } from './source-visibility.js';
 import {
   boundDataLabelText,
   fitDataLabelLines,
@@ -71,6 +96,15 @@ import {
   type DataLabelRect,
 } from './data-label-layout.js';
 import { hexToRgba, resolveFill } from '../shape/paint.js';
+import { drawingmlLineDashArray, pptxPresetDashArray } from '../draw/dash.js';
+import {
+  isObservedAutomaticSurfaceCamera,
+  legacyPattern2Color,
+  scaleHexColor,
+  surfaceMaterialFactor,
+  surfacePerspectiveTangentGain,
+} from './material-color.js';
+import { planChartThreeDProjection, type ThreeDScenePoint } from './three-d.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
   DEFAULT_TEXT_INSET_TB_EMU,
@@ -363,13 +397,250 @@ function drawAxisTitles(
   }
 }
 
+type ChartDataTableLayout = {
+  fontPx: number;
+  lineHeight: number;
+  headerLines: string[][];
+  headerHeight: number;
+  rowHeight: number;
+  totalHeight: number;
+};
+
+/** Office only paints a classic chart data table for category-axis families.
+ * CT_DTable is syntactically allowed under plotArea, but an authored table on
+ * an XY scatter plot is ignored (confirmed with an Office vector boundary).
+ * Keeping this gate beside the shared layout prevents family renderers from
+ * inventing different applicability rules. */
+function chartHasDataTable(chart: ChartModel): boolean {
+  return chart.dataTable != null && chart.chartType !== 'scatter';
+}
+
+function chartDataTableRows(chart: ChartModel): Array<{ series: ChartSeries; sourceIndex: number }> {
+  const horizontal = chart.chartType === 'clusteredBarH'
+    || chart.chartType === 'stackedBarH'
+    || chart.chartType === 'stackedBarHPct';
+  const rows = chart.series.map((series, sourceIndex) => ({ series, sourceIndex }));
+  return horizontal ? rows.reverse() : rows;
+}
+
+/** Minimum data-table band reserved before the final plot width is known. The
+ * header starts as one line; after `computeChartFrame` the measured category
+ * cell width may add wrapped lines and the caller shrinks the plot by exactly
+ * that measured delta. */
+function chartDataTableBaseHeight(chart: ChartModel, ptToPx: number): number {
+  const table = chartHasDataTable(chart) ? chart.dataTable : null;
+  if (!table) return 0;
+  const fontPx = chartTextFontSizePx(table.fontSizeHpt, ptToPx) ?? 9 * ptToPx;
+  const lineHeight = Math.max(1, fontPx * 1.2);
+  const rowHeight = lineHeight + 4 * ptToPx;
+  return (chart.series.length + 1) * rowHeight;
+}
+
+function chartDataTableHeaderWidth(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  ptToPx: number,
+): number {
+  const table = chartHasDataTable(chart) ? chart.dataTable : null;
+  if (!table) return 0;
+  const fontPx = chartTextFontSizePx(table.fontSizeHpt, ptToPx) ?? 9 * ptToPx;
+  const face = chartFontFamily(chart, table.fontFace, 'minor');
+  ctx.save();
+  ctx.font = chartFontCss(fontPx, face, table.fontBold ?? false, table.fontItalic ?? false);
+  const nameWidth = chart.series.reduce(
+    (width, series) => Math.max(width, ctx.measureText(series.name).width),
+    0,
+  );
+  ctx.restore();
+  const keyWidth = table.showKeys ? Math.max(12 * ptToPx, fontPx * 1.7) : 0;
+  const keyGap = table.showKeys ? 4 * ptToPx : 0;
+  return nameWidth + keyWidth + keyGap + 6 * ptToPx;
+}
+
+function measureChartDataTable(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  categoryWidth: number,
+  ptToPx: number,
+): ChartDataTableLayout | null {
+  const table = chartHasDataTable(chart) ? chart.dataTable : null;
+  if (!table) return null;
+  const fontPx = chartTextFontSizePx(table.fontSizeHpt, ptToPx) ?? 9 * ptToPx;
+  const lineHeight = Math.max(1, fontPx * 1.2);
+  const rowHeight = lineHeight + 4 * ptToPx;
+  const face = chartFontFamily(chart, table.fontFace, 'minor');
+  ctx.save();
+  ctx.font = chartFontCss(fontPx, face, table.fontBold ?? false, table.fontItalic ?? false);
+  const categoryFormat = chart.series.find(series => series.catFormatCode)?.catFormatCode
+    ?? chart.catAxisFormatCode;
+  const categoryBuiltinId = chart.series
+    .find(series => series.catFormatBuiltinId != null)?.catFormatBuiltinId;
+  const headerLines = chartCategories(chart).map(category => {
+    const numeric = category.trim() === '' ? Number.NaN : Number(category);
+    const label = categoryBuiltinId === 14 && Number.isFinite(numeric)
+      ? formatLocalizedExcelShortDate(numeric, chart.date1904)
+      : formatCategoryLabel(category, categoryFormat, chart.date1904);
+    return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
+  });
+  ctx.restore();
+  const maxHeaderLines = Math.max(1, ...headerLines.map(lines => lines.length));
+  const headerHeight = maxHeaderLines * lineHeight + 4 * ptToPx;
+  return {
+    fontPx,
+    lineHeight,
+    headerLines,
+    headerHeight,
+    rowHeight,
+    totalHeight: headerHeight + chartDataTableRows(chart).length * rowHeight,
+  };
+}
+
+/** Draw `CT_DTable` as a measured chart foreground band. Category columns are
+ * aligned to the plot's category span; the leading key/name column occupies
+ * the already-reserved value-axis gutter. Border switches are honored
+ * independently, as authored by the four CT_Boolean children. */
+function drawChartDataTable(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  layout: ChartDataTableLayout | null,
+  plotX: number,
+  tableY: number,
+  plotWidth: number,
+  chartLeft: number,
+  ptToPx: number,
+): void {
+  const table = chart.dataTable;
+  if (!table || !layout) return;
+  const categories = chartCategories(chart);
+  if (categories.length === 0) return;
+  const categoryWidth = plotWidth / categories.length;
+  const face = chartFontFamily(chart, table.fontFace, 'minor');
+  const font = chartFontCss(
+    layout.fontPx, face, table.fontBold ?? false, table.fontItalic ?? false,
+  );
+  const keyWidth = table.showKeys ? Math.max(12 * ptToPx, layout.fontPx * 1.7) : 0;
+  const keyGap = table.showKeys ? 4 * ptToPx : 0;
+  ctx.save();
+  ctx.font = font;
+  const longestName = chart.series.reduce(
+    (width, series) => Math.max(width, ctx.measureText(series.name).width),
+    0,
+  );
+  const desiredHeaderWidth = longestName + keyWidth + keyGap + 6 * ptToPx;
+  const headerWidth = Math.min(Math.max(0, plotX - chartLeft), desiredHeaderWidth);
+  const tableX = plotX - headerWidth;
+  const tableWidth = headerWidth + plotWidth;
+  const tableBottom = tableY + layout.totalHeight;
+  const tableRows = chartDataTableRows(chart);
+  const keyEntries = buildLegendEntries(
+    chart.series,
+    chart.chartType,
+    chart.scatterStyle,
+    false,
+    chart.categories,
+  );
+  ctx.beginPath();
+  ctx.rect(tableX, tableY, tableWidth, layout.totalHeight);
+  ctx.clip();
+  ctx.fillStyle = table.fontColor ? `#${table.fontColor}` : '#000000';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  for (let categoryIndex = 0; categoryIndex < categories.length; categoryIndex++) {
+    const centerX = plotX + (categoryIndex + 0.5) * categoryWidth;
+    const lines = layout.headerLines[categoryIndex] ?? [''];
+    const textBlockHeight = lines.length * layout.lineHeight;
+    const firstY = tableY + (layout.headerHeight - textBlockHeight) / 2 + layout.lineHeight / 2;
+    lines.forEach((line, lineIndex) => {
+      ctx.fillText(line, centerX, firstY + lineIndex * layout.lineHeight);
+    });
+  }
+
+  for (let seriesIndex = 0; seriesIndex < tableRows.length; seriesIndex++) {
+    const { series, sourceIndex } = tableRows[seriesIndex];
+    const rowTop = tableY + layout.headerHeight + seriesIndex * layout.rowHeight;
+    const rowCenter = rowTop + layout.rowHeight / 2;
+    if (headerWidth > 0) {
+      const textLeft = tableX + 3 * ptToPx + keyWidth + keyGap;
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        elideToWidth(ctx, series.name, Math.max(0, plotX - textLeft - 2 * ptToPx)),
+        textLeft,
+        rowCenter,
+      );
+      if (table.showKeys && keyWidth > 0) {
+        const keyX = tableX + 3 * ptToPx;
+        const entry = keyEntries[sourceIndex];
+        if (entry) {
+          const keyHeight = Math.min(layout.fontPx, layout.rowHeight - 2 * ptToPx);
+          drawLegendSwatch(
+            ctx,
+            entry.swatchStyle,
+            entry.color,
+            keyX,
+            rowCenter - keyHeight / 2,
+            keyWidth,
+            keyHeight,
+            entry.marker,
+            entry.fillPaint,
+            entry.outlineColor,
+            entry.outlineWidthEmu,
+            entry.outlineDash,
+            entry.outlineCap,
+            entry.outlineJoin,
+            ptToPx,
+          );
+        }
+        ctx.fillStyle = table.fontColor ? `#${table.fontColor}` : '#000000';
+      }
+    }
+    ctx.textAlign = 'center';
+    for (let categoryIndex = 0; categoryIndex < categories.length; categoryIndex++) {
+      const value = series.values[categoryIndex];
+      const text = value == null ? '' : formatChartValWithCode(value, series.valFormatCode);
+      ctx.fillText(text, plotX + (categoryIndex + 0.5) * categoryWidth, rowCenter);
+    }
+  }
+
+  if (table.lineHidden !== true) {
+    ctx.strokeStyle = table.lineColor ? `#${table.lineColor}` : '#808080';
+    ctx.lineWidth = table.lineWidthEmu != null
+      ? axisLineWidthPx(table.lineWidthEmu, ptToPx)
+      : Math.max(0.5, ptToPx * 0.75);
+    ctx.setLineDash(dashPatternForPreset(table.lineDash ?? undefined, ctx.lineWidth));
+    if (table.showHorizontalBorder) {
+      let lineY = tableY + layout.headerHeight;
+      for (let row = 0; row < tableRows.length; row++) {
+        ctx.beginPath(); ctx.moveTo(tableX, lineY); ctx.lineTo(tableX + tableWidth, lineY); ctx.stroke();
+        lineY += layout.rowHeight;
+      }
+    }
+    if (table.showVerticalBorder) {
+      ctx.beginPath(); ctx.moveTo(plotX, tableY); ctx.lineTo(plotX, tableBottom); ctx.stroke();
+      for (let category = 1; category < categories.length; category++) {
+        const lineX = plotX + category * categoryWidth;
+        ctx.beginPath(); ctx.moveTo(lineX, tableY); ctx.lineTo(lineX, tableBottom); ctx.stroke();
+      }
+    }
+    if (table.showOutline) {
+      const half = ctx.lineWidth / 2;
+      ctx.strokeRect(
+        tableX + half, tableY + half,
+        Math.max(0, tableWidth - ctx.lineWidth),
+        Math.max(0, layout.totalHeight - ctx.lineWidth),
+      );
+    }
+  }
+  ctx.restore();
+}
+
 /** Line-shaped legend swatch styles match Excel's actual chart-type
  *  conventions: bar/column/area/pie use a filled rectangle ("swatch");
  *  line/radar/scatter use a horizontal line segment (the same stroke
  *  weight the series uses). Without this, line-chart legends rendered as
  *  filled squares, which read as a different chart-type marker.
  */
-type LegendSwatchStyle = 'fill' | 'line';
+type LegendSwatchStyle = 'fill' | 'line' | 'none';
 
 function legendSwatchStyle(chartType: string | undefined): LegendSwatchStyle {
   if (!chartType) return 'fill';
@@ -388,6 +659,7 @@ function legendSwatchStyle(chartType: string | undefined): LegendSwatchStyle {
 interface LegendMarker {
   symbol: string;
   fill: string;
+  fillPaint?: Fill | null;
   line: string | null;
   lineWidthEmu: number | null;
   /** True when the plotted series draws both a connecting line and markers. */
@@ -428,23 +700,22 @@ function legendMarkerFor(
   const s = series[entryIndex];
   if (!s) return null;
   const family = s.seriesType ?? chartType;
+  const isStock = family === 'stock';
   const isLineFamily = family === 'line' || family === 'stackedLine' ||
-    family === 'stackedLinePct';
+    family === 'stackedLinePct' || isStock;
   const isScatter = family === 'scatter';
   if (!isLineFamily && !isScatter) return null;
-  if (isScatter && (scatterStyle === 'lineNoMarker' || scatterStyle === 'smoothNoMarker')) return null;
-  const symbol = s.markerSymbol ?? 'circle';
-  // `markerSymbol: "none"` means the series plots no marker at all; there is no
-  // glyph to show, so fall back to the (line) swatch rather than invent one.
-  if (symbol === 'none' || s.showMarker === false) return null;
+  if (!seriesLegendMarkerIsVisible(chartType, scatterStyle, s)) return null;
+  const symbol = s.markerSymbol ?? (isStock ? 'none' : 'circle');
   const base = chartColor(entryIndex, s); // '#RRGGBB'
-  const fill = s.markerFill ?? base.replace(/^#/, '');
+  const fill = seriesMarkerFillColor(s, base.replace(/^#/, ''));
   const withLine = isScatter
     ? scatterSeriesDrawsLine('scatter', scatterStyle, s)
     : s.lineHidden !== true;
   return {
     symbol,
     fill,
+    fillPaint: seriesMarkerFillPaint(s),
     line: s.markerLine ?? null,
     lineWidthEmu: s.markerLineWidthEmu ?? null,
     withLine,
@@ -468,6 +739,7 @@ function drawLegendSwatch(
   ptToPx = 1,
   shapeRotationDeg = 0,
 ): void {
+  if (style === 'none') return;
   // A line/scatter series with markers shows the same compound key as Excel:
   // connecting stroke first, then the marker centered on it. Markers-only
   // scatter skips the stroke.
@@ -477,6 +749,7 @@ function drawLegendSwatch(
     drawMarker(
       ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1,
       marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
+      marker.fillPaint, shapeRotationDeg,
     );
     return;
   }
@@ -503,6 +776,7 @@ function drawLegendSwatch(
         drawMarker(
           ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1,
           marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
+          marker.fillPaint, shapeRotationDeg,
         );
       }
       return;
@@ -512,7 +786,7 @@ function drawLegendSwatch(
     ctx.lineWidth = outlineWidthEmu != null
       ? axisLineWidthPx(outlineWidthEmu, ptToPx)
       : Math.max(1.5, h * 0.15);
-    ctx.setLineDash(dashPatternForPreset(outlineDash ?? undefined));
+    ctx.setLineDash(dashPatternForPreset(outlineDash ?? undefined, ctx.lineWidth));
     ctx.lineCap = outlineCap === 'rnd' ? 'round' : outlineCap === 'sq' ? 'square' : 'butt';
     ctx.lineJoin = outlineJoin === 'round' || outlineJoin === 'bevel'
       ? outlineJoin
@@ -526,6 +800,7 @@ function drawLegendSwatch(
       drawMarker(
         ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1,
         marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
+        marker.fillPaint, shapeRotationDeg,
       );
     }
     ctx.restore();
@@ -543,7 +818,7 @@ function drawLegendSwatch(
       ctx.save();
       ctx.strokeStyle = `#${outlineColor}`;
       ctx.lineWidth = outlineWidth;
-      ctx.setLineDash(dashPatternForPreset(outlineDash ?? undefined));
+      ctx.setLineDash(dashPatternForPreset(outlineDash ?? undefined, ctx.lineWidth));
       ctx.lineCap = outlineCap === 'rnd' ? 'round' : outlineCap === 'sq' ? 'square' : 'butt';
       ctx.lineJoin = outlineJoin === 'round' || outlineJoin === 'bevel'
         ? outlineJoin
@@ -574,6 +849,32 @@ interface LegendEntry {
   outlineDash: string | null;
   outlineCap: string | null;
   outlineJoin: string | null;
+  textOverride: ChartLegendEntryOverride | null;
+}
+
+function applyLegendEntryOverrides(
+  entries: readonly LegendEntry[],
+  overrides: readonly ChartLegendEntryOverride[],
+): LegendEntry[] {
+  if (overrides.length === 0) return [...entries];
+  const byIndex = new Map<number, ChartLegendEntryOverride>();
+  for (const override of overrides) byIndex.set(override.idx, override);
+  const effective: LegendEntry[] = [];
+  for (let index = 0; index < entries.length; index++) {
+    const override = byIndex.get(index);
+    if (override?.deleted === true) continue;
+    effective.push({ ...entries[index], textOverride: override ?? null });
+  }
+  return effective;
+}
+
+/** The legend key embedded in a classic data label (`<c:showLegendKey>`).
+ * Styling is the same resolved {@link LegendEntry} used by the chart legend;
+ * only placement belongs to the data-label layout. */
+interface DataLabelLegendKey {
+  entry: LegendEntry;
+  ptToPx: number;
+  shapeRotationDeg: number;
 }
 
 /** Build the legend entries for a chart. Pie/doughnut legends are
@@ -587,6 +888,7 @@ function buildLegendEntries(
   chartCategories: string[] = [],
   fillPaints: ReadonlyArray<Fill | null | undefined> = [],
   pieVaryColors = true,
+  entryOverrides: readonly ChartLegendEntryOverride[] = [],
 ): LegendEntry[] {
   if (varyByPoint || legendIsCategoryDriven(chartType)) {
     // Category-driven: one entry per data point of the first series, labeled by
@@ -596,7 +898,7 @@ function buildLegendEntries(
     const n = first ? first.values.length : 0;
     const cats = first?.categories ?? chartCategories;
     const overrides = new Map(first?.dataPointOverrides?.map(point => [point.idx, point]) ?? []);
-    return Array.from({ length: n }, (_, i) => {
+    const entries = Array.from({ length: n }, (_, i) => {
       const point = overrides.get(i);
       const lineVisible = (point?.lineHidden ?? first?.lineHidden) !== true;
       return {
@@ -607,7 +909,12 @@ function buildLegendEntries(
         marker: null, // pie/doughnut/varyColors keys are always filled swatches.
         swatchStyle: legendSwatchStyle(chartType),
         fillPaint: point?.fillHidden === true
-          ? null : i < fillPaints.length ? fillPaints[i] : undefined,
+          ? null
+          : point?.color || first?.dataPointColors?.[i]
+            ? undefined
+            : i < fillPaints.length
+              ? fillPaints[i]
+              : first?.fillPattern ?? undefined,
         outlineColor: lineVisible ? (point?.lineColor ?? first?.lineColor ?? null) : null,
         outlineWidthEmu: lineVisible
           ? (point?.lineWidthEmu ?? first?.lineWidthEmu ?? null) : null,
@@ -615,21 +922,27 @@ function buildLegendEntries(
           ? (point?.lineDash ?? first?.chartexStyle?.lineDash ?? null) : null,
         outlineCap: lineVisible ? (first?.chartexStyle?.lineCap ?? null) : null,
         outlineJoin: lineVisible ? (first?.chartexStyle?.lineJoin ?? null) : null,
+        textOverride: null,
       };
     });
+    return applyLegendEntryOverrides(entries, entryOverrides);
   }
-  return series.map((s, i) => {
+  const entries = series.map((s, i) => {
     // A combo chart has multiple chart groups under one plotArea. The legend
     // key describes the individual series' group, not the first/primary group.
-    const swatchStyle = legendSwatchStyle(s.seriesType ?? chartType);
+    const family = s.seriesType ?? chartType;
     const lineVisible = s.lineHidden !== true;
     const lineColor = lineVisible ? (s.lineColor ?? null) : null;
+    const marker = legendMarkerFor(chartType, scatterStyle, series, i);
+    const swatchStyle: LegendSwatchStyle = family === 'stock' && !lineVisible && !marker
+      ? 'none'
+      : legendSwatchStyle(family);
     return {
       label: s.name || `Series ${i + 1}`,
       color: swatchStyle === 'line' && lineColor
         ? `#${lineColor}`
         : legendEntryColor(chartType, series, i),
-      marker: legendMarkerFor(chartType, scatterStyle, series, i),
+      marker,
       swatchStyle,
       fillPaint: i < fillPaints.length ? fillPaints[i] : (s.fillPattern ?? undefined),
       outlineColor: lineColor,
@@ -640,8 +953,36 @@ function buildLegendEntries(
       outlineDash: lineVisible ? (s.chartexStyle?.lineDash ?? null) : null,
       outlineCap: lineVisible ? (s.chartexStyle?.lineCap ?? null) : null,
       outlineJoin: lineVisible ? (s.chartexStyle?.lineJoin ?? null) : null,
+      textOverride: null,
     };
   });
+  return applyLegendEntryOverrides(entries, entryOverrides);
+}
+
+/** Resolve data-label keys through the chart's existing legend-style pipeline.
+ * ECMA-376 §21.2.2.179 only requires the corresponding legend key to be shown;
+ * it does not define a second paint model. Category-driven families therefore
+ * use the point entry, while every other family uses its series entry. */
+function createDataLabelLegendKeyResolver(
+  chart: ChartModel,
+  ptToPx: number,
+  shapeRotationDeg = 0,
+): (seriesIndex: number, pointIndex: number) => DataLabelLegendKey | undefined {
+  const categoryDriven = chartVariesColorsByPoint(chart)
+    || legendIsCategoryDriven(chart.chartType);
+  const entries = buildLegendEntries(
+    chart.series,
+    chart.chartType,
+    chart.scatterStyle,
+    chartVariesColorsByPoint(chart),
+    chart.categories,
+    [],
+    chart.varyColors !== false,
+  );
+  return (seriesIndex, pointIndex) => {
+    const entry = entries[categoryDriven ? pointIndex : seriesIndex];
+    return entry ? { entry, ptToPx, shapeRotationDeg } : undefined;
+  };
 }
 
 /** Resolved legend text styling (CH10). `fontFamily` already carries the
@@ -652,6 +993,28 @@ interface LegendTextStyle {
   color: string;
   bold: boolean;
   sizePx: number | null;
+}
+
+function legendEntryTextStyle(
+  chart: ChartModel,
+  base: LegendTextStyle,
+  override: ChartLegendEntryOverride | null,
+  ptToPx: number,
+): LegendTextStyle {
+  if (!override) return base;
+  const face = resolveThemeFontRef(chart, override.fontFace) ?? override.fontFace;
+  return {
+    fontFamily: face ? `"${face}", Calibri, Arial, sans-serif` : base.fontFamily,
+    color: override.fontColor ? `#${override.fontColor}` : base.color,
+    bold: override.fontBold ?? base.bold,
+    sizePx: chartTextFontSizePx(override.fontSizeHpt, ptToPx) ?? base.sizePx,
+  };
+}
+
+function setLegendFont(ctx: CanvasRenderingContext2D, style: LegendTextStyle, ptToPx: number): number {
+  const size = legendFontSizePx(style, ptToPx);
+  ctx.font = `${style.bold ? 'bold ' : ''}${size}px ${style.fontFamily}`;
+  return size;
 }
 
 const DEFAULT_LEGEND_STYLE: LegendTextStyle = {
@@ -690,13 +1053,26 @@ function legendSwatchWidths(
   fontSize: number,
   ptToPx: number,
 ): number[] {
-  return entries.map(entry =>
-    entry.swatchStyle === 'line' ? fontSize * 1.6 : FILLED_LEGEND_KEY_PT * ptToPx
-  );
+  return entries.map(entry => {
+    if (entry.swatchStyle === 'fill') return FILLED_LEGEND_KEY_PT * ptToPx;
+    const fallback = fontSize * 1.6;
+    if (entry.swatchStyle !== 'line' || !entry.outlineDash) return fallback;
+    const lineWidth = entry.outlineWidthEmu != null
+      ? axisLineWidthPx(entry.outlineWidthEmu, ptToPx)
+      : Math.max(1.5, fontSize * 0.15);
+    const dash = dashPatternForPreset(entry.outlineDash, lineWidth);
+    // End a legend key at a complete dash boundary. One whole pattern plus
+    // its first dash renders two complete visible strokes for the common
+    // DrawingML `dash` preset instead of clipping the second stroke midway.
+    const completePatternWidth = dash.length > 0
+      ? dash.reduce((sum, length) => sum + length, 0) + dash[0]
+      : 0;
+    return Math.max(fallback, completePatternWidth);
+  });
 }
 
 function legendSwatchHeight(entry: LegendEntry, fontSize: number, ptToPx: number): number {
-  return entry.swatchStyle === 'line' ? fontSize : FILLED_LEGEND_KEY_PT * ptToPx;
+  return entry.swatchStyle === 'fill' ? FILLED_LEGEND_KEY_PT * ptToPx : fontSize;
 }
 
 /** Resolve side-legend text into the same bounded lines that paint consumes.
@@ -718,6 +1094,14 @@ function sideLegendLabelLines(
   ];
 }
 
+interface MeasuredLegendLayout extends ChartLegendReserve {
+  measuredLabels: string[];
+  entryStyles: LegendTextStyle[];
+  fontSizes: number[];
+  swatches: number[];
+  itemWidths: number[];
+}
+
 /** Resolve the shared automatic legend reserve from real Canvas text metrics. */
 function measuredLegendReserve(
   ctx: CanvasRenderingContext2D,
@@ -726,35 +1110,49 @@ function measuredLegendReserve(
   h: number,
   sideReserveFrac: number,
   ptToPx: number,
-): ChartLegendReserve | null {
+): MeasuredLegendLayout | null {
   if (!chart.showLegend) return null;
   const style = legendTextStyle(chart, ptToPx);
   const entries = buildLegendEntries(
-    chart.series,
+    legendSeriesWithTrendlines(chart),
     chart.chartType,
     chart.scatterStyle,
     chartVariesColorsByPoint(chart),
     chart.categories,
     [],
     chart.varyColors !== false,
+    chart.legendEntries ?? [],
   );
-  const fontSize = legendFontSizePx(style, ptToPx);
-  const swatches = legendSwatchWidths(entries, fontSize, ptToPx);
+  const entryStyles = entries.map(entry =>
+    legendEntryTextStyle(chart, style, entry.textOverride, ptToPx)
+  );
+  const fontSizes = entryStyles.map(entryStyle => legendFontSizePx(entryStyle, ptToPx));
+  const swatches = entries.map((entry, index) =>
+    legendSwatchWidths([entry], fontSizes[index], ptToPx)[0]
+  );
   ctx.save();
-  ctx.font = `${style.bold ? 'bold ' : ''}${fontSize}px ${style.fontFamily}`;
-  const itemWidths = entries.map((entry, index) =>
-    swatches[index] + LEGEND_SWATCH_TEXT_GAP + ctx.measureText(entry.label).width
-  );
+  const itemWidths = entries.map((entry, index) => {
+    setLegendFont(ctx, entryStyles[index], ptToPx);
+    return swatches[index] + LEGEND_SWATCH_TEXT_GAP + ctx.measureText(entry.label).width;
+  });
   ctx.restore();
   const pos = chart.legendPos ?? 'r';
   const horizontal = pos === 't' || pos === 'b';
-  return chartLegendReserve(chart, w, h, sideReserveFrac, {
+  const reserve = chartLegendReserve(chart, w, h, sideReserveFrac, {
     itemWidths,
-    rowHeight: fontSize + LEGEND_ROW_EXTRA_PX,
+    rowHeight: Math.max(0, ...fontSizes) + LEGEND_ROW_EXTRA_PX,
     itemGap: LEGEND_ITEM_GAP,
     horizontalPadding: horizontal ? LEGEND_HORIZONTAL_PADDING : LEGEND_SIDE_PADDING,
     verticalPadding: LEGEND_VERTICAL_PADDING,
   });
+  return reserve ? {
+    ...reserve,
+    measuredLabels: entries.map(entry => entry.label),
+    entryStyles,
+    fontSizes,
+    swatches,
+    itemWidths,
+  } : null;
 }
 
 function drawLegend(
@@ -771,6 +1169,8 @@ function drawLegend(
   fillPaints: ReadonlyArray<Fill | null | undefined> = [],
   shapeRotationDeg = 0,
   pieVaryColors = true,
+  chartForEntryStyles?: ChartModel,
+  measured?: MeasuredLegendLayout | null,
 ): void {
   const gap = LEGEND_SWATCH_TEXT_GAP;
   const entries = buildLegendEntries(
@@ -781,16 +1181,34 @@ function drawLegend(
     chartCategories,
     fillPaints,
     pieVaryColors,
+    chartForEntryStyles?.legendEntries ?? [],
   );
-  const boldPrefix = style.bold ? 'bold ' : '';
-  const fontSize = legendFontSizePx(style, ptToPx);
-  ctx.font = `${boldPrefix}${fontSize}px ${style.fontFamily}`;
+  const canReuseMeasure = measured != null
+    && measured.measuredLabels.length === entries.length
+    && measured.measuredLabels.every((label, index) => label === entries[index].label);
+  const entryStyles = canReuseMeasure
+    ? measured.entryStyles
+    : entries.map(entry => chartForEntryStyles
+        ? legendEntryTextStyle(chartForEntryStyles, style, entry.textOverride, ptToPx)
+        : style
+      );
+  const fontSizes = canReuseMeasure
+    ? measured.fontSizes
+    : entryStyles.map(entryStyle => legendFontSizePx(entryStyle, ptToPx));
+  if (entryStyles[0]) setLegendFont(ctx, entryStyles[0], ptToPx);
   ctx.textBaseline = 'middle';
-  const rowH = fontSize + LEGEND_ROW_EXTRA_PX;
-  const swatches = legendSwatchWidths(entries, fontSize, ptToPx);
-  const itemWidths = entries.map((entry, index) =>
-    swatches[index] + gap + ctx.measureText(entry.label).width
-  );
+  const rowH = Math.max(0, ...fontSizes) + LEGEND_ROW_EXTRA_PX;
+  const swatches = canReuseMeasure
+    ? measured.swatches
+    : entries.map((entry, index) =>
+        legendSwatchWidths([entry], fontSizes[index], ptToPx)[0]
+      );
+  const itemWidths = canReuseMeasure
+    ? measured.itemWidths
+    : entries.map((entry, index) => {
+        setLegendFont(ctx, entryStyles[index], ptToPx);
+        return swatches[index] + gap + ctx.measureText(entry.label).width;
+      });
   if (orient === 'horizontal') {
     const rows = packLegendRows(itemWidths, lw, LEGEND_ITEM_GAP);
     const visibleRows = rows.slice(
@@ -817,8 +1235,9 @@ function drawLegend(
           0,
           effectiveWidth - sw - gap + LEGEND_MEASUREMENT_EPSILON_PX,
         );
+        setLegendFont(ctx, entryStyles[index], ptToPx);
         const label = elideToWidth(ctx, entries[index].label, maxTextPx);
-        const swatchH = legendSwatchHeight(entries[index], fontSize, ptToPx);
+        const swatchH = legendSwatchHeight(entries[index], fontSizes[index], ptToPx);
         drawLegendSwatch(
           ctx, entries[index].swatchStyle, entries[index].color,
           rx, ry - swatchH / 2, sw, swatchH,
@@ -827,7 +1246,7 @@ function drawLegend(
           entries[index].outlineDash, entries[index].outlineCap, entries[index].outlineJoin,
           ptToPx, shapeRotationDeg,
         );
-        ctx.fillStyle = style.color;
+        ctx.fillStyle = entryStyles[index].color;
         ctx.textAlign = 'left';
         ctx.fillText(label, rx + sw + gap, ry);
         rx += effectiveWidth + LEGEND_ITEM_GAP;
@@ -844,11 +1263,15 @@ function drawLegend(
   // historical one-line/elided rows so wrapping one category cannot starve
   // later entries. Series-driven legends are the bounded multi-line case.
   const wrapSeriesNames = !varyByPoint && !legendIsCategoryDriven(chartType);
-  const labelLines = entries.map(entry => wrapSeriesNames
-    ? sideLegendLabelLines(ctx, entry.label, maxTextPx)
-    : [elideToWidth(ctx, entry.label, maxTextPx)]
+  const labelLines = entries.map((entry, index) => {
+    setLegendFont(ctx, entryStyles[index], ptToPx);
+    return wrapSeriesNames
+      ? sideLegendLabelLines(ctx, entry.label, maxTextPx)
+      : [elideToWidth(ctx, entry.label, maxTextPx)];
+  });
+  const entryHeights = labelLines.map((lines, index) =>
+    lines.length * fontSizes[index] + LEGEND_ROW_EXTRA_PX
   );
-  const entryHeights = labelLines.map(lines => lines.length * fontSize + LEGEND_ROW_EXTRA_PX);
   let visibleCount = 0;
   let visibleHeight = 0;
   while (visibleCount < entries.length
@@ -866,7 +1289,7 @@ function drawLegend(
       ry += entryH;
       continue;
     }
-    const swatchH = legendSwatchHeight(entries[i], fontSize, ptToPx);
+    const swatchH = legendSwatchHeight(entries[i], fontSizes[i], ptToPx);
     drawLegendSwatch(
       ctx, entries[i].swatchStyle, entries[i].color,
       lx, ry + (entryH - swatchH) / 2, sw, swatchH,
@@ -875,11 +1298,12 @@ function drawLegend(
       entries[i].outlineDash, entries[i].outlineCap, entries[i].outlineJoin,
       ptToPx, shapeRotationDeg,
     );
-    ctx.fillStyle = style.color; ctx.textAlign = 'left';
+    setLegendFont(ctx, entryStyles[i], ptToPx);
+    ctx.fillStyle = entryStyles[i].color; ctx.textAlign = 'left';
     labelLines[i].forEach((line, lineIndex) =>
       // Preserve the established single-line baseline byte-for-byte. Extra
       // wrapped lines continue at one authored font-size interval.
-      ctx.fillText(line, lx + sw + gap, ry + fontSize * (lineIndex + 0.5))
+      ctx.fillText(line, lx + sw + gap, ry + fontSizes[i] * (lineIndex + 0.5))
     );
     ry += entryH;
   }
@@ -901,7 +1325,7 @@ function legendTextStyle(chart: ChartModel, ptToPx: number): LegendTextStyle {
 // Legend placement is resolved by `chartLegendReserve` (layout.ts). This alias
 // keeps the drawing helper's signature readable while sharing the single source
 // of truth for the reserve shape.
-type LegendLayout = ChartLegendReserve;
+type LegendLayout = MeasuredLegendLayout;
 
 /** Draw a legend in the band reserved by {@link chartLegendReserve}. */
 function drawLegendForLayout(
@@ -917,6 +1341,7 @@ function drawLegendForLayout(
 ): void {
   if (!leg) return;
   const legStyle = legendTextStyle(chart, ptToPx);
+  const legendSeries = legendSeriesWithTrendlines(chart);
   // §21.2.2.227 varyColors single-series bar: the legend lists one entry per
   // data point (colored like each bar), so the legend and the plot fill agree.
   const varyByPoint = chartVariesColorsByPoint(chart);
@@ -952,19 +1377,19 @@ function drawLegendForLayout(
   // rectangle. The shared resolver applies all four factor/edge modes relative
   // to this automatic box, including the schema's omitted-mode=factor default.
   const ml = chart.legendManualLayout;
-  const manualBox = ml && ml.w > 0 && ml.h > 0
+  const manualBox = ml
     ? resolveManualLayoutRect(ml, { x, y, w, h }, defaultBox)
     : null;
   if (manualBox) {
     const orient = manualBox.w >= manualBox.h ? 'horizontal' : 'vertical';
-    paintLegendFrame(ctx, chart, manualBox, ptToPx);
-    drawLegend(ctx, chart.series, manualBox.x, manualBox.y, manualBox.w, manualBox.h, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx, fillPaints, shapeRotationDeg, chart.varyColors !== false);
+    paintLegendFrame(ctx, chart, manualBox, ptToPx, shapeRotationDeg);
+    drawLegend(ctx, legendSeries, manualBox.x, manualBox.y, manualBox.w, manualBox.h, orient, chart.chartType, legStyle, chart.scatterStyle, varyByPoint, chart.categories, ptToPx, fillPaints, shapeRotationDeg, chart.varyColors !== false, chart, leg);
     return;
   }
-  paintLegendFrame(ctx, chart, defaultBox, ptToPx);
-  drawLegend(ctx, chart.series, defaultBox.x, defaultBox.y, defaultBox.w, defaultBox.h,
+  paintLegendFrame(ctx, chart, defaultBox, ptToPx, shapeRotationDeg);
+  drawLegend(ctx, legendSeries, defaultBox.x, defaultBox.y, defaultBox.w, defaultBox.h,
     defaultOrientation, chart.chartType, legStyle, chart.scatterStyle, varyByPoint,
-    chart.categories, ptToPx, fillPaints, shapeRotationDeg, chart.varyColors !== false);
+    chart.categories, ptToPx, fillPaints, shapeRotationDeg, chart.varyColors !== false, chart, leg);
 }
 
 function drawAxisTick(
@@ -982,6 +1407,7 @@ function drawAxisTick(
   lineHidden = false,
   level: 'major' | 'minor' = 'major',
   ptToPx = 1,
+  dash?: string | null,
 ): void {
   // Axis shape properties style both the rule and its tick marks. An authored
   // `<a:ln><a:noFill/>` therefore suppresses the ticks too, while labels and
@@ -996,8 +1422,10 @@ function drawAxisTick(
   const sideLen = mode === 'cross' ? len / 2 : len;
   const prevS = ctx.strokeStyle;
   const prevW = ctx.lineWidth;
+  const prevDash = ctx.getLineDash?.() ?? [];
   ctx.strokeStyle = color ?? '#888';
   ctx.lineWidth = lineWidth ?? 1;
+  ctx.setLineDash(dashPatternForPreset(dash ?? undefined, ctx.lineWidth));
   ctx.beginPath();
   if (axis === 'val') {
     // val axis is vertical (x = anchor, y varies). Ticks extend horizontally;
@@ -1023,6 +1451,31 @@ function drawAxisTick(
   ctx.stroke();
   ctx.strokeStyle = prevS;
   ctx.lineWidth = prevW;
+  ctx.setLineDash(prevDash);
+}
+
+function strokeAxisSegment(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: string,
+  lineWidth: number,
+  dash?: string | null,
+): void {
+  const previousDash = ctx.getLineDash?.() ?? [];
+  const resolvedDash = dashPatternForPreset(dash ?? undefined, lineWidth);
+  const dashChanged = resolvedDash.length !== previousDash.length
+    || resolvedDash.some((value, index) => value !== previousDash[index]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  if (dashChanged) ctx.setLineDash(resolvedDash);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  if (dashChanged) ctx.setLineDash(previousDash);
 }
 
 function axisTickLengthPx(
@@ -1105,7 +1558,7 @@ function valGridStroke(
     explicit: chart.valAxisGridlineColor != null
       || chart.valAxisGridlineWidthEmu != null
       || chart.valAxisGridlineDash != null,
-    dash: dashPatternForPreset(chart.valAxisGridlineDash ?? undefined),
+    dash: dashPatternForPreset(chart.valAxisGridlineDash ?? undefined, width),
   };
 }
 
@@ -1122,7 +1575,7 @@ function valMinorGridStroke(
     color,
     width,
     explicit: chart.valAxisMinorGridlineColor != null,
-    dash: dashPatternForPreset(chart.valAxisMinorGridlineDash ?? undefined),
+    dash: dashPatternForPreset(chart.valAxisMinorGridlineDash ?? undefined, width),
   };
 }
 
@@ -1141,7 +1594,7 @@ function secondaryMinorGridStroke(
     explicit: axis.minorGridlineColor != null
       || axis.minorGridlineWidthEmu != null
       || axis.minorGridlineDash != null,
-    dash: dashPatternForPreset(axis.minorGridlineDash ?? undefined),
+    dash: dashPatternForPreset(axis.minorGridlineDash ?? undefined, width),
   };
 }
 
@@ -1160,7 +1613,7 @@ function secondaryMajorGridStroke(
     explicit: axis.majorGridlineColor != null
       || axis.majorGridlineWidthEmu != null
       || axis.majorGridlineDash != null,
-    dash: dashPatternForPreset(axis.majorGridlineDash ?? undefined),
+    dash: dashPatternForPreset(axis.majorGridlineDash ?? undefined, width),
   };
 }
 
@@ -1178,20 +1631,22 @@ function drawCatMajorGridlines(chart: ChartModel): boolean {
  *  gridlines have no zero-line emphasis (there is no "zero category"), so a
  *  single resolved stroke suffices. */
 function catGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number; dash: number[] } {
+  const stroke = resolveGridline(chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, ptToPx);
   return {
-    ...resolveGridline(chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, ptToPx),
-    dash: dashPatternForPreset(chart.catAxisGridlineDash ?? undefined),
+    ...stroke,
+    dash: dashPatternForPreset(chart.catAxisGridlineDash ?? undefined, stroke.width),
   };
 }
 
 function catMinorGridStroke(chart: ChartModel, ptToPx: number): { color: string; width: number; dash: number[] } {
+  const stroke = resolveGridline(
+    chart.catAxisMinorGridlineColor,
+    chart.catAxisMinorGridlineWidthEmu,
+    ptToPx,
+  );
   return {
-    ...resolveGridline(
-      chart.catAxisMinorGridlineColor,
-      chart.catAxisMinorGridlineWidthEmu,
-      ptToPx,
-    ),
-    dash: dashPatternForPreset(chart.catAxisMinorGridlineDash ?? undefined),
+    ...stroke,
+    dash: dashPatternForPreset(chart.catAxisMinorGridlineDash ?? undefined, stroke.width),
   };
 }
 
@@ -1439,24 +1894,31 @@ interface TrendlineLabelContext {
   automaticAnchor?: { x: number; y: number };
 }
 
-function compactTrendlineNumber(value: number): string {
+function compactTrendlineNumber(value: number, formatCode?: string | null): string {
+  if (formatCode && formatCode.trim().toLowerCase() !== 'general') {
+    return formatChartValWithCode(value, formatCode);
+  }
   return formatChartVal(Number(value.toPrecision(6)));
 }
 
 function generatedTrendlineLabel(
   tl: ChartTrendline,
   stats: ReturnType<typeof linearTrendlineStats>,
+  sourceFormatCode?: string | null,
 ): string[] {
   if (tl.labelText) return tl.labelText.split(/\r?\n/);
   if (!stats) return [];
+  const formatCode = tl.labelFormatSourceLinked === true
+    ? sourceFormatCode
+    : tl.labelFormatCode;
   const lines: string[] = [];
   if (tl.dispEq) {
     const sign = stats.intercept < 0 ? '−' : '+';
     lines.push(
-      `y = ${compactTrendlineNumber(stats.slope)}x ${sign} ${compactTrendlineNumber(Math.abs(stats.intercept))}`,
+      `y = ${compactTrendlineNumber(stats.slope, formatCode)}x ${sign} ${compactTrendlineNumber(Math.abs(stats.intercept), formatCode)}`,
     );
   }
-  if (tl.dispRSqr) lines.push(`R² = ${compactTrendlineNumber(stats.rSquared)}`);
+  if (tl.dispRSqr) lines.push(`R² = ${compactTrendlineNumber(stats.rSquared, formatCode)}`);
   return lines;
 }
 
@@ -1466,9 +1928,10 @@ function drawTrendlineLabel(
   stats: ReturnType<typeof linearTrendlineStats>,
   ptToPx: number,
   labelContext?: TrendlineLabelContext,
+  sourceFormatCode?: string | null,
 ): void {
   if (!labelContext) return;
-  const lines = generatedTrendlineLabel(tl, stats);
+  const lines = generatedTrendlineLabel(tl, stats, sourceFormatCode);
   if (lines.length === 0) return;
   const { chart, chartRect, plotRect } = labelContext;
   const fontPx = chartTextFontSizePx(tl.labelFontSizeHpt, ptToPx)
@@ -1544,6 +2007,7 @@ function drawSeriesTrendlines(
   ptToPx: number,
   xValues?: readonly (number | null)[],
   labelContext?: TrendlineLabelContext,
+  mapPoint?: (categoryValue: number, seriesValue: number) => { x: number; y: number },
 ): void {
   const tls = s.trendLines;
   if (!tls || tls.length === 0) return;
@@ -1590,7 +2054,9 @@ function drawSeriesTrendlines(
       fys = [fit.ys[0] - m * bwd, fit.ys[1] + m * fwd];
     }
     if (![...fxs, ...fys].every(Number.isFinite)) continue;
-    const mapped = fxs.map((x, index) => ({ x: toX(x), y: toY(fys[index]) }));
+    const mapped = fxs.map((x, index) => mapPoint
+      ? mapPoint(x, fys[index])
+      : ({ x: toX(x), y: toY(fys[index]) }));
     if (!mapped.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) continue;
     if (!tl.lineHidden) {
       if (labelContext?.clipLineToPlot) {
@@ -1607,7 +2073,7 @@ function drawSeriesTrendlines(
       ctx.strokeStyle = tl.lineColor ? `#${tl.lineColor}` : seriesColor;
       ctx.lineWidth = tl.lineWidthEmu ? axisLineWidthPx(tl.lineWidthEmu, ptToPx) : 1.5;
       // DrawingML line presets are authored paint; omission means solid.
-      ctx.setLineDash(dashPatternForPreset(tl.lineDash ?? undefined));
+      ctx.setLineDash(dashPatternForPreset(tl.lineDash ?? undefined, ctx.lineWidth));
       ctx.beginPath();
       for (let i = 0; i < mapped.length; i++) {
         const { x: px, y: py } = mapped[i];
@@ -1619,9 +2085,54 @@ function drawSeriesTrendlines(
     drawTrendlineLabel(ctx, tl, stats, ptToPx, labelContext ? {
       ...labelContext,
       automaticAnchor: mapped.at(-1),
-    } : undefined);
+    } : undefined, s.valFormatCode);
   }
   ctx.setLineDash(prevDash);
+}
+
+/** Office adds every visible trendline to a series-driven legend. The legend
+ * entry is a line key whose authored paint comes from `<c:trendline><c:spPr>`;
+ * when `<c:name>` is absent, the application-generated label combines the
+ * localized trendline kind with the source-series name. We use the invariant
+ * OOXML kind names here and keep an authored name verbatim. */
+function trendlineLegendSeries(series: readonly ChartSeries[]): ChartSeries[] {
+  const kindLabel = (kind: string): string => {
+    switch (kind) {
+      case 'exp': return 'Exponential';
+      case 'log': return 'Logarithmic';
+      case 'poly': return 'Polynomial';
+      case 'power': return 'Power';
+      case 'movingAvg': return 'Moving Average';
+      default: return 'Linear';
+    }
+  };
+  const entries: ChartSeries[] = [];
+  for (const source of series) {
+    for (const trendline of source.trendLines ?? []) {
+      if (trendline.lineHidden === true) continue;
+      const fallbackColor = source.lineColor ?? source.color;
+      entries.push({
+        name: trendline.name
+          ?? `${kindLabel(trendline.trendlineType)} (${source.name || 'Series'})`,
+        color: trendline.lineColor ?? fallbackColor,
+        lineColor: trendline.lineColor ?? fallbackColor,
+        lineWidthEmu: trendline.lineWidthEmu,
+        lineHidden: false,
+        chartexStyle: { lineDash: trendline.lineDash },
+        values: [],
+        seriesType: 'line',
+        showMarker: false,
+      });
+    }
+  }
+  return entries;
+}
+
+function legendSeriesWithTrendlines(chart: ChartModel): ChartSeries[] {
+  if (legendIsCategoryDriven(chart.chartType) || chartVariesColorsByPoint(chart)) {
+    return chart.series;
+  }
+  return chart.series.flatMap(series => [series, ...trendlineLegendSeries([series])]);
 }
 
 /** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
@@ -1772,6 +2283,57 @@ interface SecondaryAxisScale {
   makeToY: (py0: number, ph: number) => (v: number) => number;
 }
 
+/** Build the shared calendar/category mapping for every classic chart family
+ * that can be bound to `<c:dateAx>`. Keeping this in one place prevents combo,
+ * line, area and stock renderers from assigning different x coordinates to
+ * the same authored date cache. */
+function chartDateAxisPlan(
+  chart: ChartModel,
+  categories: readonly string[],
+  reversed = catAxisReversed(chart),
+): ReturnType<typeof planDateCategoryAxis> {
+  if (chart.catAxisIsDate !== true) return null;
+  return planDateCategoryAxis({
+    categories,
+    date1904: chart.date1904,
+    baseTimeUnit: chart.catAxisBaseTimeUnit,
+    majorTimeUnit: chart.catAxisMajorTimeUnit,
+    majorUnit: chart.catAxisMajorUnit,
+    minorTimeUnit: chart.catAxisMinorTimeUnit,
+    minorUnit: chart.catAxisMinorUnit,
+    explicitMin: chart.catAxisMin,
+    explicitMax: chart.catAxisMax,
+    crossBetween: isCrossBetween(chart),
+    reversed,
+  });
+}
+
+/** Visit the authored error-bar endpoint values on one numeric axis. The
+ * parser has already expanded percentage/fixed/custom forms into per-point
+ * positive magnitudes, so scale planning only needs the same plus/minus gates
+ * used by paint. */
+function forEachErrorBarEndpoint(
+  series: ChartSeries,
+  direction: 'x' | 'y',
+  baseAt: (index: number) => number | null,
+  visit: (value: number) => void,
+): void {
+  for (const errorBars of series.errBars ?? []) {
+    if (errorBars.dir !== direction) continue;
+    const drawPlus = errorBars.barType === 'plus' || errorBars.barType === 'both';
+    const drawMinus = errorBars.barType === 'minus' || errorBars.barType === 'both';
+    const count = Math.max(series.values.length, errorBars.plus.length, errorBars.minus.length);
+    for (let index = 0; index < count; index++) {
+      const base = baseAt(index);
+      if (base == null || !Number.isFinite(base)) continue;
+      const plus = errorBars.plus[index];
+      const minus = errorBars.minus[index];
+      if (drawPlus && plus != null && Number.isFinite(plus)) visit(base + plus);
+      if (drawMinus && minus != null && Number.isFinite(minus)) visit(base - minus);
+    }
+  }
+}
+
 /** Compute the INDEPENDENT scale of a secondary value axis from the series that
  *  opt into it (`useSecondaryAxis === true`). Shared by every axis family that
  *  supports a secondary axis (bar-combo line series, and plain line / area
@@ -1789,26 +2351,41 @@ function computeSecondaryAxis(
   sec: SecondaryValueAxis | null,
   seriesForSecondary: ChartSeries[],
   plotHeightPt: number,
+  errorBarDirection: 'x' | 'y' = 'y',
+  percentStacked = false,
+  includeZero = false,
 ): SecondaryAxisScale | null {
   if (!sec) return null;
-  function* secondaryValues(): Generator<number | null> {
-    for (const s of seriesForSecondary) {
-      if (s.useSecondaryAxis !== true) continue;
-      yield* s.values;
+  let dMin = Infinity;
+  let dMax = -Infinity;
+  const include = (value: number): void => {
+    if (!Number.isFinite(value)) return;
+    dMin = Math.min(dMin, value);
+    dMax = Math.max(dMax, value);
+  };
+  if (includeZero) include(0);
+  for (const s of seriesForSecondary) {
+    if (s.useSecondaryAxis !== true) continue;
+    for (const value of s.values) {
+      if (value != null) include(value);
     }
+    forEachErrorBarEndpoint(s, errorBarDirection, index => s.values[index] ?? null, include);
   }
-  const { min: dMin, max: dMax } = finiteDataExtent(secondaryValues());
+  if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
+    dMin = 0;
+    dMax = 1;
+  }
   // An explicit `<c:valAx><c:majorUnit>` on the secondary axis (§21.2.2.103)
   // overrides the auto step, mirroring the primary axis. null ⇒ auto.
   const numeric = planNumericValueAxis({
     dataMin: dMin,
     dataMax: dMax,
-    explicitMin: sec.min,
-    explicitMax: sec.max,
+    explicitMin: valueAxisUnitInRendererSpace(sec.min, percentStacked),
+    explicitMax: valueAxisUnitInRendererSpace(sec.max, percentStacked),
     axisLenPt: plotHeightPt,
     axisOrientation: 'vertical',
-    majorUnit: sec.majorUnit,
-    minorUnit: sec.minorUnit,
+    majorUnit: valueAxisUnitInRendererSpace(sec.majorUnit, percentStacked),
+    minorUnit: valueAxisUnitInRendererSpace(sec.minorUnit, percentStacked),
     needMinor: sec.minorGridlines === true
       || (sec.minorTickMark != null && sec.minorTickMark !== 'none'),
     logBase: sec.logBase,
@@ -1882,12 +2459,12 @@ function drawSecondaryValueAxis(
   secLabelBandW: number,
   primaryLabelColor: string,
   date1904: boolean | undefined,
+  percentStacked = false,
 ): void {
   const axX = px0 + pw;
   const { color: secLineColor, width: secLineW } = resolveAxisLine(sec.lineColor, sec.lineWidthEmu, ptToPx);
   if (!sec.lineHidden) {
-    ctx.strokeStyle = secLineColor; ctx.lineWidth = secLineW;
-    ctx.beginPath(); ctx.moveTo(axX, py0); ctx.lineTo(axX, py0 + ph); ctx.stroke();
+    strokeAxisSegment(ctx, axX, py0, axX, py0 + ph, secLineColor, secLineW, sec.lineDash);
   }
   if (!sec.hidden) {
     ctx.font = `${sec.fontItalic ? 'italic ' : ''}${sec.fontBold ? 'bold ' : ''}${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
@@ -1897,14 +2474,23 @@ function drawSecondaryValueAxis(
     for (const sval of secScale.majorLines) {
       const gy = toYSecondary(sval);
       // Same tick geometry as the left axis, mirrored to the right edge.
-      drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden, 'major', ptToPx);
+      drawAxisTick(ctx, sec.majorTickMark, 'val', axX, gy, secLineColor, secLineW, true, sec.lineHidden, 'major', ptToPx, sec.lineDash);
       if (sec.tickLabelPos !== 'none') {
-        ctx.fillText(formatAxisTickWithUnits(sval, sec.formatCode ?? null, date1904, sec.displayUnits), axX + 14, gy);
+        ctx.fillText(
+          formatAxisTickWithUnits(
+            percentStacked ? sval / 100 : sval,
+            sec.formatCode ?? null,
+            date1904,
+            sec.displayUnits,
+          ),
+          axX + 14,
+          gy,
+        );
       }
     }
     if (sec.minorTickMark && sec.minorTickMark !== 'none') {
       for (const value of secScale.minorTicks) {
-        drawAxisTick(ctx, sec.minorTickMark, 'val', axX, toYSecondary(value), secLineColor, secLineW, true, sec.lineHidden, 'minor', ptToPx);
+        drawAxisTick(ctx, sec.minorTickMark, 'val', axX, toYSecondary(value), secLineColor, secLineW, true, sec.lineHidden, 'minor', ptToPx, sec.lineDash);
       }
     }
   }
@@ -1969,19 +2555,19 @@ function drawSecondaryCategoryAxis(
   if (axis.hidden || categories.length === 0) return;
   const { color, width } = resolveAxisLine(axis.lineColor, axis.lineWidthEmu, ptToPx);
   if (!axis.lineHidden) {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.beginPath();
-    ctx.moveTo(px0, py0);
-    ctx.lineTo(px0 + pw, py0);
-    ctx.stroke();
+    strokeAxisSegment(ctx, px0, py0, px0 + pw, py0, color, width, axis.lineDash);
   }
   const reversed = axis.orientation === 'maxMin';
   const labelSkip = Math.max(1, Math.floor(axis.tickLabelSkip ?? 1));
   const markSkip = Math.max(1, Math.floor(axis.tickMarkSkip ?? 1));
   const count = categories.length;
-  const atCenter = (index: number) => px0
-    + ((reversed ? count - 1 - index : index) + 0.5) / count * pw;
+  const labelAnchor = (index: number) => categoryLabelAnchorFraction(
+    index,
+    count,
+    isCrossBetween(chart),
+    reversed,
+    axis.labelAlignment,
+  );
   if (!axis.lineHidden && axis.majorTickMark !== 'none') {
     const onBoundary = isCrossBetween(chart);
     const last = onBoundary ? count : count - 1;
@@ -1992,7 +2578,7 @@ function drawSecondaryCategoryAxis(
         : count === 1 ? 0.5 : logical / (count - 1);
       drawAxisTick(
         ctx, axis.majorTickMark, 'cat', py0, px0 + fraction * pw,
-        color, width, true, axis.lineHidden, 'major', ptToPx,
+        color, width, true, axis.lineHidden, 'major', ptToPx, axis.lineDash,
       );
     }
   }
@@ -2005,14 +2591,19 @@ function drawSecondaryCategoryAxis(
       axis.fontItalic ?? false,
     );
     ctx.fillStyle = axis.fontColor ? `#${axis.fontColor}` : '#555';
-    ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     const budget = Math.max(1, pw / count - 4);
+    const labelGap = categoryLabelOffsetPx(
+      categoryTickLabelGapPx(fontPx),
+      axis.labelOffsetPercent,
+    );
     for (let index = 0; index < count; index += labelSkip) {
+      const anchor = labelAnchor(index);
+      ctx.textAlign = anchor.textAlign;
       ctx.fillText(
         elideToWidth(ctx, formatCategoryLabel(categories[index], axis.formatCode, chart.date1904), budget),
-        atCenter(index),
-        py0 - categoryTickLabelGapPx(fontPx),
+        px0 + anchor.fraction * pw,
+        py0 - labelGap,
       );
     }
   }
@@ -2022,7 +2613,12 @@ function drawSecondaryCategoryAxis(
       ctx,
       axis.title,
       px0 + pw / 2,
-      py0 - (axis.tickLabelPos === 'none' ? 0 : fontPx + categoryTickLabelGapPx(fontPx))
+      py0 - (axis.tickLabelPos === 'none'
+        ? 0
+        : fontPx + categoryLabelOffsetPx(
+          categoryTickLabelGapPx(fontPx),
+          axis.labelOffsetPercent,
+        ))
         - titleFontPx / 2 - 4,
       'horizontal',
       titleFontPx,
@@ -2039,22 +2635,143 @@ function drawSecondaryCategoryAxis(
   }
 }
 
+interface ResolvedTitlePiece {
+  text: string;
+  width: number;
+  font: string;
+  color: string;
+}
+
+interface ResolvedTitleLine {
+  pieces: ResolvedTitlePiece[];
+  width: number;
+  height: number;
+}
+
+function chartTitleRunFont(
+  chart: ChartModel,
+  run: ChartTextRun,
+  fallbackFontSize: number,
+): { font: string; fontSize: number; color: string } {
+  const titleSizePt = chart.titleFontSizeHpt != null
+    && chart.titleFontSizeHpt >= 100
+    && chart.titleFontSizeHpt <= 400_000
+    ? chart.titleFontSizeHpt / 100
+    : 14;
+  const effectivePtToPx = fallbackFontSize / titleSizePt;
+  const fontSize = chartTextFontSizePx(run.fontSizeHpt, effectivePtToPx) ?? fallbackFontSize;
+  const titleFace = resolveThemeFontRef(chart, run.fontFace ?? chart.titleFontFace);
+  const face = titleFace ? `"${titleFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
+  return {
+    font: chartFontCss(
+      fontSize,
+      face,
+      run.bold ?? (chart.titleRichRuns?.length ? false : chart.titleFontBold ?? true),
+      run.italic ?? false,
+    ),
+    fontSize,
+    color: run.color ? `#${run.color}` : chart.titleFontColor ? `#${chart.titleFontColor}` : '#333',
+  };
+}
+
+/** Measure DrawingML title runs against the chart's finite title box. Explicit
+ * newlines remain hard breaks; ordinary whitespace is the only automatic wrap
+ * opportunity, matching DrawingML's default square text wrapping. */
+function resolveChartTitleLines(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  maxWidth: number,
+  fallbackFontSize: number,
+): ResolvedTitleLine[] {
+  const runs: ChartTextRun[] = chart.titleRichRuns?.length
+    ? chart.titleRichRuns
+    : chart.title ? [{ text: chart.title }] : [];
+  const lines: ResolvedTitleLine[] = [{ pieces: [], width: 0, height: fallbackFontSize }];
+  const pushLine = (): ResolvedTitleLine => {
+    const line = { pieces: [], width: 0, height: fallbackFontSize } as ResolvedTitleLine;
+    lines.push(line);
+    return line;
+  };
+  let line = lines[0];
+  for (const run of runs) {
+    const style = chartTitleRunFont(chart, run, fallbackFontSize);
+    for (const token of run.text.split(/(\n|[\t ]+)/).filter(part => part.length > 0)) {
+      if (token === '\n') {
+        line = pushLine();
+        continue;
+      }
+      ctx.font = style.font;
+      const width = ctx.measureText(token).width;
+      const isSpace = /^[\t ]+$/.test(token);
+      if (!isSpace && line.pieces.length > 0 && line.width + width > maxWidth) {
+        line = pushLine();
+      }
+      if (isSpace && line.pieces.length === 0) continue;
+      line.pieces.push({ text: token, width, font: style.font, color: style.color });
+      line.width += width;
+      line.height = Math.max(line.height, style.fontSize);
+    }
+  }
+  return lines;
+}
+
+function measuredCartesianTitleBand(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  w: number,
+  h: number,
+  ptToPx: number,
+): ChartTitleBand {
+  const base = cartesianTitleBand(chart, h, ptToPx);
+  if (base.bandH === 0) return base;
+  if (!chart.titleRichRuns?.length) return base;
+  const previousFont = ctx.font;
+  const lines = resolveChartTitleLines(ctx, chart, Math.max(1, w), base.fontPx);
+  ctx.font = previousFont;
+  const textHeight = lines.reduce((sum, line) => sum + line.height, 0);
+  return {
+    ...base,
+    bandH: base.topPad + textHeight + base.bottomPad,
+  };
+}
+
 function drawChartTitle(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
   x: number, y: number, w: number, fontSize: number,
 ): void {
   if (!chart.title) return;
-  // Resolve a theme-scheme reference (`+mj-lt` / `+mn-lt`) title face; a
-  // concrete face passes through. When no face is set, keep the historical
-  // Calibri/Arial default chain (byte-stable for charts without a title face).
-  const titleFace = resolveThemeFontRef(chart, chart.titleFontFace);
-  const face = titleFace ? `"${titleFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
-  ctx.font = `${(chart.titleFontBold ?? true) ? 'bold ' : ''}${fontSize}px ${face}`;
-  ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333';
-  ctx.textAlign = 'center';
+  // Preserve the established single-fillText path for callers/models without
+  // formatted DrawingML runs. Besides avoiding unnecessary tokenization, this
+  // keeps the public Canvas contract (center-aligned title anchor) unchanged.
+  if (!chart.titleRichRuns?.length) {
+    const titleFace = resolveThemeFontRef(chart, chart.titleFontFace);
+    const face = titleFace
+      ? `"${titleFace}", Calibri, Arial, sans-serif`
+      : 'Calibri, Arial, sans-serif';
+    ctx.font = `${(chart.titleFontBold ?? true) ? 'bold ' : ''}${fontSize}px ${face}`;
+    ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(chart.title, x + w / 2, y);
+    return;
+  }
+  ctx.save();
+  const lines = resolveChartTitleLines(ctx, chart, Math.max(1, w), fontSize);
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  ctx.fillText(chart.title, x + w / 2, y);
+  let lineY = y;
+  for (const line of lines) {
+    let pieceX = x + (w - line.width) / 2;
+    for (const piece of line.pieces) {
+      ctx.font = piece.font;
+      ctx.fillStyle = piece.color;
+      ctx.fillText(piece.text, pieceX, lineY);
+      pieceX += piece.width;
+    }
+    lineY += line.height;
+  }
+  ctx.restore();
 }
 
 /** Draw the title at its authored manual-layout position. Office ignores w/h
@@ -2073,7 +2790,8 @@ function drawChartTitleForLayout(
     const titleFace = resolveThemeFontRef(chart, chart.titleFontFace);
     const face = titleFace ? `"${titleFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
     ctx.font = `${(chart.titleFontBold ?? true) ? 'bold ' : ''}${fontSize}px ${face}`;
-    const autoWidth = ctx.measureText(chart.title).width;
+    const lines = resolveChartTitleLines(ctx, chart, Math.max(1, w), fontSize);
+    const autoWidth = Math.min(w, Math.max(...lines.map(line => line.width), 0));
     const automatic = {
       x: x + (w - autoWidth) / 2,
       y: defaultY,
@@ -2115,6 +2833,20 @@ function dataLabelRectIntersection(a: DataLabelRect, b: DataLabelRect): DataLabe
   return right > x && bottom > y ? { x, y, w: right - x, h: bottom - y } : null;
 }
 
+/** ECMA-376 §21.2.2.180: omission/false suppresses a label whose plotted value
+ * is numerically greater than the effective value-axis maximum. This gate runs
+ * after the shared axis planner has resolved authored and automatic bounds; it
+ * never changes those bounds. */
+function dataLabelWithinAxisMaximum(
+  chart: Pick<ChartModel, 'showDataLabelsOverMax'>,
+  plottedValue: number,
+  axisMaximum: number,
+): boolean {
+  return chart.showDataLabelsOverMax === true
+    || !Number.isFinite(axisMaximum)
+    || plottedValue <= axisMaximum;
+}
+
 /**
  * Draw a bar data label with the ECMA-376 §21.2.2.16 `dLblPos` semantics.
  *
@@ -2139,6 +2871,7 @@ function drawBarDataLabel(
   manualLayout?: ChartDataLabelOverride['manualLayout'],
   negative = false,
   rich?: RichDataLabelOptions,
+  legendKey?: DataLabelLegendKey,
 ): void {
   const rect = orient === 'vertical'
     ? { x: bx, y: by, w: barW, h: barL }
@@ -2153,6 +2886,7 @@ function drawBarDataLabel(
     manualLayout,
     layoutReferenceRect,
     rich,
+    legendKey,
   );
 }
 
@@ -2181,16 +2915,40 @@ function renderBarChart(
     gapPolicy?: CategoryGapPolicy;
     semanticLineNoStyleFallback?: boolean;
   } = {},
+  shapeRotationDeg = 0,
 ): void {
   const { x, y, w, h } = r;
   const isH = chart.chartType === 'clusteredBarH' || chart.chartType === 'stackedBarH' || chart.chartType === 'stackedBarHPct';
   const stacked = chart.chartType.startsWith('stacked');
   const pct = chart.chartType === 'stackedBarPct' || chart.chartType === 'stackedBarHPct';
 
-  const barSeries  = chart.series.filter(s => s.seriesType !== 'line' && s.seriesType !== 'scatter');
+  const allBarSeries = chart.series.filter(s => s.seriesType !== 'line' && s.seriesType !== 'scatter' && s.seriesType !== 'area');
+  const groupIsHorizontal = (series: ChartSeries): boolean => series.barGroupDirection != null
+    ? series.barGroupDirection === 'bar'
+    : isH;
+  // One plot-area coordinate system cannot simultaneously be a horizontal and
+  // vertical bar axis. Preserve each group's authored direction and render the
+  // groups bound to the primary bar group's axes; incompatible overlay groups
+  // remain represented in the model rather than being silently reinterpreted.
+  const barSeries = allBarSeries.filter(series => groupIsHorizontal(series) === isH);
+  const fallbackBarGroupKey = (series: ChartSeries): string =>
+    series.useSecondaryAxis === true ? 'secondary-default' : 'primary-default';
+  const barGroupKey = (series: ChartSeries): string => series.barGroupIndex != null
+    ? `group-${series.barGroupIndex}`
+    : fallbackBarGroupKey(series);
+  const groupGrouping = (series: ChartSeries): string => series.barGroupGrouping
+    ?? (pct ? 'percentStacked' : stacked ? 'stacked' : 'clustered');
+  const groupIsStacked = (series: ChartSeries): boolean => {
+    const grouping = groupGrouping(series);
+    return grouping === 'stacked' || grouping === 'percentStacked';
+  };
+  const groupIsPercent = (series: ChartSeries): boolean =>
+    groupGrouping(series) === 'percentStacked';
   const lineSeries = chart.series.filter(s => s.seriesType === 'line');
+  const areaSeries = chart.series.filter(s => s.seriesType === 'area');
   const scatterSeries = chart.series.filter(s => s.seriesType === 'scatter');
   const sourceSeriesIndices = new Map(chart.series.map((series, index) => [series, index]));
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
 
   // Combo charts (bar + line) may bind the line series to a SECONDARY value
   // axis drawn on the right (ECMA-376 §21.2.2.* — a second `<c:valAx>` with
@@ -2215,6 +2973,36 @@ function renderBarChart(
   const cats = chartCategories(chart);
   const n = cats.length;
   if (n === 0) return;
+  const barGroups = new Map<string, ChartSeries[]>();
+  for (const barSeriesEntry of barSeries) {
+    const key = barGroupKey(barSeriesEntry);
+    const group = barGroups.get(key);
+    if (group) group.push(barSeriesEntry);
+    else barGroups.set(key, [barSeriesEntry]);
+  }
+  const barGroupFor = (series: ChartSeries): ChartSeries[] =>
+    barGroups.get(barGroupKey(series)) ?? [series];
+  const percentDenominator = (series: ChartSeries, categoryIndex: number): number =>
+    barGroupFor(series).reduce(
+      (sum, member) => sum + Math.abs(member.values[categoryIndex] ?? 0),
+      0,
+    ) || 1;
+  const percentFactor = (series: ChartSeries, categoryIndex: number): number =>
+    groupIsPercent(series) ? 100 / percentDenominator(series, categoryIndex) : 1;
+  const effectiveBarErrorBars = (
+    series: ChartSeries,
+  ): NonNullable<ChartSeries['errBars']> => {
+    if (!groupIsPercent(series)) return series.errBars ?? [];
+    return (series.errBars ?? []).map(errorBars => ({
+      ...errorBars,
+      plus: errorBars.plus.map((value, index) => value == null
+        ? value
+        : value * percentFactor(series, index)),
+      minus: errorBars.minus.map((value, index) => value == null
+        ? value
+        : value * percentFactor(series, index)),
+    }));
+  };
 
   // §21.2.2.227 varyColors on a single-series bar: color each bar per DATA
   // POINT (its category index) from the palette/theme sequence instead of the
@@ -2233,27 +3021,30 @@ function renderBarChart(
     chartExSeriesFormatIndex(series, index)
   );
   const isChartExColumn = chart.chartexDataPointStyle != null
-    || chart.chartexColorPalette != null
-    || barSeries.some(series => series.chartexStyle != null);
-  const legendChart: ChartModel = isChartExColumn
-    ? {
-      ...chart,
-      series: barSeries.map((series, index) => {
-        const styleIndex = barStyleIndices[index];
-        const fill = series.color
-          ?? chartExDataPointFill(chart, styleIndex, barSeries.length, series.chartexStyle);
-        return chartExLegendSeries(
-          chart,
-          series.name,
-          series,
-          chart.chartexDataPointStyle,
-          styleIndex,
-          barSeries.length,
-          fill,
-        );
-      }),
-    }
-    : chart;
+    || chart.chartexColorPalette != null;
+  const styledBarLegendSeries = new Map<ChartSeries, ChartSeries>();
+  if (isChartExColumn) {
+    barSeries.forEach((series, index) => {
+      const styleIndex = barStyleIndices[index];
+      const fill = series.color
+        ?? chartExDataPointFill(chart, styleIndex, barSeries.length, series.chartexStyle);
+      styledBarLegendSeries.set(series, chartExLegendSeries(
+        chart,
+        series.name,
+        series,
+        chart.chartexDataPointStyle,
+        styleIndex,
+        barSeries.length,
+        fill,
+      ));
+    });
+  }
+  const legendChart: ChartModel = {
+    ...chart,
+    series: (isChartExColumn ? barSeries : chart.series).map(series =>
+      styledBarLegendSeries.get(series) ?? series
+    ),
+  };
 
   // Honor the parser-resolved title font size when present; otherwise use the
   // shared fixed fallback. Reserve the title band from the actual drawn size
@@ -2262,16 +3053,30 @@ function renderBarChart(
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
   // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
   // side-legend reserve is unchanged.
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
-  const titleFontPx = titleBand.fontPx;
-  const titleTopPad = titleBand.topPad;
-  const titleH = titleBand.bandH;
+  let titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
+  let titleFontPx = titleBand.fontPx;
+  let titleTopPad = titleBand.topPad;
+  let titleH = titleBand.bandH;
   // Axis-label font (XML @sz when set) — sizes the bottom tick-label band the
   // same way the line/area families do.
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxLabelFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const categoryLevels = !isH
+    && !chartHasDataTable(chart)
+    && chart.catAxisNoMultiLevelLabels !== true
+    && (chart.categoryLevels?.length ?? 0) > 1
+    ? chart.categoryLevels!
+    : null;
+  const multiLevelCategoryBandH = categoryLevels
+    ? (categoryLevels.length - 1) * (catAxFontPx + 4)
+    : 0;
+  const hasDataTable = chartHasDataTable(chart);
+  const dataTableBaseH = chartDataTableBaseHeight(chart, ptToPx);
+  const dataTableHeaderW = chartDataTableHeaderWidth(ctx, chart, ptToPx);
   const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   // Axis-title bands sized from the *actual* title font (honoring XML @sz)
   // plus a small gap, so big titles get a wide enough gutter
   // and never collide with the tick labels.
@@ -2303,16 +3108,21 @@ function renderBarChart(
   const secondaryCatFontPx = chartTextFontSizePx(secondaryCat?.fontSizeHpt, ptToPx) ?? 9 * ptToPx;
   const secondaryCatLabelBandH = secondaryCat && !secondaryCat.hidden
     && secondaryCat.tickLabelPos !== 'none'
-    ? secondaryCatFontPx + categoryTickLabelGapPx(secondaryCatFontPx) + 2
+    ? secondaryCatFontPx + categoryLabelOffsetPx(
+      categoryTickLabelGapPx(secondaryCatFontPx),
+      secondaryCat.labelOffsetPercent,
+    ) + 2
     : 0;
   const secondaryCatTitleBandH = secondaryCat?.title
     ? axisTitleFontPx(secondaryCat.titleFontSizeHpt, ptToPx) + 6
     : 0;
-  const padT = titleH + legTopH + valAxLabelFontPx / 2 + 2
+  let padT = titleH + legTopH + valAxLabelFontPx / 2 + 2
     + secondaryCatLabelBandH + secondaryCatTitleBandH;
   const padB = isH
-    ? (chart.valAxisHidden ? h * 0.02 : catAxisLabelBandH(valAxLabelFontPx)) + catTitleH + legBottomH
-    : catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
+    ? (chart.valAxisHidden ? h * 0.02 : catAxisLabelBandH(valAxLabelFontPx))
+      + dataTableBaseH + catTitleH + legBottomH
+    : (hasDataTable ? 0 : catAxisLabelBandH(catAxFontPx, chart.catAxisLabelOffsetPercent))
+      + multiLevelCategoryBandH + dataTableBaseH + catTitleH + legBottomH;
   const phEst = h - padT - padB;
   let horizontalCategoryLabelBandW = 0;
   if (isH && !chart.catAxisHidden && catLabelsVisible(chart)) {
@@ -2323,7 +3133,12 @@ function renderBarChart(
       ? catAxFontPx
       : Math.max(8, Math.min(11, (phEst / n) * 0.5));
     ctx.save();
-    ctx.font = `${measuredHorizontalCatTickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      measuredHorizontalCatTickFontPx,
+      chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+      chart.catAxisFontBold ?? false,
+      chart.catAxisFontItalic ?? false,
+    );
     for (const category of cats) {
       horizontalCategoryLabelBandW = Math.max(
         horizontalCategoryLabelBandW,
@@ -2331,9 +3146,12 @@ function renderBarChart(
       );
     }
     ctx.restore();
-    horizontalCategoryLabelBandW += (chart.catAxisFontSizeHpt != null
-      ? valueTickLabelGapPx(measuredHorizontalCatTickFontPx)
-      : 4) + AXIS_OUTER_TEXT_MARGIN_PT * ptToPx;
+    horizontalCategoryLabelBandW += categoryLabelOffsetPx(
+      chart.catAxisFontSizeHpt != null
+        ? valueTickLabelGapPx(measuredHorizontalCatTickFontPx)
+        : 4,
+      chart.catAxisLabelOffsetPercent,
+    ) + AXIS_OUTER_TEXT_MARGIN_PT * ptToPx;
   }
   // Auto layout keeps at least half of the frame available to the data plot;
   // labels beyond that measured budget are elided at paint time. Authored outer
@@ -2355,6 +3173,29 @@ function renderBarChart(
   // overlay labels.
   const valAxisLenPt = chart.valAxisHidden ? undefined : (isH ? pwEst : phEst) / ptToPx;
 
+  const plottedBarValue = (seriesIndex: number, categoryIndex: number): number => {
+    const owner = barSeries[seriesIndex];
+    const raw = owner?.values[categoryIndex] ?? 0;
+    if (!owner || !groupIsStacked(owner)) return raw;
+    const group = barGroupFor(owner);
+    const percent = groupIsPercent(owner);
+    let denominator = 1;
+    if (percent) {
+      denominator = group.reduce(
+        (sum, series) => sum + Math.abs(series.values[categoryIndex] ?? 0), 0,
+      ) || 1;
+    }
+    const value = percent ? raw / denominator * 100 : raw;
+    let cumulative = 0;
+    const ownerIndex = group.indexOf(owner);
+    for (let index = 0; index <= ownerIndex; index++) {
+      const candidateRaw = group[index]?.values[categoryIndex] ?? 0;
+      const candidate = percent ? candidateRaw / denominator * 100 : candidateRaw;
+      if ((value < 0) === (candidate < 0)) cumulative += candidate;
+    }
+    return cumulative;
+  };
+
   // Value-axis extent. Bars extend from the zero line (the category-axis
   // crossing) toward each value, so the axis must span both the positive and
   // negative reach of the data (ECMA-376 §21.2.2.16 barChart). Negative values
@@ -2363,23 +3204,39 @@ function renderBarChart(
   // and negative contributions on separate sides of the zero line (Excel stacks
   // opposite signs opposite ways), so `dataMax`/`dataMin` come from each
   // category's positive-sum and negative-sum.
+  const primaryPercentAxis = primaryBarSeries.some(groupIsPercent);
   let dataMax = 0;
   let dataMin = 0;
   for (let ci = 0; ci < n; ci++) {
-    let posSum = 0;
-    let negSum = 0;
-    for (const s of primaryBarSeries) {
-      const v = s.values[ci] ?? 0;
-      if (stacked) {
-        if (v >= 0) posSum += v; else negSum += v;
-      } else {
-        dataMax = Math.max(dataMax, v);
-        dataMin = Math.min(dataMin, v);
-      }
+    const primaryGroups = new Map<string, ChartSeries[]>();
+    for (const series of primaryBarSeries) {
+      const key = barGroupKey(series);
+      const members = primaryGroups.get(key);
+      if (members) members.push(series); else primaryGroups.set(key, [series]);
     }
-    if (stacked) {
-      dataMax = Math.max(dataMax, posSum);
-      dataMin = Math.min(dataMin, negSum);
+    for (const members of primaryGroups.values()) {
+      const owner = members[0];
+      const isStackedGroup = groupIsStacked(owner);
+      const isPercentGroup = groupIsPercent(owner);
+      const denominator = isPercentGroup
+        ? members.reduce((sum, series) => sum + Math.abs(series.values[ci] ?? 0), 0) || 1
+        : 1;
+      let posSum = 0;
+      let negSum = 0;
+      for (const series of members) {
+        const raw = series.values[ci] ?? 0;
+        const value = isPercentGroup ? raw / denominator * 100 : raw;
+        if (isStackedGroup) {
+          if (value >= 0) posSum += value; else negSum += value;
+        } else {
+          dataMax = Math.max(dataMax, value);
+          dataMin = Math.min(dataMin, value);
+        }
+      }
+      if (isStackedGroup) {
+        dataMax = Math.max(dataMax, posSum);
+        dataMin = Math.min(dataMin, negSum);
+      }
     }
   }
   // Combo line series plotted on the PRIMARY value axis (a bar+line chart whose
@@ -2389,31 +3246,63 @@ function renderBarChart(
   // regardless of chart type; a tall line point can exceed the bar stack, so
   // sizing to the bars alone would clip the line. The line is an unstacked overlay, so each raw datum widens the range
   // directly. Secondary-axis line series are excluded (they own an independent
-  // scale, mirrored by the `yOf` split below). Skipped for percentStacked, whose
-  // axis is definitionally ±100% (§21.2.2.76). `sec` matches the draw-time gate.
-  if (!pct) {
-    for (const s of lineSeries) {
-      if (sec && s.useSecondaryAxis === true) continue;
-      for (let ci = 0; ci < n; ci++) {
-        const v = s.values[ci];
-        if (v == null) continue;
-        dataMax = Math.max(dataMax, v);
-        dataMin = Math.min(dataMin, v);
-      }
+  // scale, mirrored by the `yOf` split below). `sec` matches the draw-time gate.
+  for (const s of [...lineSeries, ...areaSeries]) {
+    if (sec && s.useSecondaryAxis === true) continue;
+    for (let ci = 0; ci < n; ci++) {
+      const raw = s.values[ci];
+      if (raw == null) continue;
+      const value = primaryPercentAxis ? raw * 100 : raw;
+      dataMax = Math.max(dataMax, value);
+      dataMin = Math.min(dataMin, value);
     }
   }
-  if (pct) {
-    // percentStacked normalizes each category to Σ|v|; the axis spans the
-    // side(s) the data actually reaches (100% up if any positives, -100% down
-    // if any negatives).
-    dataMax = dataMax > 0 ? 100 : 0;
-    dataMin = dataMin < 0 ? -100 : 0;
+
+  // Error bars are part of the plotted value geometry. Their endpoints must
+  // participate in automatic scaling; otherwise a valid endpoint can extend
+  // beyond an axis planned only from the underlying series values.
+  for (const series of primaryBarSeries) {
+    const seriesIndex = barSeries.indexOf(series);
+    for (const errorBars of effectiveBarErrorBars(series)) {
+      forEachErrorBarEndpoint(
+        { ...series, errBars: [errorBars] },
+        isH ? 'x' : 'y',
+        categoryIndex => series.values[categoryIndex] == null
+          ? null
+          : plottedBarValue(seriesIndex, categoryIndex),
+        value => {
+          dataMax = Math.max(dataMax, value);
+          dataMin = Math.min(dataMin, value);
+        },
+      );
+    }
+  }
+  for (const series of [...lineSeries, ...areaSeries]) {
+    if (sec && series.useSecondaryAxis === true) continue;
+    forEachErrorBarEndpoint(
+      series,
+      'y',
+      index => series.values[index] ?? null,
+      value => {
+        const effective = primaryPercentAxis ? value * 100 : value;
+        dataMax = Math.max(dataMax, effective);
+        dataMin = Math.min(dataMin, effective);
+      },
+    );
+  }
+  if (primaryPercentAxis) {
+    if (primaryBarSeries.some(series => series.values.some(value => value != null && value > 0))) {
+      dataMax = Math.max(dataMax, 100);
+    }
+    if (primaryBarSeries.some(series => series.values.some(value => value != null && value < 0))) {
+      dataMin = Math.min(dataMin, -100);
+    }
   }
   if (chart.valMax != null) {
-    dataMax = pct ? chart.valMax * 100 : chart.valMax;
+    dataMax = primaryPercentAxis ? chart.valMax * 100 : chart.valMax;
   }
   if (chart.valMin != null) {
-    dataMin = pct ? chart.valMin * 100 : chart.valMin;
+    dataMin = primaryPercentAxis ? chart.valMin * 100 : chart.valMin;
   }
   if (dataMax === 0 && dataMin === 0) dataMax = 1;
   // `planValueAxis` folds in the CH6 major unit / logBase / orientation; with
@@ -2423,7 +3312,7 @@ function renderBarChart(
     dataMin,
     dataMax,
     valAxisLenPt,
-    pct,
+    primaryPercentAxis,
     isH ? 'horizontal' : 'vertical',
   );
   const { step } = plan;
@@ -2433,7 +3322,54 @@ function renderBarChart(
   // so its length is the plot height. Explicit `<c:scaling>` wins. Computed by
   // the shared `computeSecondaryAxis` helper (same math the line/area families
   // reuse); the fallback keeps the no-secondary path unchanged.
-  const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
+  const renderedBarSeries = new Set(barSeries);
+  const allBarSeriesSet = new Set(allBarSeries);
+  const secondaryPercentAxis = secondaryBarSeries.some(groupIsPercent);
+  const secondaryScaleSeries = chart.series
+    .filter(series => !allBarSeriesSet.has(series) || renderedBarSeries.has(series))
+    .map(series => {
+      if (series.useSecondaryAxis !== true) return series;
+      if (renderedBarSeries.has(series)) {
+        const seriesIndex = barSeries.indexOf(series);
+        return {
+          ...series,
+          values: series.values.map((value, index) => value == null
+            ? value
+            : plottedBarValue(seriesIndex, index)),
+          errBars: effectiveBarErrorBars(series),
+        };
+      }
+      if (!secondaryPercentAxis) return series;
+      return {
+        ...series,
+        values: series.values.map(value => value == null ? value : value * 100),
+        errBars: (series.errBars ?? []).map(errorBars => ({
+          ...errorBars,
+          plus: errorBars.plus.map(value => value == null ? value : value * 100),
+          minus: errorBars.minus.map(value => value == null ? value : value * 100),
+        })),
+      };
+    });
+  if (secondaryPercentAxis && secondaryBarSeries[0]) {
+    const percentBounds: number[] = [];
+    if (secondaryBarSeries.some(series =>
+      series.values.some(value => value != null && value > 0))) percentBounds.push(100);
+    if (secondaryBarSeries.some(series =>
+      series.values.some(value => value != null && value < 0))) percentBounds.push(-100);
+    secondaryScaleSeries.push({
+      ...secondaryBarSeries[0],
+      values: percentBounds,
+      errBars: [],
+    });
+  }
+  const secScale = computeSecondaryAxis(
+    sec,
+    secondaryScaleSeries,
+    phEst / ptToPx,
+    isH ? 'x' : 'y',
+    secondaryPercentAxis,
+    secondaryBarSeries.length > 0,
+  );
 
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const measuredValTickFontPx = chart.valAxisFontSizeHpt != null
@@ -2447,10 +3383,15 @@ function renderBarChart(
   if (!isH && !chart.valAxisHidden) {
     // Measure with the same face the value-axis ticks draw with (below), so the
     // reserved gutter width matches the painted labels when a real face is set.
-    ctx.font = `${measuredValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      measuredValTickFontPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     let wmax = 0;
     for (const val of plan.majorLines) {
-      const label = formatPrimaryValueAxisTick(chart, val, pct);
+      const label = formatPrimaryValueAxisTick(chart, val, primaryPercentAxis);
       wmax = Math.max(wmax, ctx.measureText(label).width);
     }
     valLabelTextW = wmax;
@@ -2466,7 +3407,12 @@ function renderBarChart(
     ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
     for (const value of secScale?.majorLines ?? []) {
-      wmax = Math.max(wmax, ctx.measureText(formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits)).width);
+      wmax = Math.max(wmax, ctx.measureText(formatAxisTickWithUnits(
+        secondaryPercentAxis ? value / 100 : value,
+        sec.formatCode ?? null,
+        chart.date1904,
+        sec.displayUnits,
+      )).width);
     }
     secLabelBandW = wmax + 18;
   }
@@ -2483,8 +3429,11 @@ function renderBarChart(
     // Horizontal bars: keep the wider left band for the category labels
     // (`c:catAx/c:delete val="1"` → no category labels, so tighten).
     l: isH
-      ? (chart.catAxisHidden ? w * 0.03 : automaticHorizontalCategoryLabelBandW) + valTitleW + legLeftW
-      : legLeftW + valTitleW + valLabelBandW,
+      ? legLeftW + Math.max(
+        (chart.catAxisHidden ? w * 0.03 : automaticHorizontalCategoryLabelBandW) + valTitleW,
+        dataTableHeaderW,
+      )
+      : legLeftW + Math.max(valTitleW + valLabelBandW, dataTableHeaderW),
   };
 
   // `layoutTarget="outer"` includes tick labels and axis titles, but not the
@@ -2508,15 +3457,16 @@ function renderBarChart(
           ? valueTickLabelGapPx(measuredValTickFontPx)
           : 12,
         catLabelGapPx: chart.catAxisFontSizeHpt != null
-          ? categoryTickLabelGapPx(catAxFontPx)
-          : 3,
+          ? categoryLabelOffsetPx(
+            categoryTickLabelGapPx(catAxFontPx),
+            chart.catAxisLabelOffsetPercent,
+          )
+          : categoryLabelOffsetPx(3, chart.catAxisLabelOffsetPercent),
         outerTextMarginPx: AXIS_OUTER_TEXT_MARGIN_PT * ptToPx,
         valTitleBandW: valTitleW,
         catTitleBandH: catTitleH,
         secondaryBandW: secLabelBandW + secTitleBandW,
       });
-
-  drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
   // Plot-area placement: honor `<c:plotArea><c:layout><c:manualLayout>` when
   // present (ECMA-376 §21.2.2.32). Templates use this to keep bars from
@@ -2526,7 +3476,7 @@ function renderBarChart(
   // data region; "outer" includes axes/labels. We treat both identically
   // because the inner padding stays the same either way. computeChartFrame
   // applies the pad → plot rect and the manual-layout override.
-  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+  let frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     // The cartesian title band is already folded into `pad.t`; pass it so
     // `frame.title` (if read) matches the reserved band instead of a stale frac.
     titleBand,
@@ -2536,9 +3486,48 @@ function renderBarChart(
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
   });
+  const plotWidthTitleBand = measuredCartesianTitleBand(
+    ctx,
+    chart,
+    frame.plotRect.pw,
+    h,
+    ptToPx,
+  );
+  if (Math.abs(plotWidthTitleBand.bandH - titleBand.bandH) > 0.01) {
+    titleBand = plotWidthTitleBand;
+    titleFontPx = titleBand.fontPx;
+    titleTopPad = titleBand.topPad;
+    titleH = titleBand.bandH;
+    padT = titleH + legTopH + valAxLabelFontPx / 2 + 2
+      + secondaryCatLabelBandH + secondaryCatTitleBandH;
+    pad.t = padT;
+    frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+      titleBand,
+      legendSideReserveFrac: 0.22,
+      legendReserve: leg,
+      pad,
+      honorPlotAreaManualLayout: true,
+      manualOuterInsets,
+    });
+  }
   const { px0, py0, pw } = frame.plotRect;
   let { ph } = frame.plotRect;
+  drawChartTitleForLayout(
+    ctx, chart,
+    chart.titleManualLayout || !chart.titleRichRuns?.length ? x : px0, y,
+    chart.titleManualLayout || !chart.titleRichRuns?.length ? w : pw, h,
+    y + titleTopPad, titleFontPx,
+  );
   if (pw <= 0 || ph <= 0) return;
+
+  // Horizontal bar categories run from bottom to top by default in the
+  // existing category-slot contract; preserve that orientation while using
+  // the same calendar coordinate plan as every other date-axis family.
+  const dateAxisPlan = chartDateAxisPlan(
+    chart,
+    cats,
+    isH ? !catAxisReversed(chart) : catAxisReversed(chart),
+  );
 
   // Horizontal DrawingML category text (`wrap="square"`) wraps within its
   // category slot. Measure the complete strings with the actual tick font and
@@ -2548,7 +3537,8 @@ function renderBarChart(
   // lines so they remain inside the chart frame.
   const catLabelRotation = catLabelRotationRad(chart);
   const wrappedColumnCategories: string[][] = [];
-  if (!isH && !chart.catAxisHidden && catLabelsVisible(chart) && catLabelRotation === 0) {
+  let wrappedCategoryExtraH = 0;
+  if (!hasDataTable && !isH && !dateAxisPlan && !chart.catAxisHidden && catLabelsVisible(chart) && catLabelRotation === 0) {
     const slotW = pw / n;
     const wrapFontPx = chart.catAxisFontSizeHpt != null
       ? catAxFontPx
@@ -2578,14 +3568,19 @@ function renderBarChart(
     const manualInner = chart.plotAreaManualLayout?.layoutTarget === 'inner' &&
       chart.plotAreaManualLayout.w != null && chart.plotAreaManualLayout.h != null;
     if (!manualInner && maxLines > 1) {
-      ph = Math.max(1, ph - (maxLines - 1) * (wrapFontPx + 2));
+      wrappedCategoryExtraH = (maxLines - 1) * (wrapFontPx + 2);
+      ph = Math.max(1, ph - wrappedCategoryExtraH);
     }
   }
 
-  if (chart.plotAreaBg) {
-    ctx.fillStyle = `#${chart.plotAreaBg}`;
-    ctx.fillRect(px0, py0, pw, ph);
+  const dataTableLayout = hasDataTable
+    ? measureChartDataTable(ctx, chart, pw / n, ptToPx)
+    : null;
+  if (dataTableLayout && dataTableLayout.totalHeight > dataTableBaseH) {
+    ph = Math.max(1, ph - (dataTableLayout.totalHeight - dataTableBaseH));
   }
+
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
   // `axMax`/`step` (primary) and `sMin`/`sMax`/`sStep` (secondary) were computed
   // above the `pad` block so the gutters could be sized to the labels. The
@@ -2601,12 +3596,15 @@ function renderBarChart(
   const valX = (v: number): number => px0 + plan.frac(v) * pw;
   const zeroY = valY(0); // column zero line
   const zeroX = valX(0); // horizontal-bar zero line
-  const toYPrimaryLine = valY;
+  const toYPrimaryLine = (value: number): number =>
+    valY(primaryPercentAxis ? value * 100 : value);
   // Secondary line series map through the shared scale's factory (identical to
   // the old inline `py0 + ph - ((v - sMin) / sRange) * ph`; `makeToY` uses the
   // same `(max - min) || 1` range). Falls back to the primary map when there is
   // no secondary axis so `toYSecondary` stays callable.
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : valY;
+  const toYSecondarySeries = (value: number): number =>
+    toYSecondary(secondaryPercentAxis ? value * 100 : value);
 
   // Resolved value-axis gridline stroke (`<c:majorGridlines><c:spPr><a:ln>` or
   // the faint `#e0e0e0`/0.5 px default). The vertical (horizontal-bar) path
@@ -2616,7 +3614,12 @@ function renderBarChart(
   const drawnValTickFontPx = chart.valAxisFontSizeHpt != null
     ? valAxLabelFontPx
     : Math.max(8, Math.min(11, ph / 20));
-  ctx.font = `${drawnValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+  ctx.font = chartFontCss(
+    drawnValTickFontPx,
+    chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+    chart.valAxisFontBold ?? false,
+    chart.valAxisFontItalic ?? false,
+  );
   // Honor `<c:valAx><c:txPr>…<a:solidFill>` when present (ECMA-376 §21.2.2.*);
   // otherwise keep the neutral gray default.
   const valLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
@@ -2643,7 +3646,7 @@ function renderBarChart(
       // The zero line is the emphasized gridline (`si === 0` was that line only
       // while the axis was anchored at 0; with a negative minimum it moves up).
       const isZero = Math.abs(val) < step * 1e-9;
-      const label = formatPrimaryValueAxisTick(chart, val, pct);
+      const label = formatPrimaryValueAxisTick(chart, val, primaryPercentAxis);
       if (!isH) {
         const gy = valY(val);
         if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, isZero, grid);
@@ -2696,7 +3699,10 @@ function renderBarChart(
     ctx.lineWidth = cg.width;
     const previousDash = cg.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
     if (cg.dash.length > 0) ctx.setLineDash(cg.dash);
-    for (const frac of catGridlineFractions(chart, n)) {
+    const gridlineFractions = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => tick.fraction)
+      : catGridlineFractions(chart, n);
+    for (const frac of gridlineFractions) {
       ctx.beginPath();
       if (!isH) {
         const gx = px0 + frac * pw;
@@ -2724,22 +3730,31 @@ function renderBarChart(
   // is scaled to canvas px by `ptToPx`. See `resolveAxisLine`.
   const { color: catLineColor, width: catLineW } = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
   const { color: valLineColor, width: valLineW } = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
-  const strokeAxis = (x1: number, y1: number, x2: number, y2: number, color: string, lw: number): void => {
-    ctx.strokeStyle = color; ctx.lineWidth = lw;
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-  };
   const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
   const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden && chart.valAxisLineColor != null;
+  const primaryCatCrossValue = categoryAxisCrossingValue(chart, plan.min, plan.max);
+  const primaryCatAxisY = !isH ? valY(primaryCatCrossValue) : py0 + ph;
+  const primaryCatAxisX = isH ? valX(primaryCatCrossValue) : px0;
+  const categoryLabelAxisY = !isH && (chart.catAxisTickLabelPos ?? 'nextTo') === 'nextTo'
+    ? primaryCatAxisY
+    : py0 + ph;
+  const catMajorTickSkip = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
+  const multiLevelBoundariesOwnMajorTicks = !isH
+    && categoryLevels != null
+    && dateAxisPlan == null
+    && !chart.catAxisLineHidden
+    && isCrossBetween(chart)
+    && Math.abs(categoryLabelAxisY - primaryCatAxisY) < 0.01;
   // Axis rules + tick marks are drawn AFTER the bars/line (see `drawAxesOnTop`
   // below) so the bars don't paint over the category baseline — PowerPoint
   // keeps the axis line crisp on top of the columns.
   const drawAxesOnTop = (): void => {
     if (!isH) {
-      if (drawCatLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, catLineColor, catLineW); // bottom
-      if (drawValLine) strokeAxis(px0, py0, px0, py0 + ph, valLineColor, valLineW);           // left
+      if (drawCatLine) strokeAxisSegment(ctx, px0, primaryCatAxisY, px0 + pw, primaryCatAxisY, catLineColor, catLineW, chart.catAxisLineDash);
+      if (drawValLine) strokeAxisSegment(ctx, px0, py0, px0, py0 + ph, valLineColor, valLineW, chart.valAxisLineDash);           // left
     } else {
-      if (drawCatLine) strokeAxis(px0, py0, px0, py0 + ph, catLineColor, catLineW);           // left
-      if (drawValLine) strokeAxis(px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW); // bottom
+      if (drawCatLine) strokeAxisSegment(ctx, primaryCatAxisX, py0, primaryCatAxisX, py0 + ph, catLineColor, catLineW, chart.catAxisLineDash);
+      if (drawValLine) strokeAxisSegment(ctx, px0, py0 + ph, px0 + pw, py0 + ph, valLineColor, valLineW, chart.valAxisLineDash); // bottom
     }
 
     // Axis major tick marks (`<c:*Ax><c:majorTickMark>` — ECMA-376 §21.2.2.101).
@@ -2752,33 +3767,57 @@ function renderBarChart(
     if (!chart.valAxisHidden && chart.valAxisMajorTickMark && chart.valAxisMajorTickMark !== 'none') {
       for (const val of plan.majorLines) {
         if (!isH) {
-          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, valY(val), valLineColor, valLineW, false, chart.valAxisLineHidden, 'major', ptToPx);
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, valY(val), valLineColor, valLineW, false, chart.valAxisLineHidden, 'major', ptToPx, chart.valAxisLineDash);
         } else {
-          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, valX(val), valLineColor, valLineW, false, chart.valAxisLineHidden, 'major', ptToPx);
+          drawAxisTick(ctx, chart.valAxisMajorTickMark, 'cat', py0 + ph, valX(val), valLineColor, valLineW, false, chart.valAxisLineHidden, 'major', ptToPx, chart.valAxisLineDash);
         }
       }
     }
     if (!chart.valAxisHidden && chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
       for (const value of plan.minorTicks) {
         if (!isH) {
-          drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, valY(value), valLineColor, valLineW, false, chart.valAxisLineHidden, 'minor', ptToPx);
+          drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, valY(value), valLineColor, valLineW, false, chart.valAxisLineHidden, 'minor', ptToPx, chart.valAxisLineDash);
         } else {
-          drawAxisTick(ctx, chart.valAxisMinorTickMark, 'cat', py0 + ph, valX(value), valLineColor, valLineW, false, chart.valAxisLineHidden, 'minor', ptToPx);
+          drawAxisTick(ctx, chart.valAxisMinorTickMark, 'cat', py0 + ph, valX(value), valLineColor, valLineW, false, chart.valAxisLineHidden, 'minor', ptToPx, chart.valAxisLineDash);
         }
       }
     }
-    // Category ticks sit at band BOUNDARIES with crossBetween="between" (the
-    // bar/column default) — the dividers between Q1|Q2|Q3|Q4 (n+1 ticks) — and
-    // at category centers under "midCat".
+    // Category-axis major ticks share the major-grid positions: with
+    // crossBetween="between" they mark the N+1 interval boundaries, while
+    // labels and minor ticks sit at the N category centres. This distinction
+    // matters when both levels use `cross`: Office's 6pt major boundary marks
+    // remain visibly longer than its 4pt centred minor marks.
     if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
-      const onBoundary = isCrossBetween(chart);
-      const last = onBoundary ? n : n - 1;
-      for (let ci = 0; ci <= last; ci++) {
-        const frac = onBoundary ? ci / n : (n === 1 ? 0.5 : ci / (n - 1));
+      // Multi-level category brackets already occupy every interval boundary.
+      // They absorb the coincident major tick into one continuous stroke below,
+      // avoiding darker/thicker Canvas seams from painting the same segment
+      // twice. Mid-category ticks remain independent of those boundaries.
+      const ordinalFractions = multiLevelBoundariesOwnMajorTicks
+        ? []
+        : catGridlineFractions(chart, n);
+      const tickFractions = dateAxisPlan
+        ? dateAxisPlan.majorTicks.map(tick => tick.fraction)
+        : ordinalFractions.filter((_, index) => index % catMajorTickSkip === 0);
+      for (const frac of tickFractions) {
         if (!isH) {
-          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + frac * pw, catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx);
+          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', primaryCatAxisY, px0 + frac * pw, catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
         } else {
-          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', px0, py0 + frac * ph, catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx);
+          drawAxisTick(ctx, chart.catAxisMajorTickMark, 'val', primaryCatAxisX, py0 + frac * ph, catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
+        }
+      }
+    }
+    if (!chart.catAxisHidden && chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none') {
+      const ordinalFractions = isCrossBetween(chart)
+        ? Array.from({ length: n }, (_, ci) => (ci + 0.5) / n)
+        : Array.from({ length: Math.max(0, n - 1) }, (_, ci) => (ci + 0.5) / (n - 1));
+      const tickFractions = dateAxisPlan
+        ? dateAxisPlan.minorTicks.map(tick => tick.fraction)
+        : ordinalFractions;
+      for (const frac of tickFractions) {
+        if (!isH) {
+          drawAxisTick(ctx, chart.catAxisMinorTickMark, 'cat', primaryCatAxisY, px0 + frac * pw, catLineColor, catLineW, false, chart.catAxisLineHidden, 'minor', ptToPx, chart.catAxisLineDash);
+        } else {
+          drawAxisTick(ctx, chart.catAxisMinorTickMark, 'val', primaryCatAxisX, py0 + frac * ph, catLineColor, catLineW, false, chart.catAxisLineHidden, 'minor', ptToPx, chart.catAxisLineDash);
         }
       }
     }
@@ -2798,39 +3837,164 @@ function renderBarChart(
   const categorySlotIndex = (ci: number): number => isH
     ? (catRev ? ci : n - 1 - ci)
     : (catRev ? n - 1 - ci : ci);
-  const overlapPct  = stacked ? 0 : (chart.barOverlap ?? 0);
-  const gapWidthPct = resolveCategoryGapWidthPercent(
-    chart.barGapWidth,
-    options.gapPolicy ?? 'legacy',
-  );
-  const clusterGeometry = (seriesCount: number) => {
-    const effective = stacked ? 1 : Math.max(1, seriesCount);
+  const categoryBandSize = (ci: number): number => dateAxisPlan
+    ? dateAxisPlan.categoryBandFractions[ci]! * (isH ? ph : pw)
+    : catGap;
+  const categoryStart = (ci: number): number => dateAxisPlan
+    ? (isH ? py0 : px0)
+      + dateAxisPlan.positions[ci]! * (isH ? ph : pw)
+      - categoryBandSize(ci) / 2
+    : (!isH ? px0 : py0) + categorySlotIndex(ci) * catGap;
+  const categoryCenterX = (ci: number): number => dateAxisPlan
+    ? px0 + dateAxisPlan.positions[ci]! * pw
+    : px0 + categorySlotIndex(ci) * catGap + catGap / 2;
+  const clusterGeometry = (group: readonly ChartSeries[], categorySize: number) => {
+    const owner = group[0];
+    const isStackedGroup = owner ? groupIsStacked(owner) : stacked;
+    const effective = isStackedGroup ? 1 : Math.max(1, group.length);
+    const rawOverlap = owner?.barGroupOverlap ?? chart.barOverlap ?? 0;
+    const overlapPct = isStackedGroup || !Number.isFinite(rawOverlap)
+      ? 0
+      : Math.max(-100, Math.min(100, rawOverlap));
+    const gapWidthPct = resolveCategoryGapWidthPercent(
+      owner?.barGroupGapWidth ?? chart.barGapWidth,
+      options.gapPolicy ?? 'legacy',
+    );
     const denom = 1 + (effective - 1) * (1 - overlapPct / 100) + gapWidthPct / 100;
-    const barW = catGap / denom;
-    const clusterGap = stacked ? 0 : barW * (1 - overlapPct / 100);
+    const barW = categorySize / denom;
+    const clusterGap = isStackedGroup ? 0 : barW * (1 - overlapPct / 100);
     const clusterWidth = barW + (effective - 1) * clusterGap;
-    return { barW, clusterGap, catStart: (catGap - clusterWidth) / 2 };
+    return { barW, clusterGap, catStart: (categorySize - clusterWidth) / 2 };
   };
-  const primaryCluster = clusterGeometry(primaryBarSeries.length);
-  const secondaryCluster = clusterGeometry(secondaryBarSeries.length);
+  type BarSeriesLinePoint = {
+    categoryStart: number;
+    categoryEnd: number;
+    valueEnd: number;
+  };
+  const hasVerifiedBarSeriesLines = (chart.barGroupDecorations ?? []).some(
+    decoration => decoration.seriesLines?.length === 1,
+  );
+  const barSeriesLinePoints: Array<Array<BarSeriesLinePoint | null>> | null =
+    hasVerifiedBarSeriesLines
+      ? barSeries.map(() => new Array<BarSeriesLinePoint | null>(n).fill(null))
+      : null;
+
+  // A classic combo chart may place an `<c:areaChart>` group behind a
+  // `<c:barChart>` group. Area series are not bars: they share the category
+  // coordinate system, map through their bound value axis, and fill from the
+  // zero baseline to their authored top edge. Paint them before columns so the
+  // later bar group remains visible, matching Excel's foreground columns for
+  // this mixed-family layout.
+  for (let si = 0; si < areaSeries.length; si++) {
+    const series = areaSeries[si];
+    const pointOverrides = indexPointOverrides(series.dataPointOverrides);
+    const color = chartColor(sourceSeriesIndices.get(series) ?? si, series);
+    const yOf = sec && series.useSecondaryAxis === true
+      ? toYSecondarySeries
+      : toYPrimaryLine;
+    const baselineY = yOf(0);
+    const dispBlanks = chart.dispBlanksAs ?? 'zero';
+    let run: Array<{ x: number; y: number }> = [];
+    const paintRun = (): void => {
+      if (run.length === 0) return;
+      if (dateAxisPlan) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(px0, py0, pw, ph);
+        ctx.clip();
+      }
+      ctx.beginPath();
+      ctx.moveTo(run[0].x, baselineY);
+      ctx.lineTo(run[0].x, run[0].y);
+      appendCurve(ctx, run, false);
+      ctx.lineTo(run[run.length - 1].x, baselineY);
+      ctx.closePath();
+      ctx.fillStyle = series.fillPattern
+        ? (resolveFill(
+          series.fillPattern,
+          ctx,
+          run[0].x,
+          py0,
+          Math.max(1, run[run.length - 1].x - run[0].x),
+          ph,
+        ) ?? color)
+        : color;
+      ctx.fill();
+      if (series.lineHidden !== true) {
+        ctx.strokeStyle = series.lineColor ? `#${series.lineColor}` : color;
+        ctx.lineWidth = series.lineWidthEmu != null
+          ? axisLineWidthPx(series.lineWidthEmu, ptToPx)
+          : 1.5;
+        ctx.setLineDash([]);
+        ctx.stroke();
+      }
+      if (dateAxisPlan) ctx.restore();
+      run = [];
+    };
+    for (let ci = 0; ci < n; ci++) {
+      const value = series.values[ci];
+      if (value == null) {
+        if (dispBlanks === 'gap') paintRun();
+        if (dispBlanks !== 'zero') continue;
+      }
+      run.push({ x: categoryCenterX(ci), y: yOf(value ?? 0) });
+    }
+    paintRun();
+
+    const seriesMarkersVisible = (series.showMarker === true || seriesHasMarkerDetail(series))
+      && series.markerSymbol !== 'none';
+    if (seriesMarkersVisible || hasVisiblePointMarkerOverride(series)) {
+      const markerRadius = Math.max(2, 2.5 * ptToPx);
+      for (let ci = 0; ci < n; ci++) {
+        const value = series.values[ci];
+        if (value == null) continue;
+        const point = pointOverrides.get(ci);
+        const symbol = effectiveMarkerSymbol(series, point, 'circle', seriesMarkersVisible);
+        if (symbol === 'none') continue;
+        const markerX = categoryCenterX(ci);
+        const markerY = yOf(value);
+        if (seriesHasMarkerDetail(series)) {
+          const lineWidthEmu = point?.markerLineWidthEmu ?? series.markerLineWidthEmu;
+          drawMarker(
+            ctx, markerX, markerY, symbol,
+            point?.markerSize ?? series.markerSize ?? 5,
+            markerFillColorFor(series, point, ci, color),
+            point?.markerLine ?? series.markerLine ?? null,
+            ptToPx,
+            lineWidthEmu != null ? axisLineWidthPx(lineWidthEmu, ptToPx) : undefined,
+            markerFillPaintFor(series, point, ci),
+            shapeRotationDeg,
+          );
+        } else {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(markerX, markerY, markerRadius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
 
   for (let ci = 0; ci < n; ci++) {
     // Stacked charts accumulate positive and negative contributions on opposite
     // sides of the zero line, so each category tracks two running offsets.
-    let posOffset = 0;
-    let negOffset = 0;
-    let stackSum = 0;
-    if (pct) {
-      for (const s of barSeries) stackSum += Math.abs(s.values[ci] ?? 0);
-      if (stackSum === 0) stackSum = 1;
-    }
-
+    const positiveOffsets = new Map<string, number>();
+    const negativeOffsets = new Map<string, number>();
+    const categorySize = categoryBandSize(ci);
     for (let si = 0; si < barSeries.length; si++) {
       const s = barSeries[si];
       const secondary = sec != null && s.useSecondaryAxis === true;
-      const group = secondary ? secondaryBarSeries : primaryBarSeries;
+      const group = barGroupFor(s);
+      const groupKey = barGroupKey(s);
+      const isStackedGroup = groupIsStacked(s);
+      const isPercentGroup = groupIsPercent(s);
+      const stackSum = isPercentGroup
+        ? group.reduce((sum, member) => sum + Math.abs(member.values[ci] ?? 0), 0) || 1
+        : 1;
+      const posOffset = positiveOffsets.get(groupKey) ?? 0;
+      const negOffset = negativeOffsets.get(groupKey) ?? 0;
       const groupIndex = Math.max(0, group.indexOf(s));
-      const { barW, clusterGap, catStart } = secondary ? secondaryCluster : primaryCluster;
+      const { barW, clusterGap, catStart } = clusterGeometry(group, categorySize);
       const valueY = secondary && secScale ? secScale.makeToY(py0, ph) : valY;
       // `<c:catAx><c:crosses>` locates the category axis on its paired value
       // axis (ECMA-376 §21.2.2.33/.34). A secondary top axis commonly uses
@@ -2850,8 +4014,14 @@ function renderBarChart(
       const raw = s.values[ci] ?? 0;
       // Signed value in axis units (percent keeps its sign — a negative slice of
       // a percentStacked chart reaches below the zero line).
-      const sv = pct ? (raw / stackSum) * 100 : raw;
+      const sv = isPercentGroup ? (raw / stackSum) * 100 : raw;
       const negative = sv < 0;
+      const plottedLabelValue = isStackedGroup
+        ? (negative ? negOffset : posOffset) + sv
+        : sv;
+      const labelAxisMaximum = secondary && secScale ? secScale.max : plan.max;
+      const useNegativeStyle = negative
+        && (s.invertIfNegative === true || s.automaticNegativeStyle === true);
       // A `<c:dPt>` fill is an explicit point override regardless of the
       // chart-group `varyColors` flag (§21.2.2.52). varyColors only controls
       // the fallback palette for points without an override.
@@ -2860,10 +4030,17 @@ function renderBarChart(
       const color = pointColor
         ? `#${pointColor}`
         : varyByPoint ? pieSliceColor(ci, s) : chartColor(si, s);
+      const invertedPaint = useNegativeStyle
+        ? s.invertedFillHidden === true
+          ? null
+          : s.invertedFill
+        : undefined;
       const pointPaint = pointOverride?.fillHidden
         ? null
         : pointOverride?.color
           ? { fillType: 'solid' as const, color: pointOverride.color }
+          : invertedPaint !== undefined
+            ? invertedPaint
           : isChartExColumn
             // MS-ODRAWXML §2.8.4.5: styleClr="auto" uses the relative
             // index of the styled element. A clustered-column dataPoint style
@@ -2892,7 +4069,17 @@ function renderBarChart(
             : s.lineWidthEmu != null
               ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
               : 1;
-          ctx.setLineDash(dashPatternForPreset(pointOverride?.lineDash));
+          ctx.setLineDash(dashPatternForPreset(pointOverride?.lineDash, ctx.lineWidth));
+          return true;
+        }
+        if (useNegativeStyle
+          && (s.invertedLineHidden != null
+            || s.invertedLineColor != null
+            || s.invertedLineWidthEmu != null)) {
+          if (s.invertedLineHidden) return false;
+          ctx.strokeStyle = `#${s.invertedLineColor ?? '000000'}`;
+          ctx.lineWidth = axisLineWidthPx(s.invertedLineWidthEmu, ptToPx);
+          ctx.setLineDash([]);
           return true;
         }
         if (isChartExColumn) {
@@ -2909,17 +4096,30 @@ function renderBarChart(
       };
 
       if (!isH) {
-        const bx = stacked
-          ? px0 + categorySlotIndex(ci) * catGap + catStart
-          : px0 + categorySlotIndex(ci) * catGap + catStart + groupIndex * clusterGap;
+        const bx = isStackedGroup
+          ? categoryStart(ci) + catStart
+          : categoryStart(ci) + catStart + groupIndex * clusterGap;
+        // A date axis can explicitly crop categories through min/max. Marks
+        // wholly outside that authored plot interval do not bleed into the
+        // value-axis/title gutter.
+        if (bx + barW <= px0 || bx >= px0 + pw) continue;
         // Column: the bar spans between the zero line and the value. Stacked
         // bars start at the running offset for their sign; clustered bars start
         // at the zero line.
-        const y0 = stacked ? valY(negative ? negOffset : posOffset) : groupZeroY;
-        const y1 = stacked ? valY((negative ? negOffset : posOffset) + sv) : valueY(sv);
+        const y0 = isStackedGroup ? valueY(negative ? negOffset : posOffset) : groupZeroY;
+        const y1 = isStackedGroup
+          ? valueY((negative ? negOffset : posOffset) + sv)
+          : valueY(sv);
         const by = clamp(Math.min(y0, y1), py0, py0 + ph);
         const barBottom = clamp(Math.max(y0, y1), py0, py0 + ph);
         const barH = Math.max(0, barBottom - by);
+        if (barSeriesLinePoints && s.values[ci] != null) {
+          barSeriesLinePoints[si][ci] = {
+            categoryStart: bx,
+            categoryEnd: bx + barW,
+            valueEnd: clamp(y1, py0, py0 + ph),
+          };
+        }
         if (pointPaint !== null) {
           ctx.fillStyle = pointPaint
             ? chartExFillStyle(ctx, pointPaint, bx, by, barW, barH, color)
@@ -2942,15 +4142,15 @@ function renderBarChart(
           chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', raw,
           {
             visible: chart.showDataLabels,
-            showVal: chart.showDataLabels && !pct,
-            showPercent: chart.showDataLabels && pct,
+            showVal: chart.showDataLabels && !isPercentGroup,
+            showPercent: chart.showDataLabels && isPercentGroup,
             showCatName: false,
           },
           labelOverrides[si],
-          pct ? sv / 100 : undefined,
+          isPercentGroup ? sv / 100 : undefined,
           s.useSecondaryAxis && sec ? sec.displayUnits : chart.valAxisDisplayUnits,
         );
-        if (label) {
+        if (label && dataLabelWithinAxisMaximum(chart, plottedLabelValue, labelAxisMaximum)) {
           // ECMA-376 §21.2.2.30 / §21.1.2.3.2 — data label font size comes from
           // `<c:dLbls><c:txPr>...<a:defRPr@sz>` (hundredths of a point). When
           // the file specifies one we honor it; otherwise the proportional
@@ -2976,7 +4176,7 @@ function renderBarChart(
             ctx, label.text,
             bx, by, barH, barW,
             'vertical',
-            label.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
+            label.position ?? chart.dataLabelPosition ?? (isStackedGroup ? 'ctr' : null),
             s.dataLabelColors?.[ci] ?? label.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
             lsz,
             { x: px0, y: py0, w: pw, h: ph },
@@ -2990,21 +4190,32 @@ function renderBarChart(
               labelFont,
               bold,
             ),
+            label.showLegendKey
+              ? dataLabelLegendKey(sourceSeriesIndices.get(s) ?? si, ci)
+              : undefined,
           );
         }
       } else {
-        // Series order is also the visual top-to-bottom order inside each
-        // horizontal cluster. This keeps order=0 aligned with the first legend
-        // entry, as Excel does for clustered horizontal bars.
-        const siVisual = si;
-        const by = stacked
-          ? py0 + categorySlotIndex(ci) * catGap + catStart
-          : py0 + categorySlotIndex(ci) * catGap + catStart + siVisual * clusterGap;
-        const x0 = stacked ? valX(negative ? negOffset : posOffset) : zeroX;
-        const x1 = stacked ? valX((negative ? negOffset : posOffset) + sv) : valX(sv);
+        // Cluster positions are local to the owning `<c:barChart>` group.
+        // A second overlay group restarts at its own first bar; using the
+        // flattened plot-area series index pushes it outside the category
+        // slot when preceding groups contain more series.
+        const siVisual = groupIndex;
+        const by = isStackedGroup
+          ? categoryStart(ci) + catStart
+          : categoryStart(ci) + catStart + siVisual * clusterGap;
+        const x0 = isStackedGroup ? valX(negative ? negOffset : posOffset) : zeroX;
+        const x1 = isStackedGroup ? valX((negative ? negOffset : posOffset) + sv) : valX(sv);
         const bx = clamp(Math.min(x0, x1), px0, px0 + pw);
         const barRight = clamp(Math.max(x0, x1), px0, px0 + pw);
         const barL = Math.max(0, barRight - bx);
+        if (barSeriesLinePoints && s.values[ci] != null) {
+          barSeriesLinePoints[si][ci] = {
+            categoryStart: by,
+            categoryEnd: by + barW,
+            valueEnd: clamp(x1, px0, px0 + pw),
+          };
+        }
         if (pointPaint !== null) {
           ctx.fillStyle = pointPaint
             ? chartExFillStyle(ctx, pointPaint, bx, by, barL, barW, color)
@@ -3027,15 +4238,15 @@ function renderBarChart(
           chart, s, ci, s.categories?.[ci] ?? cats[ci] ?? '', raw,
           {
             visible: chart.showDataLabels,
-            showVal: chart.showDataLabels && !pct,
-            showPercent: chart.showDataLabels && pct,
+            showVal: chart.showDataLabels && !isPercentGroup,
+            showPercent: chart.showDataLabels && isPercentGroup,
             showCatName: false,
           },
           labelOverrides[si],
-          pct ? sv / 100 : undefined,
+          isPercentGroup ? sv / 100 : undefined,
           s.useSecondaryAxis && sec ? sec.displayUnits : chart.valAxisDisplayUnits,
         );
-        if (label) {
+        if (label && dataLabelWithinAxisMaximum(chart, plottedLabelValue, labelAxisMaximum)) {
           const sizeHpt = label.fontSizeHpt ?? chart.dataLabelFontSizeHpt;
           const lsz = chartTextFontSizePx(sizeHpt, ptToPx)
             ?? Math.max(7, Math.min(11, barW * 0.6));
@@ -3050,7 +4261,7 @@ function renderBarChart(
             ctx, label.text,
             bx, by, barL, barW,
             'horizontal',
-            label.position ?? chart.dataLabelPosition ?? (stacked ? 'ctr' : null),
+            label.position ?? chart.dataLabelPosition ?? (isStackedGroup ? 'ctr' : null),
             s.dataLabelColors?.[ci] ?? label.fontColor ?? s.labelColor ?? chart.dataLabelFontColor ?? null,
             lsz,
             { x: px0, y: py0, w: pw, h: ph },
@@ -3064,22 +4275,162 @@ function renderBarChart(
               labelFont,
               bold,
             ),
+            label.showLegendKey
+              ? dataLabelLegendKey(sourceSeriesIndices.get(s) ?? si, ci)
+              : undefined,
           );
         }
       }
-      if (stacked) {
-        if (negative) negOffset += sv; else posOffset += sv;
+      if (isStackedGroup) {
+        if (negative) negativeOffsets.set(groupKey, negOffset + sv);
+        else positiveOffsets.set(groupKey, posOffset + sv);
       }
     }
   }
 
-  if (!chart.catAxisHidden && catLabelsVisible(chart)) {
+  // `CT_BarChart/serLines` uses one group-owned line style. MS-OE376
+  // 2.1.1578 defines each segment as joining adjacent data points in the same
+  // series. Office vector output resolves those points to the value-end edge of
+  // each stacked bar and clips the segment to the category gap: columns join
+  // right/left facing edges, horizontal bars join bottom/top facing edges.
+  // Missing points break the sequence instead of inventing a zero-valued end.
+  if (barSeriesLinePoints) {
+    const barSeriesByGroup = new Map<number, number[]>();
+    for (let seriesIndex = 0; seriesIndex < barSeries.length; seriesIndex++) {
+      const groupIndex = barSeries[seriesIndex].barGroupIndex ?? 0;
+      const members = barSeriesByGroup.get(groupIndex);
+      if (members) members.push(seriesIndex);
+      else barSeriesByGroup.set(groupIndex, [seriesIndex]);
+    }
+    for (const decoration of chart.barGroupDecorations ?? []) {
+      // CT_BarChart permits multiple serLines children. The single-child Office
+      // geometry is verified; precedence/association for multiple children is
+      // application-defined and remains fail-closed until its boundary output is
+      // adjudicated rather than guessing first/last/cyclic style semantics.
+      if (decoration.seriesLines?.length !== 1) {
+        continue;
+      }
+      ctx.save();
+      const seriesLineStyle = chartStyleRoleLine(
+        chart, decoration.seriesLines[0], 'seriesLine',
+      );
+      if (!applyDecorationLineStyle(ctx, seriesLineStyle, ptToPx)) {
+        ctx.restore();
+        continue;
+      }
+      ctx.beginPath();
+      ctx.rect(px0, py0, pw, ph);
+      ctx.clip();
+      for (const seriesIndex of barSeriesByGroup.get(decoration.groupIndex) ?? []) {
+        const points = barSeriesLinePoints[seriesIndex];
+        for (let categoryIndex = 0; categoryIndex + 1 < n; categoryIndex++) {
+          const current = points[categoryIndex];
+          const next = points[categoryIndex + 1];
+          if (!current || !next) continue;
+          const currentCenter = (current.categoryStart + current.categoryEnd) / 2;
+          const nextCenter = (next.categoryStart + next.categoryEnd) / 2;
+          const forward = nextCenter >= currentCenter;
+          ctx.beginPath();
+          if (!isH) {
+            ctx.moveTo(
+              forward ? current.categoryEnd : current.categoryStart,
+              current.valueEnd,
+            );
+            ctx.lineTo(
+              forward ? next.categoryStart : next.categoryEnd,
+              next.valueEnd,
+            );
+          } else {
+            ctx.moveTo(
+              current.valueEnd,
+              forward ? current.categoryEnd : current.categoryStart,
+            );
+            ctx.lineTo(
+              next.valueEnd,
+              forward ? next.categoryStart : next.categoryEnd,
+            );
+          }
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  // CT_BarSer permits the same trendline and error-bar children as line
+  // series. Paint both above the filled rectangles and below axes/labels.
+  // Geometry is derived from the same gapWidth/overlap cluster calculation as
+  // the bars, so a clustered series' adornments remain centered on its bars.
+  const barCategoryCenter = (series: ChartSeries, categoryIndex: number): number => {
+    const group = barGroupFor(series);
+    const groupIndex = Math.max(0, group.indexOf(series));
+    const categorySize = categoryBandSize(categoryIndex);
+    const geometry = clusterGeometry(group, categorySize);
+    const start = categoryStart(categoryIndex) + geometry.catStart;
+    if (groupIsStacked(series)) return start + geometry.barW / 2;
+    return start + groupIndex * geometry.clusterGap + geometry.barW / 2;
+  };
+  const continuousBarCategoryCenter = (series: ChartSeries, index: number): number => {
+    if (Number.isInteger(index) && index >= 0 && index < n) {
+      return barCategoryCenter(series, index);
+    }
+    const group = barGroupFor(series);
+    const groupIndex = Math.max(0, group.indexOf(series));
+    const geometry = clusterGeometry(group, catGap);
+    const slot = isH
+      ? (catRev ? index : n - 1 - index)
+      : (catRev ? n - 1 - index : index);
+    const start = (!isH ? px0 : py0) + slot * catGap + geometry.catStart;
+    const visualIndex = groupIsStacked(series) ? 0 : groupIndex;
+    return start + visualIndex * geometry.clusterGap + geometry.barW / 2;
+  };
+  for (let seriesIndex = 0; seriesIndex < barSeries.length; seriesIndex++) {
+    const series = barSeries[seriesIndex];
+    const secondary = sec != null && series.useSecondaryAxis === true;
+    const valueAt = secondary && secScale ? secScale.makeToY(py0, ph) : valY;
+    const horizontalValueAt = valX;
+    const color = chartColor(seriesIndex, series);
+    const plotted = (categoryIndex: number): number =>
+      plottedBarValue(seriesIndex, categoryIndex);
+    for (const errorBars of effectiveBarErrorBars(series)) {
+      drawBarErrorBars(
+        ctx, series, chartStyleRoleErrorBar(chart, errorBars), n, isH,
+        categoryIndex => barCategoryCenter(series, categoryIndex),
+        isH ? horizontalValueAt : valueAt,
+        plotted, color, ptToPx,
+      );
+    }
+    drawSeriesTrendlines(
+      ctx, series, color,
+      index => continuousBarCategoryCenter(series, index - 1),
+      isH ? horizontalValueAt : valueAt,
+      ptToPx,
+      series.values.map((_value, index) => index + 1),
+      { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+      (index, value) => isH
+        ? ({
+          x: horizontalValueAt(value),
+          y: continuousBarCategoryCenter(series, index - 1),
+        })
+        : ({
+          x: continuousBarCategoryCenter(series, index - 1),
+          y: valueAt(value),
+        }),
+    );
+  }
+
+  if ((!hasDataTable || isH) && !chart.catAxisHidden && catLabelsVisible(chart)) {
     // `<c:catAx><c:txPr>…<a:solidFill>` colors the category tick labels.
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     const drawnCatTickFontPx = chart.catAxisFontSizeHpt != null
       ? catAxFontPx
       : Math.max(8, Math.min(11, catGap * 0.5));
-    ctx.font = `${drawnCatTickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      drawnCatTickFontPx,
+      chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+      chart.catAxisFontBold ?? false,
+      chart.catAxisFontItalic ?? false,
+    );
     // Column: each label is centered in a category slot of width `catGap`, so
     // cap it just under that so neighbours don't collide. Horizontal bars: the
     // label sits right-aligned in the left gutter between the val-title/legend
@@ -3088,45 +4439,196 @@ function renderBarChart(
     const horizLabelMaxPx = (px0 - 4) - (x + legLeftW + valTitleW);
     // `<c:catAx><c:txPr><a:bodyPr rot>` rotates the column labels (0 = flat).
     const rotRad = catLabelRotation;
-    for (let ci = 0; ci < n; ci++) {
-      // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
-      // (e.g. dateAx serials → real dates). No-op for string categories.
-      const raw = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
+    const labelEntries = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => ({
+        raw: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        fraction: tick.fraction,
+        categoryIndex: -1,
+      }))
+      : cats.map((category, categoryIndex) => ({
+        // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
+        // (e.g. dateAx serials → real dates). No-op for string categories.
+        raw: formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904),
+        fraction: null,
+        categoryIndex,
+      }));
+    for (const entry of labelEntries) {
+      const { raw } = entry;
       if (!isH) {
-        const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
-        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        const anchor = entry.fraction != null || entry.categoryIndex < 0
+          ? { fraction: entry.fraction ?? 0.5, textAlign: 'center' as CanvasTextAlign }
+          : categoryLabelAnchorFraction(
+            entry.categoryIndex,
+            n,
+            isCrossBetween(chart),
+            catRev,
+            chart.catAxisLabelAlignment,
+          );
+        const lx = px0 + anchor.fraction * pw;
+        ctx.textAlign = anchor.textAlign; ctx.textBaseline = 'top';
         // Rotation elides against a longer diagonal budget. Horizontal labels
         // use the measured word-wrap computed from this category slot.
         const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
-        const gap = chart.catAxisFontSizeHpt != null
-          ? categoryTickLabelGapPx(drawnCatTickFontPx)
-          : 3;
+        const gap = categoryLabelOffsetPx(
+          chart.catAxisFontSizeHpt != null
+            ? categoryTickLabelGapPx(drawnCatTickFontPx)
+            : 3,
+          chart.catAxisLabelOffsetPercent,
+        );
         if (rotRad === 0) {
-          const lines = wrappedColumnCategories[ci] ?? [raw];
+          const lines = entry.categoryIndex >= 0
+            ? (wrappedColumnCategories[entry.categoryIndex] ?? [raw])
+            : [raw];
           lines.forEach((line, lineIndex) => {
-            ctx.fillText(line, lx, py0 + ph + gap + lineIndex * (drawnCatTickFontPx + 2));
+            ctx.fillText(line, lx, categoryLabelAxisY + gap + lineIndex * (drawnCatTickFontPx + 2));
           });
         } else {
-          drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, py0 + ph + gap, rotRad);
+          drawRotatedCatLabel(ctx, elideToWidth(ctx, raw, budget), lx, categoryLabelAxisY + gap, rotRad);
         }
       } else {
-        const ly = py0 + categorySlotIndex(ci) * catGap + catGap / 2;
-        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-        const gap = chart.catAxisFontSizeHpt != null
-          ? valueTickLabelGapPx(drawnCatTickFontPx)
-          : 4;
-        ctx.fillText(elideToWidth(ctx, raw, horizLabelMaxPx), px0 - gap, ly);
+        const ly = entry.fraction != null
+          ? py0 + entry.fraction * ph
+          : py0 + categorySlotIndex(entry.categoryIndex) * catGap + catGap / 2;
+        const gap = categoryLabelOffsetPx(
+          chart.catAxisFontSizeHpt != null
+            ? valueTickLabelGapPx(drawnCatTickFontPx)
+            : 4,
+          chart.catAxisLabelOffsetPercent,
+        );
+        const boxStart = x + legLeftW + valTitleW;
+        const boxEnd = px0 - gap;
+        const alignment = chart.catAxisLabelAlignment;
+        const lx = alignment === 'l'
+          ? boxStart
+          : alignment === 'ctr' ? (boxStart + boxEnd) / 2 : boxEnd;
+        // Horizontal bars historically right-align omitted category labels in
+        // the left gutter. `lblAlgn` only replaces that default when authored.
+        ctx.textAlign = alignment === 'l' ? 'left' : alignment === 'ctr' ? 'center' : 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(elideToWidth(ctx, raw, horizLabelMaxPx), lx, ly);
+      }
+    }
+
+    if (!isH && categoryLevels) {
+      const gap = categoryLabelOffsetPx(
+        chart.catAxisFontSizeHpt != null
+          ? categoryTickLabelGapPx(drawnCatTickFontPx)
+          : 3,
+        chart.catAxisLabelOffsetPercent,
+      );
+      const rowHeight = drawnCatTickFontPx + 4;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.strokeStyle = catLineColor;
+      ctx.lineWidth = catLineW;
+      ctx.setLineDash([]);
+      const boundaryStartY = (boundaryIndex: number): number => {
+        if (!multiLevelBoundariesOwnMajorTicks
+          || boundaryIndex % catMajorTickSkip !== 0) {
+          return categoryLabelAxisY;
+        }
+        const tickLength = axisTickLengthPx('major', catLineW, ptToPx);
+        if (chart.catAxisMajorTickMark === 'cross') {
+          return categoryLabelAxisY - tickLength / 2;
+        }
+        if (chart.catAxisMajorTickMark === 'in') {
+          return categoryLabelAxisY - tickLength;
+        }
+        return categoryLabelAxisY;
+      };
+
+      // Each boundary in the innermost category level separates adjacent
+      // labels. Boundaries shared by an outer level are extended below by the
+      // outer-level brackets drawn next; extend the remaining boundaries
+      // through the first label band here.
+      const outerBoundaryIndices = new Set<number>();
+      for (let levelIndex = 1; levelIndex < categoryLevels.length; levelIndex++) {
+        const level = categoryLevels[levelIndex] ?? [];
+        for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+          if ((level[categoryIndex] ?? '') !== '') outerBoundaryIndices.add(categoryIndex);
+        }
+        outerBoundaryIndices.add(n);
+      }
+      const firstBandBottom = categoryLabelAxisY + gap + drawnCatTickFontPx + 2;
+      for (let boundaryIndex = 0; boundaryIndex <= n; boundaryIndex++) {
+        if (outerBoundaryIndices.has(boundaryIndex)) continue;
+        const boundary = px0 + boundaryIndex / n * pw;
+        ctx.beginPath();
+        ctx.moveTo(boundary, boundaryStartY(boundaryIndex));
+        ctx.lineTo(boundary, firstBandBottom);
+        ctx.stroke();
+      }
+
+      const outerBoundaryBottoms = new Map<number, number>();
+      for (let levelIndex = 1; levelIndex < categoryLevels.length; levelIndex++) {
+        const level = categoryLevels[levelIndex] ?? [];
+        const starts: number[] = [];
+        for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+          if ((level[categoryIndex] ?? '') !== '') starts.push(categoryIndex);
+        }
+        for (let groupIndex = 0; groupIndex < starts.length; groupIndex++) {
+          const start = starts[groupIndex];
+          const end = starts[groupIndex + 1] ?? n;
+          const label = level[start] ?? '';
+          const left = px0 + start / n * pw;
+          const right = px0 + end / n * pw;
+          const rowTop = categoryLabelAxisY + gap + levelIndex * rowHeight;
+          const alignment = chart.catAxisLabelAlignment;
+          const labelX = alignment === 'l'
+            ? left
+            : alignment === 'r' ? right : (left + right) / 2;
+          ctx.textAlign = alignment === 'l' ? 'left' : alignment === 'r' ? 'right' : 'center';
+          ctx.fillText(
+            elideToWidth(ctx, label, Math.max(0, right - left - 4)),
+            labelX,
+            rowTop,
+          );
+          const bracketBottom = rowTop + drawnCatTickFontPx + 2;
+          for (const boundaryIndex of [start, end]) {
+            outerBoundaryBottoms.set(
+              boundaryIndex,
+              Math.max(outerBoundaryBottoms.get(boundaryIndex) ?? categoryLabelAxisY, bracketBottom),
+            );
+          }
+        }
+      }
+      // A boundary can belong to both neighbouring groups, and at deeper
+      // levels the same category index can recur. Paint each authored
+      // boundary once to its deepest required extent so coincident strokes do
+      // not become darker or wider.
+      for (const [boundaryIndex, bracketBottom] of outerBoundaryBottoms) {
+        const boundary = px0 + boundaryIndex / n * pw;
+        ctx.beginPath();
+        ctx.moveTo(boundary, boundaryStartY(boundaryIndex));
+        ctx.lineTo(boundary, bracketBottom);
+        ctx.stroke();
       }
     }
   }
 
   if (lineSeries.length > 0 && !isH) {
+    drawLineGroupDecorations(
+      ctx, chart, n, categoryCenterX,
+      series => sec && series.useSecondaryAxis === true ? toYSecondarySeries : toYPrimaryLine,
+      () => primaryCatAxisY,
+      (series, index) => series.values[index] ?? null,
+      catGap, ptToPx, shapeRotationDeg,
+    );
+    if (dateAxisPlan) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(px0, py0, pw, ph);
+      ctx.clip();
+    }
     for (let si = 0; si < lineSeries.length; si++) {
       const s = lineSeries[si];
+      const pointOverrides = indexPointOverrides(s.dataPointOverrides);
       const color = chartColor(barSeries.length + si, s);
       // Series bound to the secondary axis map through its scale; others use
       // the primary (bar) value axis.
-      const yOf = sec && s.useSecondaryAxis === true ? toYSecondary : toYPrimaryLine;
+      const yOf = sec && s.useSecondaryAxis === true
+        ? toYSecondarySeries
+        : toYPrimaryLine;
       const hasAuthoredLine = s.chartexStyle != null
         || s.lineHidden != null
         || s.lineColor != null
@@ -3151,33 +4653,65 @@ function renderBarChart(
         ctx.setLineDash([]);
       }
       ctx.beginPath();
-      let started = false;
+      const smooth = s.smooth === true;
+      const dispBlanks = chart.dispBlanksAs ?? 'gap';
+      let run: Array<{ x: number; y: number }> = [];
+      const flushRun = (): void => {
+        if (run.length === 0) return;
+        ctx.moveTo(run[0].x, run[0].y);
+        appendCurve(ctx, run, smooth);
+        run = [];
+      };
       for (let ci = 0; ci < n; ci++) {
         const v = s.values[ci];
-        if (v == null) { started = false; continue; }
-        const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
-        const ly = yOf(v);
-        if (!started) { ctx.moveTo(lx, ly); started = true; } else ctx.lineTo(lx, ly);
+        if (v == null) {
+          if (dispBlanks === 'gap') flushRun();
+          if (dispBlanks !== 'zero') continue;
+        }
+        const lx = categoryCenterX(ci);
+        run.push({ x: lx, y: yOf(v ?? 0) });
       }
+      flushRun();
       if (paintLine) ctx.stroke();
-      if (s.showMarker !== false) {
+      const seriesMarkersVisible = s.showMarker !== false && s.markerSymbol !== 'none';
+      const drawMarkers = seriesMarkersVisible || hasVisiblePointMarkerOverride(s);
+      const hasMarkerDetail = seriesHasMarkerDetail(s);
+      if (drawMarkers) {
         for (let ci = 0; ci < n; ci++) {
           const v = s.values[ci];
           if (v == null) continue;
-          const lx = px0 + categorySlotIndex(ci) * catGap + catGap / 2;
+          const lx = categoryCenterX(ci);
           const ly = yOf(v);
-          ctx.fillStyle = color;
-          ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+          const point = pointOverrides.get(ci);
+          const symbol = effectiveMarkerSymbol(s, point, 'circle', seriesMarkersVisible);
+          if (symbol === 'none') continue;
+          if (hasMarkerDetail) {
+            const lineWidthEmu = point?.markerLineWidthEmu ?? s.markerLineWidthEmu;
+            drawMarker(
+              ctx, lx, ly, symbol,
+              point?.markerSize ?? s.markerSize ?? 5,
+              markerFillColorFor(s, point, ci, color),
+              point?.markerLine ?? s.markerLine ?? null,
+              ptToPx,
+              lineWidthEmu != null ? axisLineWidthPx(lineWidthEmu, ptToPx) : undefined,
+              markerFillPaintFor(s, point, ci),
+              shapeRotationDeg,
+            );
+          } else {
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+          }
         }
       }
       // Trendlines (`<c:trendline>`, §21.2.2.211) for the combo line series.
       drawSeriesTrendlines(
         ctx, s, color,
-        (i) => px0 + categorySlotIndex(i) * catGap + catGap / 2,
+        (i) => categoryCenterX(i),
         yOf, ptToPx, undefined,
         { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
       );
     }
+    if (dateAxisPlan) ctx.restore();
   }
 
   // A scatter group can be overlaid on a bar chart with its own pair of
@@ -3255,6 +4789,9 @@ function renderBarChart(
         false,
         chart.scatterStyle ?? 'marker',
         { x, y, w, h },
+        yScale.max,
+        undefined,
+        shapeRotationDeg,
       );
     }
   }
@@ -3276,14 +4813,26 @@ function renderBarChart(
   if (sec && secScale) {
     drawSecondaryValueAxis(
       ctx, chart, sec, secScale, toYSecondary, r, px0, py0, pw, ph, ptToPx,
-      secFontPx, secLabelBandW, valLabelColor, chart.date1904,
+      secFontPx, secLabelBandW, valLabelColor, chart.date1904, secondaryPercentAxis,
+    );
+  }
+
+  if (dataTableLayout) {
+    const tableY = py0 + ph + (isH
+      ? (chart.valAxisHidden ? h * 0.02 : catAxisLabelBandH(valAxLabelFontPx))
+      : 0);
+    drawChartDataTable(
+      ctx, chart, dataTableLayout, px0, tableY, pw, x + legLeftW, ptToPx,
     );
   }
 
   const legendPaints = isChartExColumn
-    ? barSeries.map((series, index) => chartExDataPointPaint(
-      chart, barStyleIndices[index], barSeries.length, series.chartexStyle, series.color,
-    ))
+    ? barSeries.flatMap((series, index) => [
+      chartExDataPointPaint(
+        chart, barStyleIndices[index], barSeries.length, series.chartexStyle, series.color,
+      ),
+      ...trendlineLegendSeries([series]).map(() => undefined),
+    ])
     : [];
   drawLegendForLayout(
     ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph,
@@ -3299,15 +4848,1031 @@ function renderBarChart(
 // Line chart
 // ═══════════════════════════════════════════════════════════════════════════
 
+function applyDecorationLineStyle(
+  ctx: CanvasRenderingContext2D,
+  style: ChartDecorationLineStyle,
+  ptToPx: number,
+): boolean {
+  if (style.hidden === true) return false;
+  ctx.strokeStyle = `#${style.color ?? '000000'}`;
+  ctx.lineWidth = style.widthEmu != null
+    ? axisLineWidthPx(style.widthEmu, ptToPx)
+    : Math.max(1, 0.75 * ptToPx);
+  ctx.setLineDash(dashPatternForPreset(style.dash ?? undefined, ctx.lineWidth));
+  ctx.lineCap = style.cap === 'rnd' ? 'round' : style.cap === 'sq' ? 'square' : 'butt';
+  ctx.lineJoin = style.join === 'round' || style.join === 'bevel' ? style.join : 'miter';
+  return true;
+}
+
+function chartStyleRoleLine(
+  chart: ChartModel,
+  direct: ChartDecorationLineStyle,
+  role: ChartStyleRole,
+): ChartDecorationLineStyle {
+  const linked = chart.chartStyleRoles?.[role];
+  const linkedApplies = linked != null && linked.lineNoStyle !== true;
+  return {
+    color: direct.color
+      ?? (linkedApplies ? chartExStyleColor(chart, linked, 'line', 0, 1) : null),
+    widthEmu: direct.widthEmu ?? (linkedApplies ? linked.lineWidthEmu : null),
+    dash: direct.dash ?? (linkedApplies ? linked.lineDash : null),
+    cap: direct.cap ?? (linkedApplies ? linked.lineCap : null),
+    join: direct.join ?? (linkedApplies ? linked.lineJoin : null),
+    hidden: direct.hidden
+      ?? (direct.color == null && linkedApplies && linked.lineHidden === true ? true : null),
+  };
+}
+
+function chartStyleRoleBarPaint(
+  chart: ChartModel,
+  direct: ChartStockUpDownBarStyle['up'],
+  role: 'upBar' | 'downBar',
+): ChartStockUpDownBarStyle['up'] {
+  const linked = chart.chartStyleRoles?.[role];
+  const fillApplies = linked != null && linked.fillNoStyle !== true;
+  const lineApplies = linked != null && linked.lineNoStyle !== true;
+  return {
+    fillColor: direct.fillColor
+      ?? (fillApplies ? chartExStyleColor(chart, linked, 'fill', 0, 1) : null),
+    fill: direct.fill ?? (
+      direct.fillColor == null && direct.fillHidden !== true && fillApplies
+        ? linked?.fillPaints?.[0] : null
+    ),
+    fillHidden: direct.fillHidden
+      ?? (fillApplies && linked.fillHidden === true ? true : null),
+    lineColor: direct.lineColor
+      ?? (lineApplies ? chartExStyleColor(chart, linked, 'line', 0, 1) : null),
+    lineWidthEmu: direct.lineWidthEmu ?? (lineApplies ? linked.lineWidthEmu : null),
+    lineDash: direct.lineDash ?? (lineApplies ? linked.lineDash : null),
+    lineCap: direct.lineCap ?? (lineApplies ? linked.lineCap : null),
+    lineJoin: direct.lineJoin ?? (lineApplies ? linked.lineJoin : null),
+    lineHidden: direct.lineHidden
+      ?? (lineApplies && linked.lineHidden === true ? true : null),
+  };
+}
+
+/** Draws the one-per-category drop-line envelope shared by classic line,
+ * area, and stock charts. ECMA-376 assigns the geometry to the owning chart
+ * group; each envelope joins its effective category-axis crossing to every
+ * finite plotted point at that category. */
+function drawDropLineEnvelopes(
+  ctx: CanvasRenderingContext2D,
+  members: ChartSeries[],
+  pointCount: number,
+  toX: (index: number) => number,
+  yMapFor: (series: ChartSeries) => (value: number) => number,
+  categoryAxisYFor: (series: ChartSeries) => number,
+  valueFor: (series: ChartSeries, index: number) => number | null,
+): void {
+  for (let index = 0; index < pointCount; index++) {
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let hasPoint = false;
+    for (const series of members) {
+      const value = valueFor(series, index);
+      if (value == null || !Number.isFinite(value)) continue;
+      const pointY = yMapFor(series)(value);
+      const axisY = categoryAxisYFor(series);
+      if (!Number.isFinite(pointY) || !Number.isFinite(axisY)) continue;
+      minY = Math.min(minY, pointY, axisY);
+      maxY = Math.max(maxY, pointY, axisY);
+      hasPoint = true;
+    }
+    if (!hasPoint || Math.abs(maxY - minY) < 0.01) continue;
+    ctx.beginPath();
+    ctx.moveTo(toX(index), minY);
+    ctx.lineTo(toX(index), maxY);
+    ctx.stroke();
+  }
+}
+
+function chartStyleRoleErrorBar(
+  chart: ChartModel,
+  direct: NonNullable<ChartSeries['errBars']>[number],
+): NonNullable<ChartSeries['errBars']>[number] {
+  const linked = chartStyleRoleLine(chart, {
+    color: direct.color,
+    widthEmu: direct.lineWidthEmu,
+    dash: direct.dash,
+    hidden: direct.hidden,
+  }, 'errorBar');
+  return {
+    ...direct,
+    color: linked.color ?? undefined,
+    lineWidthEmu: linked.widthEmu ?? undefined,
+    dash: linked.dash ?? undefined,
+    hidden: linked.hidden ?? undefined,
+  };
+}
+
+function chartStyleRoleLeaderLine(
+  chart: ChartModel,
+  direct: ChartSeriesDataLabels,
+): ChartDecorationLineStyle {
+  return chartStyleRoleLine(chart, {
+    color: direct.leaderLineColor,
+    widthEmu: direct.leaderLineWidthEmu,
+    dash: direct.leaderLineDash,
+    hidden: direct.leaderLineHidden,
+  }, 'leaderLine');
+}
+
+function chartStyleRoleTrendline(
+  chart: ChartModel,
+  direct: NonNullable<ChartSeries['trendLines']>[number],
+): NonNullable<ChartSeries['trendLines']>[number] {
+  const linked = chartStyleRoleLine(chart, {
+    color: direct.lineColor,
+    widthEmu: direct.lineWidthEmu,
+    dash: direct.lineDash,
+    hidden: direct.lineHidden,
+  }, 'trendline');
+  return {
+    ...direct,
+    lineColor: linked.color ?? undefined,
+    lineWidthEmu: linked.widthEmu ?? undefined,
+    lineDash: linked.dash ?? undefined,
+    lineHidden: linked.hidden ?? undefined,
+  };
+}
+
+function chartStyleRoleDataTable(
+  chart: ChartModel,
+  direct: NonNullable<ChartModel['dataTable']>,
+): NonNullable<ChartModel['dataTable']> {
+  const linked = chartStyleRoleLine(chart, {
+    color: direct.lineColor,
+    widthEmu: direct.lineWidthEmu,
+    dash: direct.lineDash,
+    hidden: direct.lineHidden,
+  }, 'dataTable');
+  return {
+    ...direct,
+    lineColor: linked.color ?? undefined,
+    lineWidthEmu: linked.widthEmu ?? undefined,
+    lineDash: linked.dash ?? undefined,
+    lineHidden: linked.hidden ?? undefined,
+  };
+}
+
+interface LinkedGridlineResult {
+  visible: boolean | null | undefined;
+  color?: string | null;
+  widthEmu?: number | null;
+  dash?: string | null;
+}
+
+function chartStyleRoleGridline(
+  chart: ChartModel,
+  role: 'gridlineMajor' | 'gridlineMinor',
+  visible: boolean | null | undefined,
+  color: string | null | undefined,
+  widthEmu: number | null | undefined,
+  dash: string | null | undefined,
+): LinkedGridlineResult {
+  if (visible !== true || !chart.chartStyleRoles?.[role]) {
+    return { visible, color, widthEmu, dash };
+  }
+  const linked = chartStyleRoleLine(chart, { color, widthEmu, dash }, role);
+  return {
+    visible: linked.hidden !== true,
+    color: linked.color,
+    widthEmu: linked.widthEmu,
+    dash: linked.dash,
+  };
+}
+
+function chartStyleRoleSecondaryGridlines(
+  chart: ChartModel,
+  axis: SecondaryValueAxis | null | undefined,
+): SecondaryValueAxis | null | undefined {
+  if (!axis) return axis;
+  if (!chart.chartStyleRoles?.gridlineMajor && !chart.chartStyleRoles?.gridlineMinor) return axis;
+  const major = chartStyleRoleGridline(
+    chart, 'gridlineMajor', axis.majorGridlines,
+    axis.majorGridlineColor, axis.majorGridlineWidthEmu, axis.majorGridlineDash,
+  );
+  const minor = chartStyleRoleGridline(
+    chart, 'gridlineMinor', axis.minorGridlines,
+    axis.minorGridlineColor, axis.minorGridlineWidthEmu, axis.minorGridlineDash,
+  );
+  const changed = major.visible !== axis.majorGridlines
+    || major.color !== axis.majorGridlineColor
+    || major.widthEmu !== axis.majorGridlineWidthEmu
+    || major.dash !== axis.majorGridlineDash
+    || minor.visible !== axis.minorGridlines
+    || minor.color !== axis.minorGridlineColor
+    || minor.widthEmu !== axis.minorGridlineWidthEmu
+    || minor.dash !== axis.minorGridlineDash;
+  return changed ? {
+    ...axis,
+    majorGridlines: major.visible ?? undefined,
+    majorGridlineColor: major.color,
+    majorGridlineWidthEmu: major.widthEmu,
+    majorGridlineDash: major.dash,
+    minorGridlines: minor.visible ?? undefined,
+    minorGridlineColor: minor.color,
+    minorGridlineWidthEmu: minor.widthEmu,
+    minorGridlineDash: minor.dash,
+  } : axis;
+}
+
+function chartStyleRoleAxisLine(
+  chart: ChartModel,
+  role: 'categoryAxis' | 'valueAxis',
+  color: string | null | undefined,
+  widthEmu: number | null | undefined,
+  dash: string | null | undefined,
+  hidden: boolean,
+): ChartDecorationLineStyle {
+  return chartStyleRoleLine(chart, {
+    color,
+    widthEmu,
+    dash,
+    // The shared axis model stores the effective boolean, so false means no
+    // direct noFill rather than an authored visible override.
+    hidden: hidden ? true : undefined,
+  }, role);
+}
+
+function chartStyleRoleSecondaryAxisLine(
+  chart: ChartModel,
+  axis: SecondaryValueAxis | null | undefined,
+  role: 'categoryAxis' | 'valueAxis',
+): SecondaryValueAxis | null | undefined {
+  const style = chart.chartStyleRoles?.[role];
+  if (!axis || !style) return axis;
+  const line = chartStyleRoleAxisLine(
+    chart, role, axis.lineColor, axis.lineWidthEmu, axis.lineDash, axis.lineHidden,
+  );
+  const lineHidden = line.hidden === true;
+  const fontSizeHpt = axis.fontSizeHpt ?? style.fontSizeHpt;
+  const fontBold = axis.fontBold ?? style.fontBold;
+  const fontItalic = axis.fontItalic ?? style.fontItalic;
+  const fontColor = axis.fontColor ?? style.fontColor;
+  const fontFace = axis.fontFace ?? style.fontFace;
+  if (line.color === axis.lineColor
+    && line.widthEmu === axis.lineWidthEmu
+    && line.dash === axis.lineDash
+    && lineHidden === axis.lineHidden
+    && fontSizeHpt === axis.fontSizeHpt
+    && fontBold === axis.fontBold
+    && fontItalic === axis.fontItalic
+    && fontColor === axis.fontColor
+    && fontFace === axis.fontFace) return axis;
+  return {
+    ...axis,
+    lineColor: line.color,
+    lineWidthEmu: line.widthEmu,
+    lineDash: line.dash,
+    lineHidden,
+    fontSizeHpt,
+    fontBold,
+    fontItalic,
+    fontColor,
+    fontFace,
+  };
+}
+
+function chartStyleRoleSeriesAxis(chart: ChartModel): ChartModel {
+  const axis = chart.threeD?.seriesAxis;
+  const style = chart.chartStyleRoles?.seriesAxis;
+  if (!axis || !style) return chart;
+  const line = chartStyleRoleLine(chart, {
+    color: axis.lineColor,
+    widthEmu: axis.lineWidthEmu,
+    dash: axis.lineDash,
+    hidden: axis.lineHidden ? true : undefined,
+  }, 'seriesAxis');
+  const lineHidden = line.hidden === true;
+  const fontSizeHpt = axis.fontSizeHpt ?? style.fontSizeHpt;
+  const fontBold = axis.fontBold ?? style.fontBold;
+  const fontItalic = axis.fontItalic ?? style.fontItalic;
+  const fontColor = axis.fontColor ?? style.fontColor;
+  const fontFace = axis.fontFace ?? style.fontFace;
+  if (line.color === axis.lineColor
+    && line.widthEmu === axis.lineWidthEmu
+    && line.dash === axis.lineDash
+    && lineHidden === axis.lineHidden
+    && fontSizeHpt === axis.fontSizeHpt
+    && fontBold === axis.fontBold
+    && fontItalic === axis.fontItalic
+    && fontColor === axis.fontColor
+    && fontFace === axis.fontFace) return chart;
+  return {
+    ...chart,
+    threeD: {
+      ...chart.threeD,
+      seriesAxis: {
+        ...axis,
+        lineColor: line.color,
+        lineWidthEmu: line.widthEmu,
+        lineDash: line.dash,
+        lineHidden,
+        fontSizeHpt,
+        fontBold,
+        fontItalic,
+        fontColor,
+        fontFace,
+      },
+    },
+  };
+}
+
+function isClassicMarkerSeries(chart: ChartModel, series: ChartSeries): boolean {
+  const family = series.seriesType ?? chart.chartType;
+  return family === 'line'
+    || family === 'stackedLine'
+    || family === 'stackedLinePct'
+    || family === 'area'
+    || family === 'stackedArea'
+    || family === 'stackedAreaPct'
+    || family === 'scatter'
+    || family === 'radar'
+    || family === 'stock';
+}
+
+function chartStyleRoleMarker(
+  chart: ChartModel,
+  direct: ChartSeries,
+  index: number,
+  count: number,
+): ChartSeries {
+  const linked = chart.chartStyleRoles?.dataPointMarker;
+  if (!isClassicMarkerSeries(chart, direct)
+    || ((direct.showMarker === false || direct.markerSymbol === 'none')
+      && !hasVisiblePointMarkerOverride(direct))) return direct;
+  const fillApplies = linked != null && linked.fillNoStyle !== true;
+  const lineApplies = linked != null && linked.lineNoStyle !== true;
+  const directFillAuthored = direct.markerFillPaintAuthored === true
+    || direct.markerFill != null || direct.markerFillPaint !== undefined;
+  const markerFill = direct.markerFill
+    ?? (!directFillAuthored && fillApplies && linked?.fillHidden === true
+      ? '00000000'
+      : !directFillAuthored && fillApplies && linked
+        ? chartExStyleColor(chart, linked, 'fill', index, count) : null);
+  const linkedFillPaint = !directFillAuthored && fillApplies && linked
+    ? chartExStylePaintDecision(chart, linked, index, count)
+    : undefined;
+  const markerFillPaint = direct.markerFillPaint !== undefined
+    ? direct.markerFillPaint
+    : linkedFillPaint?.fillType === 'gradient' || linkedFillPaint?.fillType === 'pattern'
+      ? linkedFillPaint
+      : undefined;
+  const markerFillPaintAuthored = directFillAuthored
+    ? direct.markerFillPaintAuthored
+    : fillApplies && linked?.fillPaintAuthored === true
+      ? true
+      : undefined;
+  const markerLine = direct.markerLine
+    ?? (lineApplies && linked?.lineHidden === true
+      ? '00000000'
+      : lineApplies && linked ? chartExStyleColor(chart, linked, 'line', index, count) : null);
+  const markerLineWidthEmu = direct.markerLineWidthEmu
+    ?? (lineApplies ? linked?.lineWidthEmu : null);
+  const markerSize = direct.markerSize ?? chart.chartStyleMarkerSizePt;
+  const markerSymbol = direct.markerSymbol ?? chart.chartStyleMarkerSymbol;
+  if (markerFill === direct.markerFill
+    && markerFillPaint === direct.markerFillPaint
+    && markerFillPaintAuthored === direct.markerFillPaintAuthored
+    && markerLine === direct.markerLine
+    && markerLineWidthEmu === direct.markerLineWidthEmu
+    && markerSize === direct.markerSize
+    && markerSymbol === direct.markerSymbol) return direct;
+  return {
+    ...direct,
+    markerFill,
+    markerFillPaint,
+    markerFillPaintAuthored,
+    markerLine,
+    markerLineWidthEmu,
+    markerSize,
+    markerSymbol,
+  };
+}
+
+interface EffectiveFrameLineStyle {
+  color?: string | null;
+  fill?: ChartModel['plotAreaLineFill'];
+  widthEmu?: number | null;
+  dash?: string | null;
+  dashAuthored?: boolean | null;
+  customDash?: ChartModel['plotAreaLineCustomDash'];
+  cap?: string | null;
+  join?: string | null;
+  compound?: string | null;
+  hidden?: boolean | null;
+  paintAuthored?: boolean | null;
+}
+
+/** Merge one chart-frame outline property-by-property. Direct DrawingML paint
+ * and dash choices remain authoritative; linked Chart Style geometry fills
+ * only genuinely omitted properties. */
+function effectiveFrameLineStyle(
+  chart: ChartModel,
+  direct: EffectiveFrameLineStyle,
+  linked: ChartExStyle | null | undefined,
+): EffectiveFrameLineStyle {
+  if (!linked || linked.lineNoStyle === true) return direct;
+  let { color, fill, hidden } = direct;
+  const directPaint = direct.paintAuthored === true
+    || fill != null || color != null || hidden === true;
+  if (!directPaint) {
+    if (linked.lineHidden === true) {
+      hidden = true;
+    } else {
+      fill = chartExStyleLinePaint(linked, 0);
+      color = fill == null ? chartExStyleColor(chart, linked, 'line', 0, 1) : null;
+    }
+  }
+  let dash = direct.dash;
+  let customDash = direct.customDash;
+  let dashAuthored = direct.dashAuthored;
+  if (dashAuthored !== true && dash == null && customDash == null) {
+    dash = linked.lineDash;
+    customDash = linked.lineCustomDash;
+    dashAuthored = linked.lineDashAuthored;
+  }
+  return {
+    color,
+    fill,
+    hidden,
+    paintAuthored: direct.paintAuthored,
+    widthEmu: direct.widthEmu ?? linked.lineWidthEmu,
+    dash,
+    dashAuthored,
+    customDash,
+    cap: direct.cap ?? linked.lineCap,
+    join: direct.join ?? linked.lineJoin,
+    compound: direct.compound ?? linked.lineCompound,
+  };
+}
+
+function chartStyleRoleLegend(chart: ChartModel): ChartModel {
+  const linked = chart.chartStyleRoles?.legend;
+  if (!linked) return chart;
+  let legendFill = chart.legendFill;
+  let legendFillColor = chart.legendFillColor;
+  let legendFillHidden = chart.legendFillHidden;
+  const directFillPaint = chart.legendFillPaintAuthored === true
+    || legendFill != null || legendFillColor != null || legendFillHidden === true;
+  if (!directFillPaint && linked.fillNoStyle !== true) {
+    if (linked.fillHidden === true) {
+      legendFillHidden = true;
+    } else {
+      legendFill = chartExStyleFillPaint(linked, 0);
+      legendFillColor = legendFill == null
+        ? chartExStyleColor(chart, linked, 'fill', 0, 1)
+        : null;
+    }
+  }
+
+  const legendLine = effectiveFrameLineStyle(chart, {
+    color: chart.legendLineColor,
+    fill: chart.legendLineFill,
+    widthEmu: chart.legendLineWidthEmu,
+    dash: chart.legendLineDash,
+    dashAuthored: chart.legendLineDashAuthored,
+    customDash: chart.legendLineCustomDash,
+    cap: chart.legendLineCap,
+    join: chart.legendLineJoin,
+    compound: chart.legendLineCompound,
+    hidden: chart.legendLineHidden,
+    paintAuthored: chart.legendLinePaintAuthored,
+  }, linked);
+  if (legendFill === chart.legendFill
+    && legendFillColor === chart.legendFillColor
+    && legendFillHidden === chart.legendFillHidden
+    && legendLine.color === chart.legendLineColor
+    && legendLine.fill === chart.legendLineFill
+    && legendLine.widthEmu === chart.legendLineWidthEmu
+    && legendLine.dash === chart.legendLineDash
+    && legendLine.dashAuthored === chart.legendLineDashAuthored
+    && legendLine.customDash === chart.legendLineCustomDash
+    && legendLine.cap === chart.legendLineCap
+    && legendLine.join === chart.legendLineJoin
+    && legendLine.compound === chart.legendLineCompound
+    && legendLine.hidden === chart.legendLineHidden) return chart;
+  return {
+    ...chart,
+    legendFill,
+    legendFillColor,
+    legendFillHidden,
+    legendLineColor: legendLine.color,
+    legendLineFill: legendLine.fill,
+    legendLineWidthEmu: legendLine.widthEmu,
+    legendLineDash: legendLine.dash,
+    legendLineDashAuthored: legendLine.dashAuthored,
+    legendLineCustomDash: legendLine.customDash,
+    legendLineCap: legendLine.cap,
+    legendLineJoin: legendLine.join,
+    legendLineCompound: legendLine.compound,
+    legendLineHidden: legendLine.hidden,
+  };
+}
+
+function chartStyleRolePlotArea(chart: ChartModel): ChartModel {
+  const linked = chart.chartStyleRoles?.plotArea;
+  if (!linked) return chart;
+  let plotAreaFill = chart.plotAreaFill;
+  let plotAreaBg = chart.plotAreaBg;
+  let plotAreaFillHidden = chart.plotAreaFillHidden;
+  const directPaint = chart.plotAreaFillPaintAuthored === true
+    || plotAreaFill != null || plotAreaBg != null || plotAreaFillHidden === true;
+  if (!directPaint && linked.fillNoStyle !== true) {
+    if (linked.fillHidden === true) {
+      plotAreaFillHidden = true;
+    } else {
+      plotAreaFill = chartExStyleFillPaint(linked, 0);
+      plotAreaBg = plotAreaFill == null
+        ? chartExStyleColor(chart, linked, 'fill', 0, 1)
+        : null;
+    }
+  }
+
+  const plotAreaLine = effectiveFrameLineStyle(chart, {
+    color: chart.plotAreaLineColor,
+    fill: chart.plotAreaLineFill,
+    widthEmu: chart.plotAreaLineWidthEmu,
+    dash: chart.plotAreaLineDash,
+    dashAuthored: chart.plotAreaLineDashAuthored,
+    customDash: chart.plotAreaLineCustomDash,
+    cap: chart.plotAreaLineCap,
+    join: chart.plotAreaLineJoin,
+    compound: chart.plotAreaLineCompound,
+    hidden: chart.plotAreaLineHidden,
+    paintAuthored: chart.plotAreaLinePaintAuthored,
+  }, linked);
+  if (plotAreaFill === chart.plotAreaFill
+    && plotAreaBg === chart.plotAreaBg
+    && plotAreaFillHidden === chart.plotAreaFillHidden
+    && plotAreaLine.color === chart.plotAreaLineColor
+    && plotAreaLine.fill === chart.plotAreaLineFill
+    && plotAreaLine.widthEmu === chart.plotAreaLineWidthEmu
+    && plotAreaLine.dash === chart.plotAreaLineDash
+    && plotAreaLine.dashAuthored === chart.plotAreaLineDashAuthored
+    && plotAreaLine.customDash === chart.plotAreaLineCustomDash
+    && plotAreaLine.cap === chart.plotAreaLineCap
+    && plotAreaLine.join === chart.plotAreaLineJoin
+    && plotAreaLine.compound === chart.plotAreaLineCompound
+    && plotAreaLine.hidden === chart.plotAreaLineHidden) return chart;
+  return {
+    ...chart,
+    plotAreaFill,
+    plotAreaBg,
+    plotAreaFillHidden,
+    plotAreaLineColor: plotAreaLine.color,
+    plotAreaLineFill: plotAreaLine.fill,
+    plotAreaLineWidthEmu: plotAreaLine.widthEmu,
+    plotAreaLineDash: plotAreaLine.dash,
+    plotAreaLineDashAuthored: plotAreaLine.dashAuthored,
+    plotAreaLineCustomDash: plotAreaLine.customDash,
+    plotAreaLineCap: plotAreaLine.cap,
+    plotAreaLineJoin: plotAreaLine.join,
+    plotAreaLineCompound: plotAreaLine.compound,
+    plotAreaLineHidden: plotAreaLine.hidden,
+  };
+}
+
+function chartStyleRoleChartArea(chart: ChartModel): ChartModel {
+  const linked = chart.chartStyleRoles?.chartArea;
+  if (!linked) return chart;
+  let chartFill = chart.chartFill;
+  let chartBg = chart.chartBg;
+  let chartFillHidden = chart.chartFillHidden;
+  const directPaint = chart.chartFillPaintAuthored === true
+    || chartFill != null || chartFillHidden === true;
+  if (!directPaint && linked.fillNoStyle !== true) {
+    if (linked.fillHidden === true) {
+      chartFill = null;
+      chartBg = null;
+      chartFillHidden = true;
+    } else {
+      chartFill = chartExStyleFillPaint(linked, 0);
+      chartBg = chartFill == null
+        ? chartExStyleColor(chart, linked, 'fill', 0, 1)
+        : null;
+      chartFillHidden = null;
+    }
+  }
+
+  const chartBorder = effectiveFrameLineStyle(chart, {
+    color: chart.chartBorderColor,
+    fill: chart.chartBorderLineFill,
+    widthEmu: chart.chartBorderWidthEmu,
+    dash: chart.chartBorderDash,
+    dashAuthored: chart.chartBorderDashAuthored,
+    customDash: chart.chartBorderCustomDash,
+    cap: chart.chartBorderCap,
+    join: chart.chartBorderJoin,
+    compound: chart.chartBorderCompound,
+    hidden: chart.chartBorderHidden,
+    paintAuthored: chart.chartBorderPaintAuthored,
+  }, linked);
+  if (chartFill === chart.chartFill
+    && chartBg === chart.chartBg
+    && chartFillHidden === chart.chartFillHidden
+    && chartBorder.color === chart.chartBorderColor
+    && chartBorder.fill === chart.chartBorderLineFill
+    && chartBorder.widthEmu === chart.chartBorderWidthEmu
+    && chartBorder.dash === chart.chartBorderDash
+    && chartBorder.dashAuthored === chart.chartBorderDashAuthored
+    && chartBorder.customDash === chart.chartBorderCustomDash
+    && chartBorder.cap === chart.chartBorderCap
+    && chartBorder.join === chart.chartBorderJoin
+    && chartBorder.compound === chart.chartBorderCompound
+    && chartBorder.hidden === chart.chartBorderHidden) return chart;
+  return {
+    ...chart,
+    chartFill,
+    chartBg,
+    chartFillHidden,
+    chartBorderColor: chartBorder.color,
+    chartBorderLineFill: chartBorder.fill,
+    chartBorderWidthEmu: chartBorder.widthEmu,
+    chartBorderDash: chartBorder.dash,
+    chartBorderDashAuthored: chartBorder.dashAuthored,
+    chartBorderCustomDash: chartBorder.customDash,
+    chartBorderCap: chartBorder.cap,
+    chartBorderJoin: chartBorder.join,
+    chartBorderCompound: chartBorder.compound,
+    chartBorderHidden: chartBorder.hidden,
+  };
+}
+
+/** Materialize the linked decoration roles that an optional family renderer
+ * consumes directly from `ChartSeries`. Keeping this projection in core means
+ * the 2-D, 3-D, DOCX, XLSX, and PPTX paths receive one effective precedence
+ * result without teaching an optional renderer about package sidecars. */
+function applyLinkedChartStyleRoles(chart: ChartModel): ChartModel {
+  if (!chart.chartStyleRoles?.errorBar
+    && !chart.chartStyleRoles?.leaderLine
+    && !chart.chartStyleRoles?.trendline
+    && !chart.chartStyleRoles?.dataTable
+    && !chart.chartStyleRoles?.gridlineMajor
+    && !chart.chartStyleRoles?.gridlineMinor
+    && !chart.chartStyleRoles?.categoryAxis
+    && !chart.chartStyleRoles?.valueAxis
+    && !chart.chartStyleRoles?.seriesAxis
+    && !chart.chartStyleRoles?.dataPointMarker
+    && !chart.chartStyleRoles?.legend
+    && !chart.chartStyleRoles?.plotArea
+    && !chart.chartStyleRoles?.chartArea
+    && chart.chartStyleMarkerSizePt == null
+    && chart.chartStyleMarkerSymbol == null) {
+    return chart;
+  }
+  let changed = false;
+  const series = chart.series.map((sourceItem, seriesIndex) => {
+    const item = chartStyleRoleMarker(chart, sourceItem, seriesIndex, chart.series.length);
+    changed ||= item !== sourceItem;
+    const errBars = chart.chartStyleRoles?.errorBar ? item.errBars?.map(errorBar => {
+      const effective = chartStyleRoleErrorBar(chart, errorBar);
+      changed ||= effective.color !== errorBar.color
+        || effective.lineWidthEmu !== errorBar.lineWidthEmu
+        || effective.dash !== errorBar.dash
+        || effective.hidden !== errorBar.hidden;
+      return effective;
+    }) : item.errBars;
+    let seriesDataLabels = item.seriesDataLabels;
+    if (seriesDataLabels && chart.chartStyleRoles?.leaderLine) {
+      const effective = chartStyleRoleLeaderLine(chart, seriesDataLabels);
+      const merged = {
+        ...seriesDataLabels,
+        leaderLineColor: effective.color ?? undefined,
+        leaderLineWidthEmu: effective.widthEmu ?? undefined,
+        leaderLineDash: effective.dash ?? undefined,
+        leaderLineHidden: effective.hidden ?? undefined,
+      };
+      changed ||= merged.leaderLineColor !== seriesDataLabels.leaderLineColor
+        || merged.leaderLineWidthEmu !== seriesDataLabels.leaderLineWidthEmu
+        || merged.leaderLineDash !== seriesDataLabels.leaderLineDash
+        || merged.leaderLineHidden !== seriesDataLabels.leaderLineHidden;
+      seriesDataLabels = merged;
+    }
+    const trendLines = chart.chartStyleRoles?.trendline ? item.trendLines?.map(trendline => {
+      const effective = chartStyleRoleTrendline(chart, trendline);
+      changed ||= effective.lineColor !== trendline.lineColor
+        || effective.lineWidthEmu !== trendline.lineWidthEmu
+        || effective.lineDash !== trendline.lineDash
+        || effective.lineHidden !== trendline.lineHidden;
+      return effective;
+    }) : item.trendLines;
+    if (errBars === item.errBars
+      && seriesDataLabels === item.seriesDataLabels
+      && trendLines === item.trendLines) return item;
+    return { ...item, errBars, seriesDataLabels, trendLines };
+  });
+  let dataTable = chart.dataTable;
+  if (dataTable && chart.chartStyleRoles?.dataTable) {
+    const effective = chartStyleRoleDataTable(chart, dataTable);
+    changed ||= effective.lineColor !== dataTable.lineColor
+      || effective.lineWidthEmu !== dataTable.lineWidthEmu
+      || effective.lineDash !== dataTable.lineDash
+      || effective.lineHidden !== dataTable.lineHidden;
+    dataTable = effective;
+  }
+  const valMajor = chartStyleRoleGridline(
+    chart, 'gridlineMajor', chart.valAxisMajorGridlines,
+    chart.valAxisGridlineColor, chart.valAxisGridlineWidthEmu, chart.valAxisGridlineDash,
+  );
+  const catMajor = chartStyleRoleGridline(
+    chart, 'gridlineMajor', chart.catAxisMajorGridlines,
+    chart.catAxisGridlineColor, chart.catAxisGridlineWidthEmu, chart.catAxisGridlineDash,
+  );
+  const valMinor = chartStyleRoleGridline(
+    chart, 'gridlineMinor', chart.valAxisMinorGridlines,
+    chart.valAxisMinorGridlineColor,
+    chart.valAxisMinorGridlineWidthEmu,
+    chart.valAxisMinorGridlineDash,
+  );
+  const catMinor = chartStyleRoleGridline(
+    chart, 'gridlineMinor', chart.catAxisMinorGridlines,
+    chart.catAxisMinorGridlineColor,
+    chart.catAxisMinorGridlineWidthEmu,
+    chart.catAxisMinorGridlineDash,
+  );
+  const secondaryValGridlines = chartStyleRoleSecondaryGridlines(chart, chart.secondaryValAxis);
+  const secondaryCatGridlines = chartStyleRoleSecondaryGridlines(chart, chart.secondaryCatAxis);
+  const secondaryValAxis = chartStyleRoleSecondaryAxisLine(
+    chart, secondaryValGridlines, 'valueAxis',
+  );
+  const secondaryCatAxis = chartStyleRoleSecondaryAxisLine(
+    chart, secondaryCatGridlines, 'categoryAxis',
+  );
+  const catAxisLine = chartStyleRoleAxisLine(
+    chart, 'categoryAxis',
+    chart.catAxisLineColor, chart.catAxisLineWidthEmu, chart.catAxisLineDash,
+    chart.catAxisLineHidden,
+  );
+  const valAxisLine = chartStyleRoleAxisLine(
+    chart, 'valueAxis',
+    chart.valAxisLineColor, chart.valAxisLineWidthEmu, chart.valAxisLineDash,
+    chart.valAxisLineHidden,
+  );
+  const catAxisStyle = chart.chartStyleRoles?.categoryAxis;
+  const valAxisStyle = chart.chartStyleRoles?.valueAxis;
+  const catAxisFontSizeHpt = chart.catAxisFontSizeHpt ?? catAxisStyle?.fontSizeHpt ?? null;
+  const catAxisFontBold = chart.catAxisFontBold ?? catAxisStyle?.fontBold;
+  const catAxisFontItalic = chart.catAxisFontItalic ?? catAxisStyle?.fontItalic;
+  const catAxisFontColor = chart.catAxisFontColor ?? catAxisStyle?.fontColor;
+  const catAxisFontFace = chart.catAxisFontFace ?? catAxisStyle?.fontFace;
+  const valAxisFontSizeHpt = chart.valAxisFontSizeHpt ?? valAxisStyle?.fontSizeHpt ?? null;
+  const valAxisFontBold = chart.valAxisFontBold ?? valAxisStyle?.fontBold;
+  const valAxisFontItalic = chart.valAxisFontItalic ?? valAxisStyle?.fontItalic;
+  const valAxisFontColor = chart.valAxisFontColor ?? valAxisStyle?.fontColor;
+  const valAxisFontFace = chart.valAxisFontFace ?? valAxisStyle?.fontFace;
+  changed ||= valMajor.visible !== chart.valAxisMajorGridlines
+    || valMajor.color !== chart.valAxisGridlineColor
+    || valMajor.widthEmu !== chart.valAxisGridlineWidthEmu
+    || valMajor.dash !== chart.valAxisGridlineDash
+    || catMajor.visible !== chart.catAxisMajorGridlines
+    || catMajor.color !== chart.catAxisGridlineColor
+    || catMajor.widthEmu !== chart.catAxisGridlineWidthEmu
+    || catMajor.dash !== chart.catAxisGridlineDash
+    || valMinor.visible !== chart.valAxisMinorGridlines
+    || valMinor.color !== chart.valAxisMinorGridlineColor
+    || valMinor.widthEmu !== chart.valAxisMinorGridlineWidthEmu
+    || valMinor.dash !== chart.valAxisMinorGridlineDash
+    || catMinor.visible !== chart.catAxisMinorGridlines
+    || catMinor.color !== chart.catAxisMinorGridlineColor
+    || catMinor.widthEmu !== chart.catAxisMinorGridlineWidthEmu
+    || catMinor.dash !== chart.catAxisMinorGridlineDash
+    || secondaryValAxis !== chart.secondaryValAxis
+    || secondaryCatAxis !== chart.secondaryCatAxis
+    || catAxisLine.color !== chart.catAxisLineColor
+    || catAxisLine.widthEmu !== chart.catAxisLineWidthEmu
+    || catAxisLine.dash !== chart.catAxisLineDash
+    || (catAxisLine.hidden === true) !== chart.catAxisLineHidden
+    || valAxisLine.color !== chart.valAxisLineColor
+    || valAxisLine.widthEmu !== chart.valAxisLineWidthEmu
+    || valAxisLine.dash !== chart.valAxisLineDash
+    || (valAxisLine.hidden === true) !== chart.valAxisLineHidden
+    || catAxisFontSizeHpt !== chart.catAxisFontSizeHpt
+    || catAxisFontBold !== chart.catAxisFontBold
+    || catAxisFontItalic !== chart.catAxisFontItalic
+    || catAxisFontColor !== chart.catAxisFontColor
+    || catAxisFontFace !== chart.catAxisFontFace
+    || valAxisFontSizeHpt !== chart.valAxisFontSizeHpt
+    || valAxisFontBold !== chart.valAxisFontBold
+    || valAxisFontItalic !== chart.valAxisFontItalic
+    || valAxisFontColor !== chart.valAxisFontColor
+    || valAxisFontFace !== chart.valAxisFontFace;
+  const effective = changed ? {
+    ...chart,
+    series,
+    dataTable,
+    valAxisMajorGridlines: valMajor.visible,
+    valAxisGridlineColor: valMajor.color,
+    valAxisGridlineWidthEmu: valMajor.widthEmu,
+    valAxisGridlineDash: valMajor.dash,
+    catAxisMajorGridlines: catMajor.visible,
+    catAxisGridlineColor: catMajor.color,
+    catAxisGridlineWidthEmu: catMajor.widthEmu,
+    catAxisGridlineDash: catMajor.dash,
+    valAxisMinorGridlines: valMinor.visible,
+    valAxisMinorGridlineColor: valMinor.color,
+    valAxisMinorGridlineWidthEmu: valMinor.widthEmu,
+    valAxisMinorGridlineDash: valMinor.dash,
+    catAxisMinorGridlines: catMinor.visible,
+    catAxisMinorGridlineColor: catMinor.color,
+    catAxisMinorGridlineWidthEmu: catMinor.widthEmu,
+    catAxisMinorGridlineDash: catMinor.dash,
+    secondaryValAxis,
+    secondaryCatAxis,
+    catAxisLineColor: catAxisLine.color,
+    catAxisLineWidthEmu: catAxisLine.widthEmu,
+    catAxisLineDash: catAxisLine.dash,
+    catAxisLineHidden: catAxisLine.hidden === true,
+    valAxisLineColor: valAxisLine.color,
+    valAxisLineWidthEmu: valAxisLine.widthEmu,
+    valAxisLineDash: valAxisLine.dash,
+    valAxisLineHidden: valAxisLine.hidden === true,
+    catAxisFontSizeHpt,
+    catAxisFontBold,
+    catAxisFontItalic,
+    catAxisFontColor,
+    catAxisFontFace,
+    valAxisFontSizeHpt,
+    valAxisFontBold,
+    valAxisFontItalic,
+    valAxisFontColor,
+    valAxisFontFace,
+  } : chart;
+  return chartStyleRoleLegend(chartStyleRolePlotArea(chartStyleRoleChartArea(
+    chartStyleRoleSeriesAxis(effective),
+  )));
+}
+
+function drawUpDownBars(
+  ctx: CanvasRenderingContext2D,
+  startValueAt: (index: number) => number | null,
+  endValueAt: (index: number) => number | null,
+  pointCount: number,
+  toX: (index: number) => number,
+  toYStart: (value: number) => number,
+  toYEnd: (value: number) => number,
+  slotWidth: number,
+  style: ChartStockUpDownBarStyle,
+  ptToPx: number,
+  useLegacyDefaultPaint: boolean,
+  shapeRotationDeg = 0,
+): void {
+  const gapPercent = Number.isFinite(style.gapWidthPercent) && style.gapWidthPercent >= 0
+    ? style.gapWidthPercent
+    : 150;
+  const barWidth = Math.max(0, slotWidth / (1 + gapPercent / 100));
+  for (let index = 0; index < pointCount; index++) {
+    const start = startValueAt(index);
+    const end = endValueAt(index);
+    if (start == null || end == null || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const startY = toYStart(start);
+    const endY = toYEnd(end);
+    const barHeight = Math.abs(endY - startY);
+    if (!(barWidth > 0) || !(barHeight > 0) || !Number.isFinite(barHeight)) continue;
+    const paint = end >= start ? style.up : style.down;
+    const defaultFill = end >= start ? 'FFFFFF' : '000000';
+    const barX = toX(index) - barWidth / 2;
+    const barY = Math.min(startY, endY);
+    if (!paint.fillHidden && (paint.fill != null || paint.fillColor != null || useLegacyDefaultPaint)) {
+      ctx.fillStyle = paint.fill
+        ? (resolveFill(paint.fill, ctx, barX, barY, barWidth, barHeight, shapeRotationDeg)
+          ?? `#${paint.fillColor ?? defaultFill}`)
+        : `#${paint.fillColor ?? defaultFill}`;
+      ctx.fillRect(barX, barY, barWidth, barHeight);
+    }
+    if (!paint.lineHidden && (
+      paint.lineColor != null || paint.lineWidthEmu != null || useLegacyDefaultPaint
+    )) {
+      const previousDash = ctx.getLineDash();
+      const previousCap = ctx.lineCap;
+      const previousJoin = ctx.lineJoin;
+      ctx.strokeStyle = `#${paint.lineColor ?? '000000'}`;
+      ctx.lineWidth = paint.lineWidthEmu != null
+        ? axisLineWidthPx(paint.lineWidthEmu, ptToPx)
+        : Math.max(1, 0.75 * ptToPx);
+      ctx.setLineDash(dashPatternForPreset(paint.lineDash ?? undefined, ctx.lineWidth));
+      ctx.lineCap = paint.lineCap === 'rnd'
+        ? 'round' : paint.lineCap === 'sq' ? 'square' : 'butt';
+      ctx.lineJoin = paint.lineJoin === 'round' || paint.lineJoin === 'bevel'
+        ? paint.lineJoin : 'miter';
+      ctx.strokeRect(barX, barY, barWidth, barHeight);
+      ctx.setLineDash(previousDash);
+      ctx.lineCap = previousCap;
+      ctx.lineJoin = previousJoin;
+    }
+  }
+}
+
+function drawLineGroupDecorations(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  pointCount: number,
+  toX: (index: number) => number,
+  yMapFor: (series: ChartSeries) => (value: number) => number,
+  categoryAxisYFor: (series: ChartSeries) => number,
+  valueFor: (series: ChartSeries, index: number) => number | null,
+  slotWidth: number,
+  ptToPx: number,
+  shapeRotationDeg: number,
+): void {
+  for (const decoration of chart.lineGroupDecorations ?? []) {
+    let members = chart.series.filter(series => series.lineGroupIndex === decoration.groupIndex);
+    // Hand-authored callers predating line-group provenance still represent a
+    // single ordinary line group as the whole series list.
+    if (members.length === 0 && decoration.groupIndex === 0
+      && ['line', 'stackedLine', 'stackedLinePct'].includes(chart.chartType)) {
+      members = chart.series.filter(series => series.seriesType == null || series.seriesType === 'line');
+    }
+    if (members.length === 0) continue;
+
+    if (decoration.upDownBars && members.length >= 2) {
+      const first = members[0];
+      const last = members[members.length - 1];
+      const upDownBars = {
+        ...decoration.upDownBars,
+        up: chartStyleRoleBarPaint(chart, decoration.upDownBars.up, 'upBar'),
+        down: chartStyleRoleBarPaint(chart, decoration.upDownBars.down, 'downBar'),
+      };
+      drawUpDownBars(
+        ctx, index => valueFor(first, index), index => valueFor(last, index), pointCount, toX,
+        yMapFor(first), yMapFor(last), slotWidth, upDownBars, ptToPx,
+        // Empty upBars/downBars paint is application-defined. The retained
+        // Office observation is limited to classic Style 2; other styles keep
+        // the geometry/model but do not receive a guessed white/black paint.
+        chart.legacyChartStyle === 2,
+        shapeRotationDeg,
+      );
+    }
+
+    const dropLineStyle = decoration.dropLines
+      ? chartStyleRoleLine(chart, decoration.dropLines, 'dropLine')
+      : null;
+    if (dropLineStyle && applyDecorationLineStyle(ctx, dropLineStyle, ptToPx)) {
+      // Office paints one envelope per category, not one line per series. The
+      // envelope includes the effective category-axis crossing and every
+      // plotted point in the owning line group. This is observable in vector
+      // output for both ordinary and interior crossings; painting per-series
+      // segments produces coincident seams and the wrong visible endpoints.
+      drawDropLineEnvelopes(
+        ctx, members, pointCount, toX, yMapFor, categoryAxisYFor, valueFor,
+      );
+    }
+
+    const hiLowLineStyle = decoration.hiLowLines
+      ? chartStyleRoleLine(chart, decoration.hiLowLines, 'hiLoLine')
+      : null;
+    if (hiLowLineStyle && members.length >= 2
+      && applyDecorationLineStyle(ctx, hiLowLineStyle, ptToPx)) {
+      const toY = yMapFor(members[0]);
+      for (let index = 0; index < pointCount; index++) {
+        let low = Infinity;
+        let high = -Infinity;
+        for (const series of members) {
+          const value = valueFor(series, index);
+          if (value == null || !Number.isFinite(value)) continue;
+          low = Math.min(low, value);
+          high = Math.max(high, value);
+        }
+        if (!Number.isFinite(low) || !Number.isFinite(high)) continue;
+        ctx.beginPath();
+        ctx.moveTo(toX(index), toY(low));
+        ctx.lineTo(toX(index), toY(high));
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+function axisCrossingValue(
+  crossesAt: number | null | undefined,
+  crosses: string | null | undefined,
+  min: number,
+  max: number,
+): number {
+  if (crossesAt != null && Number.isFinite(crossesAt)) {
+    return clamp(crossesAt, min, max);
+  }
+  if (crosses === 'max') return max;
+  if (crosses === 'min') return min;
+  return clamp(0, min, max);
+}
+
+function categoryAxisCrossingValue(chart: ChartModel, min: number, max: number): number {
+  return axisCrossingValue(chart.catAxisCrossesAt, chart.catAxisCrosses, min, max);
+}
+
 function renderLineChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
 
   // stackedLine (`<c:grouping val="stacked">`) draws each series at the running
   // sum of the series below it; stackedLinePct (`percentStacked`) normalizes
@@ -3375,6 +5940,19 @@ function renderLineChart(
       dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
     }
   }
+  for (let si = 0; si < chart.series.length; si++) {
+    const series = chart.series[si];
+    if (isSecondarySeries(series)) continue;
+    forEachErrorBarEndpoint(
+      series,
+      'y',
+      index => series.values[index] == null ? null : plotted(si, index),
+      value => {
+        dataMin = Math.min(dataMin, value);
+        dataMax = Math.max(dataMax, value);
+      },
+    );
+  }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
   if (chart.valMin != null) dataMin = pct ? chart.valMin * 100 : chart.valMin;
@@ -3386,12 +5964,14 @@ function renderLineChart(
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
   // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
   // side-legend reserve is unchanged.
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
-  const titleFontPx = titleBand.fontPx;
-  const titleTopPad = titleBand.topPad;
-  const titleH = titleBand.bandH;
+  let titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
+  let titleFontPx = titleBand.fontPx;
+  let titleTopPad = titleBand.topPad;
+  let titleH = titleBand.bandH;
   const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   // Axis-title bands use the real title font (XML @sz when set), independent of
@@ -3401,14 +5981,20 @@ function renderLineChart(
   const valTitlePx = axBands.valFontPx;
   const catTitleH = axBands.catBandH;
   const valTitleW = axBands.valBandW;
+  const hasDataTable = chartHasDataTable(chart);
+  const dataTableBaseH = chartDataTableBaseHeight(chart, ptToPx);
+  const dataTableHeaderW = chartDataTableHeaderWidth(ctx, chart, ptToPx);
 
   // Vertical pads (independent of the right gutter) so an estimated plot height
   // is known before the secondary-axis scale + right-gutter measurement — the
   // same up-front ordering the bar renderer uses. The top adds half a value-axis
   // label so the topmost gridline label rides above the plot; the bottom reserves
   // PowerPoint's full category-label band (gap + line-height + margin).
-  const padT = titleH + legTopH + valAxFontPx / 2 + 2;
-  const padB = catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
+  let padT = titleH + legTopH + valAxFontPx / 2 + 2;
+  const padB = (hasDataTable
+    ? dataTableBaseH
+    : catAxisLabelBandH(catAxFontPx, chart.catAxisLabelOffsetPercent))
+    + catTitleH + legBottomH;
   const phEst = h - padT - padB;
 
   // Secondary value-axis scale (shared helper). Its axis is the vertical right
@@ -3440,6 +6026,12 @@ function renderLineChart(
     ? axisTitleFontPx(sec.titleFontSizeHpt, ptToPx) + 8
     : 0;
 
+  const titleLeftBandW = legLeftW + Math.max(
+    valAxFontPx * 2.2 + 10 + valTitleW,
+    dataTableHeaderW,
+  );
+  const titleRightBandW = legRightW + w * 0.05 + secLabelBandW + secTitleBandW;
+
   const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, pct);
   let primaryLabelWidth = 0;
   if (
@@ -3449,7 +6041,12 @@ function renderLineChart(
     && chart.plotAreaManualLayout.layoutTarget !== 'inner'
   ) {
     const previousFont = ctx.font;
-    ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      valAxFontPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     for (const value of provisionalPlan.majorLines) {
       primaryLabelWidth = Math.max(
         primaryLabelWidth,
@@ -3462,9 +6059,9 @@ function renderLineChart(
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
     t: padT,
-    r: legRightW + w * 0.05 + secLabelBandW + secTitleBandW,
+    r: titleRightBandW,
     b: padB,
-    l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
+    l: titleLeftBandW,
   };
 
   const manualOuterInsets = chartManualOuterAxisInsets({
@@ -3477,17 +6074,18 @@ function renderLineChart(
       ? valueTickLabelGapPx(valAxFontPx)
       : 6,
     catLabelGapPx: chart.catAxisFontSizeHpt != null
-      ? categoryTickLabelGapPx(catAxFontPx)
-      : 5,
+      ? categoryLabelOffsetPx(
+        categoryTickLabelGapPx(catAxFontPx),
+        chart.catAxisLabelOffsetPercent,
+      )
+      : categoryLabelOffsetPx(5, chart.catAxisLabelOffsetPercent),
     outerTextMarginPx: AXIS_OUTER_TEXT_MARGIN_PT * ptToPx,
     valTitleBandW: valTitleW,
     catTitleBandH: catTitleH,
     secondaryBandW: secLabelBandW + secTitleBandW,
   });
 
-  drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
-
-  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+  let lineFrame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
     legendReserve: leg,
@@ -3495,12 +6093,50 @@ function renderLineChart(
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
   });
+  // The automatic title box follows the inner plot width. Resolve that width
+  // from the same frame that owns the axis/legend gutters, then run one stable
+  // vertical-layout pass if wrapping adds title lines.
+  const plotWidthTitleBand = measuredCartesianTitleBand(
+    ctx,
+    chart,
+    lineFrame.plotRect.pw,
+    h,
+    ptToPx,
+  );
+  if (Math.abs(plotWidthTitleBand.bandH - titleBand.bandH) > 0.01) {
+    titleBand = plotWidthTitleBand;
+    titleFontPx = titleBand.fontPx;
+    titleTopPad = titleBand.topPad;
+    titleH = titleBand.bandH;
+    padT = titleH + legTopH + valAxFontPx / 2 + 2;
+    pad.t = padT;
+    lineFrame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+      titleBand,
+      legendSideReserveFrac: 0.22,
+      legendReserve: leg,
+      pad,
+      honorPlotAreaManualLayout: true,
+      manualOuterInsets,
+    });
+  }
+  const { px0, py0, pw } = lineFrame.plotRect;
+  let { ph } = lineFrame.plotRect;
+  drawChartTitleForLayout(
+    ctx, chart,
+    chart.titleManualLayout || !chart.titleRichRuns?.length ? x : px0, y,
+    chart.titleManualLayout || !chart.titleRichRuns?.length ? w : pw, h,
+    y + titleTopPad, titleFontPx,
+  );
   if (pw <= 0 || ph <= 0) return;
 
-  if (chart.plotAreaBg) {
-    ctx.fillStyle = `#${chart.plotAreaBg}`;
-    ctx.fillRect(px0, py0, pw, ph);
+  const dataTableLayout = hasDataTable
+    ? measureChartDataTable(ctx, chart, pw / n, ptToPx)
+    : null;
+  if (dataTableLayout && dataTableLayout.totalHeight > dataTableBaseH) {
+    ph = Math.max(1, ph - (dataTableLayout.totalHeight - dataTableBaseH));
   }
+
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
   // Value axis is vertical → its length is the plot height (axis-length-aware
   // auto major unit, same model as the bar/column renderer). `planValueAxis`
@@ -3515,23 +6151,44 @@ function renderLineChart(
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
   const yMapFor = (s: ChartSeries): ((v: number) => number) =>
     isSecondarySeries(s) ? toYSecondary : toY;
+  const primaryCategoryAxisY = toY(
+    categoryAxisCrossingValue(chart, plan.min, plan.max),
+  );
+  const secondaryCategoryAxisY = sec && secScale
+    ? toYSecondary(axisCrossingValue(
+      chart.secondaryCatAxis?.crossesAt,
+      chart.secondaryCatAxis?.crosses,
+      secScale.min,
+      secScale.max,
+    ))
+    : primaryCategoryAxisY;
+  const categoryAxisYFor = (series: ChartSeries): number =>
+    isSecondarySeries(series) ? secondaryCategoryAxisY : primaryCategoryAxisY;
   const primaryCatLine = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
   const primaryValLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
   const primaryCatTickColor = chart.catAxisLineColor != null ? primaryCatLine.color : undefined;
   const primaryCatTickWidth = chart.catAxisLineWidthEmu != null ? primaryCatLine.width : undefined;
   const primaryValTickColor = chart.valAxisLineColor != null ? primaryValLine.color : undefined;
   const primaryValTickWidth = chart.valAxisLineWidthEmu != null ? primaryValLine.width : undefined;
+  const dateAxisPlan = chartDateAxisPlan(chart, cats);
   // crossBetween="between" (default) insets the first/last category by half a
   // step so points aren't flush against the axes. "midCat" anchors them.
   // A `maxMin` category orientation (§21.2.2.130) mirrors the index left↔right.
   const between = isCrossBetween(chart);
   const catRev = catAxisReversed(chart);
-  const toX = between
-    ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
-    : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
+  const toX = dateAxisPlan
+    ? (i0: number) => px0 + dateAxisPlan.positions[i0]! * pw
+    : between
+      ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
+      : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
 
   if (!chart.valAxisHidden) {
-    ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      valAxFontPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     ctx.textBaseline = 'middle';
     // Resolved gridline stroke (`<c:majorGridlines><c:spPr><a:ln>` or default).
     const grid = valGridStroke(chart, ptToPx);
@@ -3544,7 +6201,7 @@ function renderLineChart(
     for (const v of plan.majorLines) {
       const gy = toY(v);
       if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0, grid);
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden, 'major', ptToPx);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden, 'major', ptToPx, chart.valAxisLineDash);
       if (drawLabels) {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
         ctx.textAlign = 'right';
@@ -3556,7 +6213,7 @@ function renderLineChart(
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
       for (const value of plan.minorTicks) {
-        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden, 'minor', ptToPx);
+        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), primaryValTickColor, primaryValTickWidth, false, chart.valAxisLineHidden, 'minor', ptToPx, chart.valAxisLineDash);
       }
     }
   }
@@ -3576,7 +6233,10 @@ function renderLineChart(
     ctx.lineWidth = cg.width;
     const previousDash = cg.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
     if (cg.dash.length > 0) ctx.setLineDash(cg.dash);
-    for (const frac of catGridlineFractions(chart, n)) {
+    const fractions = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => tick.fraction)
+      : catGridlineFractions(chart, n);
+    for (const frac of fractions) {
       const gx = px0 + frac * pw;
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
@@ -3587,13 +6247,38 @@ function renderLineChart(
   // unless hidden explicitly. Office treats `<c:spPr><a:ln><a:noFill>` as
   // suppressing the rule and tick marks while retaining labels/gridlines.
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-    ctx.strokeStyle = primaryCatLine.color; ctx.lineWidth = primaryCatLine.width;
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, primaryCategoryAxisY, px0 + pw, primaryCategoryAxisY,
+      primaryCatLine.color, primaryCatLine.width, chart.catAxisLineDash,
+    );
   }
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
-    ctx.strokeStyle = primaryValLine.color; ctx.lineWidth = primaryValLine.width;
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0, px0, py0 + ph,
+      primaryValLine.color, primaryValLine.width, chart.valAxisLineDash,
+    );
   }
+
+  // CT_LineChart owns drop lines, high-low lines, and up/down bars at the
+  // group level (ECMA-376 §21.2.2 EG_LineChartShared / CT_LineChart). Paint
+  // this background geometry before the series so authored lines and markers
+  // remain on top, as in Office. Group provenance prevents a second line group
+  // in a combo chart from inheriting the first group's decorations.
+  const decorationSlotWidth = dateAxisPlan
+    ? (dateAxisPlan.categoryBandFractions[0] ?? 0) * pw
+    : between ? pw / n : n > 1 ? pw / (n - 1) : pw;
+  const lineSeriesIndex = new Map(
+    chart.series.map((series, seriesIndex) => [series, seriesIndex]),
+  );
+  drawLineGroupDecorations(
+    ctx, chart, n, toX, yMapFor,
+    categoryAxisYFor,
+    (series, index) => {
+      const seriesIndex = lineSeriesIndex.get(series);
+      return seriesIndex != null ? plotted(seriesIndex, index) : null;
+    },
+    decorationSlotWidth, ptToPx, shapeRotationDeg,
+  );
 
   // Line width and marker size come from OOXML in points (<a:ln w=EMU> /
   // <c:marker><c:size val=pt>). Omitted series strokes keep the PowerPoint
@@ -3618,7 +6303,7 @@ function renderLineChart(
     ctx.lineWidth = s.lineWidthEmu != null
       ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
       : lineWidthPx;
-    ctx.setLineDash(dashPatternForPreset(s.chartexStyle?.lineDash ?? undefined));
+    ctx.setLineDash(dashPatternForPreset(s.chartexStyle?.lineDash ?? undefined, ctx.lineWidth));
     ctx.lineCap = s.chartexStyle?.lineCap === 'rnd'
       ? 'round'
       : s.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt';
@@ -3658,14 +6343,17 @@ function renderLineChart(
     // dots overlay the bar tips. Only fires for series that carry them.
     const plottedOf = (ci: number): number => plotted(si, ci);
     for (const eb of s.errBars ?? []) {
-      drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
+      drawCategoryErrorBars(
+        ctx, s, chartStyleRoleErrorBar(chart, eb), n, toX, yOf, plottedOf, color,
+      );
     }
 
     ctx.fillStyle = color;
     // ECMA-376 §21.2.2.32 — when the series resolves to no marker, skip the
     // data-point dots but keep data labels. Markers / labels pin to the plotted
     // (cumulative) value so they ride the stacked line, not the raw datum.
-    const drawMarkers = s.showMarker !== false;
+    const seriesMarkersVisible = s.showMarker !== false && s.markerSymbol !== 'none';
+    const drawMarkers = seriesMarkersVisible || hasVisiblePointMarkerOverride(s);
     // Series carrying explicit `<c:marker>` detail route through drawMarker
     // (symbol/size/fill/line + per-point `<c:dPt>` overrides). Series without
     // any detail keep the historical fixed-circle fast path unchanged
@@ -3701,12 +6389,17 @@ function renderLineChart(
             if (!drawMarkers) return 0;
             if (!hasMarkerDetail) return markerR;
             const dpt = pointOverrides.get(ci);
-            const symbol = dpt?.markerSymbol ?? s.markerSymbol ?? 'circle';
+            const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
             if (symbol === 'none') return 0;
             return ((dpt?.markerSize ?? s.markerSize ?? 5) / 2) * ptToPx;
           },
           face => chartFontFamily(chart, face, 'minor'),
           isSecondarySeries(s) ? sec?.displayUnits : chart.valAxisDisplayUnits,
+          ci => dataLabelLegendKey(si, ci),
+          value => dataLabelWithinAxisMaximum(
+            chart, value,
+            isSecondarySeries(s) && secScale ? secScale.max : plan.max,
+          ),
         );
       });
     }
@@ -3718,15 +6411,16 @@ function renderLineChart(
       if (drawMarkers) {
         if (hasMarkerDetail) {
           const dpt = pointOverrides.get(ci);
-          const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle');
+          const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
           if (symbol !== 'none') {
             const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
-            const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? color;
+            const fill = markerFillColorFor(s, dpt, ci, color);
             const line = dpt?.markerLine ?? s.markerLine ?? null;
             const lineWidthEmu = dpt?.markerLineWidthEmu ?? s.markerLineWidthEmu;
             drawMarker(
               ctx, toX(ci), yOf(pv), symbol, sizePt, fill, line, ptToPx,
               lineWidthEmu != null ? axisLineWidthPx(lineWidthEmu, ptToPx) : undefined,
+              markerFillPaintFor(s, dpt, ci), shapeRotationDeg,
             );
           }
         } else {
@@ -3778,30 +6472,78 @@ function renderLineChart(
   if (!chart.catAxisHidden) {
     const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      catAxFontPx,
+      chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+      chart.catAxisFontBold ?? false,
+      chart.catAxisFontItalic ?? false,
+    );
     // Tick marks and labels have independent authored skip intervals
     // (§21.2.2.205/§21.2.2.206). When tickLblSkip is absent every non-empty
     // cached category is paintable; sparse caches deliberately use blank
     // indices to author intervals such as every second year.
     const tickInterval = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
-    for (let ci = 0; ci < n; ci += tickInterval) {
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), primaryCatTickColor, primaryCatTickWidth, false, chart.catAxisLineHidden, 'major', ptToPx);
+    const majorTickXs = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => px0 + tick.fraction * pw)
+      : Array.from({ length: Math.ceil(n / tickInterval) }, (_, index) => toX(index * tickInterval));
+    for (const tx of majorTickXs) {
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', primaryCategoryAxisY, tx, primaryCatTickColor, primaryCatTickWidth, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
     }
-    const showLabels = catLabelsVisible(chart);
+    if (chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none' && dateAxisPlan) {
+      for (const tick of dateAxisPlan.minorTicks) {
+        drawAxisTick(
+          ctx, chart.catAxisMinorTickMark, 'cat', primaryCategoryAxisY,
+          px0 + tick.fraction * pw, primaryCatTickColor, primaryCatTickWidth,
+          false, chart.catAxisLineHidden, 'minor', ptToPx, chart.catAxisLineDash,
+        );
+      }
+    }
+    const showLabels = !hasDataTable && catLabelsVisible(chart);
     const labelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const rotRad = catLabelRotationRad(chart);
-    for (let ci = 0; ci < n; ci += labelInterval) {
-      const tx = toX(ci);
+    const labelEntries = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => ({
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        x: px0 + tick.fraction * pw,
+        categoryIndex: -1,
+      }))
+      : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
+        const ci = index * labelInterval;
+        return {
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904),
+          x: toX(ci),
+          categoryIndex: ci,
+        };
+      });
+    for (const entry of labelEntries) {
+      const anchor = entry.categoryIndex < 0
+        ? null
+        : categoryLabelAnchorFraction(
+          entry.categoryIndex,
+          n,
+          isCrossBetween(chart),
+          catAxisReversed(chart),
+          chart.catAxisLabelAlignment,
+        );
+      const tx = anchor ? px0 + anchor.fraction * pw : entry.x;
       if (!showLabels) continue;
+      ctx.textAlign = anchor?.textAlign ?? 'center';
       ctx.fillStyle = catLabelColor;
       // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
       // category-axis numFmt; string categories pass through unchanged.
-      const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
+      const label = entry.label;
       if (!label) continue;
-      const gap = chart.catAxisFontSizeHpt != null
-        ? categoryTickLabelGapPx(catAxFontPx)
-        : 5;
-      drawRotatedCatLabel(ctx, label, tx, py0 + ph + gap, rotRad);
+      const gap = categoryLabelOffsetPx(
+        chart.catAxisFontSizeHpt != null
+          ? categoryTickLabelGapPx(catAxFontPx)
+          : 5,
+        chart.catAxisLabelOffsetPercent,
+      );
+      const labelPosition = chart.catAxisTickLabelPos ?? 'nextTo';
+      const labelAxisY = labelPosition === 'nextTo'
+        ? primaryCategoryAxisY
+        : labelPosition === 'high' ? py0 : py0 + ph;
+      drawRotatedCatLabel(ctx, label, tx, labelAxisY + gap, rotRad);
     }
   }
 
@@ -3812,6 +6554,12 @@ function renderLineChart(
     drawSecondaryValueAxis(
       ctx, chart, sec, secScale, toYSecondary, r, px0, py0, pw, ph, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
+    );
+  }
+
+  if (dataTableLayout) {
+    drawChartDataTable(
+      ctx, chart, dataTableLayout, px0, py0 + ph, pw, x + legLeftW, ptToPx,
     );
   }
 
@@ -3833,13 +6581,16 @@ function renderLineChart(
  *   - the Open series marker (4-series only).
  * The value axis, date/category axis, title and legend reuse the shared
  * Cartesian scaffolding (identical to the line renderer). Four-series charts
- * also draw `<c:upDownBars>` (§21.2.2.227) between Open and Close.
+ * also draw `<c:upDownBars>` (§21.2.2.227) between the first and last
+ * authored series. In a four-series stock chart those are Open and Close; the
+ * schema also permits the element on a three-series High/Low/Close chart.
  */
 function renderStockChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
@@ -3859,14 +6610,18 @@ function renderStockChart(
   const lowS = series[lowIdx];
   const closeS = series[closeIdx] as ChartSeries | undefined;
   const openS = openIdx >= 0 ? series[openIdx] : undefined;
+  const upDownStartS = series[0] as ChartSeries | undefined;
+  const upDownEndS = series.at(-1) as ChartSeries | undefined;
 
   // ── Shared Cartesian frame (mirrors renderLineChart's band computation) ──
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
   const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legBottomH, legTopH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legBottomH, legTopH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
@@ -3874,32 +6629,44 @@ function renderStockChart(
   const valTitlePx = axBands.valFontPx;
   const catTitleH = axBands.catBandH;
   const valTitleW = axBands.valBandW;
+  const hasDataTable = chartHasDataTable(chart);
+  const dataTableBaseH = chartDataTableBaseHeight(chart, ptToPx);
+  const dataTableHeaderW = chartDataTableHeaderWidth(ctx, chart, ptToPx);
 
   const padT = titleH + legTopH + valAxFontPx / 2 + 2;
-  const padB = catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
+  const padB = (hasDataTable
+    ? dataTableBaseH
+    : catAxisLabelBandH(catAxFontPx, chart.catAxisLabelOffsetPercent))
+    + catTitleH + legBottomH;
 
   const pad = {
     t: padT,
     r: legRightW + w * 0.05,
     b: padB,
-    l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
+    l: legLeftW + Math.max(valAxFontPx * 2.2 + 10 + valTitleW, dataTableHeaderW),
   };
 
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
-  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+  const stockFrame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
     legendReserve: leg,
     pad,
     honorPlotAreaManualLayout: true,
   });
+  const { px0, py0, pw } = stockFrame.plotRect;
+  let { ph } = stockFrame.plotRect;
   if (pw <= 0 || ph <= 0) return;
 
-  if (chart.plotAreaBg) {
-    ctx.fillStyle = `#${chart.plotAreaBg}`;
-    ctx.fillRect(px0, py0, pw, ph);
+  const dataTableLayout = hasDataTable
+    ? measureChartDataTable(ctx, chart, pw / n, ptToPx)
+    : null;
+  if (dataTableLayout && dataTableLayout.totalHeight > dataTableBaseH) {
+    ph = Math.max(1, ph - (dataTableLayout.totalHeight - dataTableBaseH));
   }
+
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
   // ── Value-axis extent: across every series' plotted values (the hi-lo line
   // needs both the low and high extremes). Authored bounds are retained and
@@ -3914,6 +6681,17 @@ function renderStockChart(
       dataMax = Math.max(dataMax, v);
     }
   }
+  for (const stockSeries of series) {
+    forEachErrorBarEndpoint(
+      stockSeries,
+      'y',
+      index => stockSeries.values[index] ?? null,
+      value => {
+        dataMin = Math.min(dataMin, value);
+        dataMax = Math.max(dataMax, value);
+      },
+    );
+  }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   if (chart.valMin != null) dataMin = chart.valMin;
   if (chart.valMax != null) dataMax = chart.valMax;
@@ -3926,13 +6704,21 @@ function renderStockChart(
   // the first/last hi-lo line isn't flush against the axes (matches Excel).
   const between = isCrossBetween(chart);
   const catRev = catAxisReversed(chart);
-  const toX = between
-    ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
-    : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
+  const dateAxisPlan = chartDateAxisPlan(chart, cats);
+  const toX = dateAxisPlan
+    ? (i0: number) => px0 + dateAxisPlan.positions[i0]! * pw
+    : between
+      ? (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + ((i + 0.5) / n) * pw; }
+      : (i0: number) => { const i = catRev ? n - 1 - i0 : i0; return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw); };
 
   // ── Value axis: gridlines + ticks + labels (identical to the line renderer) ──
   if (!chart.valAxisHidden) {
-    ctx.font = `${valAxFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      valAxFontPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     ctx.textBaseline = 'middle';
     const grid = valGridStroke(chart, ptToPx);
     const minorGrid = valMinorGridStroke(chart, ptToPx);
@@ -3942,7 +6728,7 @@ function renderStockChart(
     for (const v of plan.majorLines) {
       const gy = toY(v);
       if (drawMajorGrid) strokeValueGridlineH(ctx, px0, pw, gy, v === 0, grid);
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, undefined, undefined, false, chart.valAxisLineHidden, 'major', ptToPx);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, undefined, undefined, false, chart.valAxisLineHidden, 'major', ptToPx, chart.valAxisLineDash);
       if (drawLabels) {
         ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
         ctx.textAlign = 'right';
@@ -3953,58 +6739,63 @@ function renderStockChart(
       drawAxisTick(
         ctx, chart.valAxisMinorTickMark, 'val', px0, toY(v),
         undefined, undefined, false, chart.valAxisLineHidden, 'minor', ptToPx,
+        chart.valAxisLineDash,
       );
     }
   }
 
   // Axis rules (bottom = category, left = value).
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  const stockCatLine = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
+  const stockValLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0 + ph, px0 + pw, py0 + ph,
+      stockCatLine.color, stockCatLine.width, chart.catAxisLineDash,
+    );
   }
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0, px0, py0 + ph,
+      stockValLine.color, stockValLine.width, chart.valAxisLineDash,
+    );
   }
 
-  // ── Open/close up-down bars (§21.2.2.218/227). The gap is expressed as a
-  // percentage of one bar width, so slot = bar + gap and
-  // bar = slot / (1 + gap/100). Direct upBars/downBars shape formatting is
-  // authoritative; the schema defaults are white up bars and black down bars
-  // with a black outline.
-  if (chart.stockUpDownBars && openS && closeS) {
-    const style = chart.stockUpDownBarStyle;
-    const gapPercent = style?.gapWidthPercent != null
-      && Number.isFinite(style.gapWidthPercent)
-      && style.gapWidthPercent >= 0
-      ? style.gapWidthPercent
-      : 150;
-    const slotW = between ? pw / n : n > 1 ? pw / (n - 1) : pw;
-    const barW = Math.max(0, slotW / (1 + gapPercent / 100));
-    for (let ci = 0; ci < n; ci++) {
-      const open = openS.values[ci];
-      const close = closeS.values[ci];
-      if (open == null || close == null || !Number.isFinite(open) || !Number.isFinite(close)) continue;
-      const yOpen = toY(open);
-      const yClose = toY(close);
-      const barH = Math.abs(yClose - yOpen);
-      if (!(barW > 0) || !(barH > 0) || !Number.isFinite(barH)) continue;
-      const paint = close >= open ? style?.up : style?.down;
-      const defaultFill = close >= open ? 'FFFFFF' : '000000';
-      const bx = toX(ci) - barW / 2;
-      const by = Math.min(yOpen, yClose);
-      if (!paint?.fillHidden) {
-        ctx.fillStyle = `#${paint?.fillColor ?? defaultFill}`;
-        ctx.fillRect(bx, by, barW, barH);
-      }
-      if (!paint?.lineHidden) {
-        ctx.strokeStyle = `#${paint?.lineColor ?? '000000'}`;
-        ctx.lineWidth = paint?.lineWidthEmu != null
-          ? axisLineWidthPx(paint.lineWidthEmu, ptToPx)
-          : Math.max(1, 0.75 * ptToPx);
-        ctx.setLineDash([]);
-        ctx.strokeRect(bx, by, barW, barH);
-      }
+  // CT_StockChart/dropLines uses the same chart-line paint contract as line
+  // and area charts. A stock drop line connects the category axis to the
+  // envelope of every finite stock value at that category.
+  if (chart.stockDropLines) {
+    const dropLineStyle = chartStyleRoleLine(chart, chart.stockDropLines, 'dropLine');
+    if (applyDecorationLineStyle(ctx, dropLineStyle, ptToPx)) {
+      drawDropLineEnvelopes(
+        ctx,
+        series,
+        n,
+        toX,
+        () => toY,
+        () => py0 + ph,
+        (stockSeries, index) => stockSeries.values[index] ?? null,
+      );
     }
+  }
+
+  // ── First/last-series up-down bars (§21.2.2.218/227). Shared with ordinary
+  // line-chart up/down bars so gap geometry and direct paint cannot drift.
+  if (chart.stockUpDownBars && upDownStartS && upDownEndS) {
+    const style = chart.stockUpDownBarStyle ?? {
+      gapWidthPercent: 150,
+      up: {},
+      down: {},
+    };
+    const slotWidth = dateAxisPlan
+      ? (dateAxisPlan.categoryBandFractions[0] ?? 0) * pw
+      : between ? pw / n : n > 1 ? pw / (n - 1) : pw;
+    drawUpDownBars(
+      ctx,
+      index => upDownStartS.values[index] ?? null,
+      index => upDownEndS.values[index] ?? null,
+      n, toX, toY, toY,
+      slotWidth, style, ptToPx, true, shapeRotationDeg,
+    );
   }
 
   // ── Hi-lo lines: vertical Low↔High per category. Drawn when the file declares
@@ -4013,18 +6804,27 @@ function renderStockChart(
   // `<c:hiLowLines>` line fill, else a neutral gray. ──
   const drawHiLo = (chart.stockHiLowLines ?? true) && highS != null && lowS != null;
   if (drawHiLo && highS && lowS) {
-    ctx.strokeStyle = chart.stockHiLowLineColor ? `#${chart.stockHiLowLineColor}` : '#595959';
-    ctx.lineWidth = Math.max(1, 0.75 * ptToPx);
-    ctx.setLineDash([]);
-    for (let ci = 0; ci < n; ci++) {
-      const hi = highS.values[ci];
-      const lo = lowS.values[ci];
-      if (hi == null || lo == null) continue;
-      const cx = toX(ci);
-      ctx.beginPath();
-      ctx.moveTo(cx, toY(hi));
-      ctx.lineTo(cx, toY(lo));
-      ctx.stroke();
+    const directStyle = chart.stockHiLowLineStyle ?? {
+      color: chart.stockHiLowLineColor ?? null,
+    };
+    const linkedStyle = chartStyleRoleLine(chart, directStyle, 'hiLoLine');
+    const lineStyle = linkedStyle.color == null
+      && linkedStyle.widthEmu == null
+      && linkedStyle.dash == null
+      && linkedStyle.hidden == null
+      ? { ...linkedStyle, color: '595959' }
+      : linkedStyle;
+    if (applyDecorationLineStyle(ctx, lineStyle, ptToPx)) {
+      for (let ci = 0; ci < n; ci++) {
+        const hi = highS.values[ci];
+        const lo = lowS.values[ci];
+        if (hi == null || lo == null) continue;
+        const cx = toX(ci);
+        ctx.beginPath();
+        ctx.moveTo(cx, toY(hi));
+        ctx.lineTo(cx, toY(lo));
+        ctx.stroke();
+      }
     }
   }
 
@@ -4038,19 +6838,36 @@ function renderStockChart(
   ): void => {
     if (!s) return;
     const color = chartColor(seriesIndex, s);
-    const symbol = s.markerSymbol ?? null;
-    const hasExplicitMarker = symbol != null && symbol !== 'none' && seriesHasMarkerDetail(s);
+    const pointOverrides = indexPointOverrides(s.dataPointOverrides);
+    const seriesMarkerVisible = s.markerSymbol != null && s.markerSymbol !== 'none'
+      && seriesHasMarkerDetail(s);
     const tickLen = Math.max(3, (pw / n) * 0.22);
     for (let ci = 0; ci < n; ci++) {
       const v = s.values[ci];
       if (v == null) continue;
       const cx = toX(ci);
       const cy = toY(v);
+      const point = pointOverrides.get(ci);
+      if (point?.markerSymbol === 'none' || (point?.markerSymbol == null && s.markerSymbol === 'none')) {
+        continue;
+      }
+      const hasExplicitMarker = seriesMarkerVisible
+        || (point?.markerSymbol != null && point.markerSymbol !== 'none');
       if (hasExplicitMarker) {
+        const symbol = point?.markerSymbol ?? s.markerSymbol ?? 'circle';
         drawMarker(
           ctx, cx, cy, symbol as string,
-          s.markerSize ?? 3, s.markerFill ?? color, s.markerLine ?? null, ptToPx,
-          s.markerLineWidthEmu != null ? axisLineWidthPx(s.markerLineWidthEmu, ptToPx) : undefined,
+          point?.markerSize ?? s.markerSize ?? 3,
+          markerFillColorFor(s, point, ci, color),
+          point?.markerLine ?? s.markerLine ?? null,
+          ptToPx,
+          (point?.markerLineWidthEmu ?? s.markerLineWidthEmu) != null
+            ? axisLineWidthPx(
+                (point?.markerLineWidthEmu ?? s.markerLineWidthEmu) as number,
+                ptToPx,
+              )
+            : undefined,
+          markerFillPaintFor(s, point, ci), shapeRotationDeg,
         );
         continue;
       }
@@ -4067,7 +6884,29 @@ function renderStockChart(
     }
   };
   drawStockTick(openS, openIdx, 'left');
+  if (highS?.markerSymbol != null) drawStockTick(highS, highIdx, 'both');
+  if (lowS?.markerSymbol != null) drawStockTick(lowS, lowIdx, 'both');
   drawStockTick(closeS, closeIdx, 'right');
+
+  // CT_LineSer error bars remain attached to their authored stock series.
+  // Stock uses a category X axis, so only Y-direction bars have data-unit
+  // geometry; the same shared category-series painter is used by line/area.
+  for (let seriesIndex = 0; seriesIndex < series.length; seriesIndex++) {
+    const stockSeries = series[seriesIndex];
+    const color = chartColor(seriesIndex, stockSeries);
+    for (const errorBars of stockSeries.errBars ?? []) {
+      drawCategoryErrorBars(
+        ctx,
+        stockSeries,
+        chartStyleRoleErrorBar(chart, errorBars),
+        n,
+        toX,
+        toY,
+        index => stockSeries.values[index] ?? 0,
+        color,
+      );
+    }
+  }
 
   // If fewer than 3 series (not a real hi-lo-close), still plot each series'
   // markers so nothing is silently dropped.
@@ -4079,22 +6918,74 @@ function renderStockChart(
 
   // ── Category (date) axis labels — same path as the line renderer. ──
   if (!chart.catAxisHidden) {
-    const labelInterval = Math.max(1, Math.ceil(n / 8));
+    const labelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const catLabelColor = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.fillStyle = catLabelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = `${catAxFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
-    const catSlotMaxPx = (pw / n) * labelInterval - 4;
-    const showLabels = catLabelsVisible(chart);
+    ctx.font = chartFontCss(
+      catAxFontPx,
+      chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+      chart.catAxisFontBold ?? false,
+      chart.catAxisFontItalic ?? false,
+    );
+    const catSlotMaxPx = dateAxisPlan
+      ? (dateAxisPlan.categoryBandFractions[0] ?? 0) * pw - 4
+      : (pw / n) * labelInterval - 4;
+    const showLabels = !hasDataTable && catLabelsVisible(chart);
     const rotRad = catLabelRotationRad(chart);
-    for (let ci = 0; ci < n; ci += labelInterval) {
-      const tx = toX(ci);
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx, undefined, undefined, false, chart.catAxisLineHidden, 'major', ptToPx);
+    const labelEntries = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => ({
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        x: px0 + tick.fraction * pw,
+        categoryIndex: -1,
+      }))
+      : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
+        const ci = index * labelInterval;
+        return {
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904),
+          x: toX(ci),
+          categoryIndex: ci,
+        };
+      });
+    for (const entry of labelEntries) {
+      const anchor = entry.categoryIndex < 0
+        ? null
+        : categoryLabelAnchorFraction(
+          entry.categoryIndex,
+          n,
+          isCrossBetween(chart),
+          catAxisReversed(chart),
+          chart.catAxisLabelAlignment,
+        );
+      const tx = anchor ? px0 + anchor.fraction * pw : entry.x;
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx, stockCatLine.color, stockCatLine.width, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
       if (!showLabels) continue;
+      ctx.textAlign = anchor?.textAlign ?? 'center';
       ctx.fillStyle = catLabelColor;
-      const label = formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
+      const label = entry.label;
       const budget = rotRad === 0 ? catSlotMaxPx : ph * 0.4;
-      drawRotatedCatLabel(ctx, elideToWidth(ctx, label, budget), tx, py0 + ph + 5, rotRad);
+      drawRotatedCatLabel(
+        ctx,
+        elideToWidth(ctx, label, budget),
+        tx,
+        py0 + ph + categoryLabelOffsetPx(5, chart.catAxisLabelOffsetPercent),
+        rotRad,
+      );
     }
+    if (chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none' && dateAxisPlan) {
+      for (const tick of dateAxisPlan.minorTicks) {
+        drawAxisTick(
+          ctx, chart.catAxisMinorTickMark, 'cat', py0 + ph,
+          px0 + tick.fraction * pw, undefined, undefined,
+          false, chart.catAxisLineHidden, 'minor', ptToPx, chart.catAxisLineDash,
+        );
+      }
+    }
+  }
+
+  if (dataTableLayout) {
+    drawChartDataTable(
+      ctx, chart, dataTableLayout, px0, py0 + ph, pw, x + legLeftW, ptToPx,
+    );
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2, ptToPx);
@@ -4102,13 +6993,587 @@ function renderStockChart(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Surface / contour chart (ECMA-376 §21.2.2.204)
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface SurfaceVertex extends ThreeDScenePoint { value: number }
+
+const MAX_SURFACE_PAINT_POLYGONS = 200_000;
+const SURFACE_SCENE_DEPTH_SCALE = 1.25;
+
+function clipSurfacePolygon(
+  polygon: SurfaceVertex[],
+  threshold: number,
+  keepAbove: boolean,
+): SurfaceVertex[] {
+  if (polygon.length === 0) return [];
+  const output: SurfaceVertex[] = [];
+  const inside = (vertex: SurfaceVertex): boolean =>
+    keepAbove ? vertex.value >= threshold : vertex.value <= threshold;
+  let previous = polygon[polygon.length - 1];
+  let previousInside = inside(previous);
+  for (const current of polygon) {
+    const currentInside = inside(current);
+    if (currentInside !== previousInside) {
+      const denominator = current.value - previous.value;
+      const fraction = denominator === 0 ? 0 : (threshold - previous.value) / denominator;
+      output.push({
+        x: previous.x + (current.x - previous.x) * fraction,
+        y: previous.y + (current.y - previous.y) * fraction,
+        depth: previous.depth + (current.depth - previous.depth) * fraction,
+        value: threshold,
+      });
+    }
+    if (currentInside) output.push(current);
+    previous = current;
+    previousInside = currentInside;
+  }
+  return output;
+}
+
+function renderSurfaceChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg = 0,
+): void {
+  const { x, y, w, h } = r;
+  const categories = chartCategories(chart);
+  const rows = chart.series;
+  const columnCount = categories.length;
+  const rowCount = rows.length;
+  if (columnCount < 2 || rowCount < 2) return;
+
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
+  for (const row of rows) {
+    for (let column = 0; column < columnCount; column++) {
+      const value = row.values[column];
+      if (value == null || !Number.isFinite(value)) continue;
+      dataMin = Math.min(dataMin, value);
+      dataMax = Math.max(dataMax, value);
+    }
+  }
+  if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return;
+  if (chart.valMin != null) dataMin = chart.valMin;
+  if (chart.valMax != null) dataMax = chart.valMax;
+
+  // Excel supplies the standard oblique perspective values for omitted
+  // classic-Surface view fields. S1-S5 carry no c:view3D and isolate that
+  // effective camera: parallel source-grid edges converge in the Office
+  // output, so substituting a right-angle/orthographic camera loses the visible
+  // depth. Keep these field defaults local to the Surface family; every
+  // authored view3D field remains authoritative.
+  const surfaceView = {
+    ...(chart.threeD ?? {}),
+    rotationX: chart.threeD?.rotationX ?? 15,
+    rotationY: chart.threeD?.rotationY ?? 20,
+    rightAngleAxes: chart.threeD?.rightAngleAxes ?? false,
+    perspective: chart.threeD?.perspective ?? 30,
+  };
+  const observedAutomaticSurfaceCamera = isObservedAutomaticSurfaceCamera(surfaceView);
+  const perspectiveTangentGain = surfacePerspectiveTangentGain(surfaceView);
+
+  // Office bases an omitted Surface major unit on the projected value-axis
+  // length. Probe the shared camera before reserving the legend: this is
+  // independent of the eventual band count and correctly degenerates to the
+  // compact five-interval class for a 90-degree contour view.
+  const axisProbe = planChartThreeDProjection(surfaceView, r, {
+    sceneDepthScale: SURFACE_SCENE_DEPTH_SCALE,
+    perspectiveTangentGain,
+  });
+  let projectedValueAxisLenPt: number | undefined;
+  if (axisProbe) {
+    const probeX = axisProbe.topology.axisX === 'min'
+      ? axisProbe.front.x : axisProbe.front.x + axisProbe.front.w;
+    const probeBottom = axisProbe.project(
+      probeX, axisProbe.front.y + axisProbe.front.h, axisProbe.topology.nearDepth,
+    );
+    const probeTop = axisProbe.project(
+      probeX, axisProbe.front.y, axisProbe.topology.nearDepth,
+    );
+    projectedValueAxisLenPt = Math.hypot(
+      probeTop.x - probeBottom.x,
+      probeTop.y - probeBottom.y,
+    ) / ptToPx;
+  }
+  const automaticSurfaceUnit = chart.valAxisMajorUnit == null
+    ? automaticSurfaceMajorUnit(dataMin, dataMax, projectedValueAxisLenPt)
+    : null;
+  const provisionalAxis = planValueAxis(
+    automaticSurfaceUnit == null
+      ? chart
+      : { ...chart, valAxisMajorUnit: automaticSurfaceUnit },
+    dataMin,
+    dataMax,
+    projectedValueAxisLenPt,
+  );
+  // Surface value bands follow the shared value-axis plan. OOXML does not
+  // define an Office-compatible automatic band count or implicit lighting, so
+  // the renderer deliberately does not invent either here.
+  const step = provisionalAxis.step;
+  if (!(step > 0) || !Number.isFinite(step)) return;
+  // Surface bands terminate on the first major boundary containing the data;
+  // unlike ordinary value axes, Office does not append one headroom interval
+  // when the maximum already lands on a boundary (S1/S4/S5 and their scaled
+  // axis mirrors). Authored bounds remain authoritative.
+  const surfaceMin = chart.valMin ?? provisionalAxis.min;
+  const surfaceMax = chart.valMax ?? Math.max(
+    surfaceMin + step,
+    surfaceMin + Math.ceil((dataMax - surfaceMin) / step) * step,
+  );
+  const surfaceSpan = surfaceMax - surfaceMin;
+  if (!(surfaceSpan > 0) || !Number.isFinite(surfaceSpan)) return;
+  const rawBandCount = Math.ceil(surfaceSpan / step);
+  const rawMajorLineCount = Math.floor(surfaceSpan / step + 1e-9) + 1;
+  const triangleCount = (columnCount - 1) * (rowCount - 1) * 2;
+  if (
+    !Number.isSafeInteger(rawBandCount)
+    || !Number.isSafeInteger(rawMajorLineCount)
+    || rawBandCount < 1
+    || rawMajorLineCount < 2
+    || triangleCount < 1
+    || rawBandCount > MAX_AXIS_TICKS
+    || rawMajorLineCount > MAX_AXIS_TICKS
+    || rawBandCount > Math.floor(MAX_SURFACE_PAINT_POLYGONS / triangleCount)
+    || rawMajorLineCount > MAX_SURFACE_PAINT_POLYGONS
+  ) return;
+  const bandCount = rawBandCount;
+  const surfaceFrac = valAxisReversed(chart)
+    ? (value: number): number => 1 - (value - surfaceMin) / surfaceSpan
+    : (value: number): number => (value - surfaceMin) / surfaceSpan;
+  const surfaceMajorLines = Array.from(
+    { length: rawMajorLineCount },
+    (_, index) => surfaceMin + index * step,
+  );
+
+  const bandColors = Array.from({ length: bandCount }, (_, index) =>
+    legacyPattern2Color(
+      chart.themeAccentColors ?? [],
+      index,
+      bandCount,
+      // Office's omitted classic chart style uses Pattern 2. Keep this
+      // compatibility default scoped to renderer-generated surface bands;
+      // authored series/point paint remains parser-owned.
+      chart.legacyChartStyle ?? 2,
+    ) ?? (rows[index]?.color ? `#${rows[index].color}` : chartColor(index, rows[index])),
+  );
+  const bandFormats = new Map((chart.surfaceBandFormats ?? []).map(format => [format.idx, format]));
+  const bandLabels = Array.from({ length: bandCount }, (_, index) => {
+    const lower = surfaceMin + index * step;
+    const upper = Math.min(surfaceMax, lower + step);
+    return `${formatChartVal(lower)}-${formatChartVal(upper)}`;
+  });
+  const legendChart: ChartModel = {
+    ...chart,
+    series: bandLabels.map((name, index) => ({
+      name,
+      color: bandColors[index].replace(/^#/, ''),
+      values: [],
+    })),
+  };
+  // A top-down contour lists the highest band first. In the ordinary oblique
+  // Surface view Office lists low-to-high. S1-S5 and the 90° contour boundary
+  // isolate this to the authored/effective camera elevation, not legend side.
+  if (Math.abs(surfaceView.rotationX) === 90) legendChart.series.reverse();
+  const legend = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    legend, chart.legendOverlay === true,
+  );
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
+  const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const seriesAxis = chart.threeD?.seriesAxis;
+  const seriesFontPx = chartTextFontSizePx(seriesAxis?.fontSizeHpt, ptToPx) ?? catFontPx;
+  const pad = {
+    t: titleBand.bandH + legTopH + seriesFontPx / 2,
+    r: legRightW + seriesFontPx * 3.2 + 12,
+    b: catAxisLabelBandH(catFontPx, chart.catAxisLabelOffsetPercent) + legBottomH,
+    l: legLeftW + catFontPx * 1.5,
+  };
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleBand,
+    legendSideReserveFrac: 0.22,
+    legendReserve: legend,
+    pad,
+    honorPlotAreaManualLayout: true,
+  });
+  const { px0, py0, pw, ph } = frame.plotRect;
+  if (!(pw > 0) || !(ph > 0)) return;
+  drawChartTitleForLayout(
+    ctx, chart,
+    chart.titleManualLayout || !chart.titleRichRuns?.length ? x : px0, y,
+    chart.titleManualLayout || !chart.titleRichRuns?.length ? w : pw, h,
+    y + titleBand.topPad, titleBand.fontPx,
+  );
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
+
+  const projection = planChartThreeDProjection(surfaceView, { x: px0, y: py0, w: pw, h: ph }, {
+    // Surface rows occupy a real series axis rather than the compact prism
+    // slab used by 3-D columns. The boundary corpus fits that grid with the
+    // same depth occupancy as standard (depth-arranged) cartesian series.
+    sceneDepthScale: SURFACE_SCENE_DEPTH_SCALE,
+    perspectiveTangentGain,
+  });
+  if (!projection) return;
+  const useObservedAutomaticMaterial = observedAutomaticSurfaceCamera || (
+    Math.abs(surfaceView.rotationX) === 90
+    && surfaceView.rotationY === 0
+    && surfaceView.rightAngleAxes === false
+    && surfaceView.perspective === 0
+  );
+  const { front } = projection;
+  const categoryReversed = chart.catAxisOrientation === 'maxMin';
+  const categoryBetween = isCrossBetween(chart);
+  const toX = (column: number): number => front.x + categoryPositionFraction(
+    column, columnCount, categoryBetween, categoryReversed,
+  ) * front.w;
+  const seriesReversed = seriesAxis?.orientation === 'maxMin';
+  // Surface rows are values on `<c:serAx>`, whose schema has no
+  // `<c:crossBetween>`. Office places the first and last rows on the series
+  // axis endpoints, unlike category points centred by value-axis
+  // crossBetween="between". Reuse the shared endpoint placement so reversal
+  // and the single-row midpoint remain consistent with other ordinal axes.
+  const toDepth = (row: number): number => categoryPositionFraction(
+    row, rowCount, false, seriesReversed,
+  );
+  const toValueY = (value: number): number =>
+    front.y + front.h - surfaceFrac(value) * front.h;
+  interface SurfacePaint {
+    points: Array<{ x: number; y: number }>;
+    scenePoints: SurfaceVertex[];
+    band: number;
+    depth: number;
+  }
+  const paints: SurfacePaint[] = [];
+  const paintTriangle = (triangle: SurfaceVertex[]): void => {
+    if (chart.surfaceWireframe === true) return;
+    const triangleMin = Math.min(...triangle.map(vertex => vertex.value));
+    const triangleMax = Math.max(...triangle.map(vertex => vertex.value));
+    const firstBand = Math.max(0, Math.floor((triangleMin - surfaceMin) / step));
+    const lastBand = Math.min(
+      bandCount - 1,
+      Math.floor((triangleMax - surfaceMin) / step),
+    );
+    for (let band = firstBand; band <= lastBand; band++) {
+      const lower = surfaceMin + band * step;
+      const upper = band === bandCount - 1 ? surfaceMax : lower + step;
+      let polygon = clipSurfacePolygon(triangle, lower, true);
+      polygon = clipSurfacePolygon(polygon, upper, false);
+      if (polygon.length < 3) continue;
+      const points = polygon.map(vertex => projection.project(vertex.x, vertex.y, vertex.depth));
+      paints.push({
+        points,
+        scenePoints: polygon,
+        band,
+        depth: polygon.reduce(
+          (sum, vertex) => sum + projection.cameraDepth(vertex.x, vertex.y, vertex.depth),
+          0,
+        ) / polygon.length,
+      });
+    }
+  };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(px0, py0, pw, ph);
+  ctx.clip();
+
+  const strokeScenePath = (
+    scenePoints: readonly ThreeDScenePoint[],
+    color: string,
+    width: number,
+    dash: string | null | undefined,
+  ): void => {
+    if (scenePoints.length < 2) return;
+    const points = scenePoints.map(point => projection.project(point.x, point.y, point.depth));
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let index = 1; index < points.length; index++) ctx.lineTo(points[index].x, points[index].y);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.setLineDash(pptxPresetDashArray(dash ?? 'solid', width));
+    ctx.stroke();
+  };
+  const farDepth = projection.topology.farDepth;
+  const nearDepth = projection.topology.nearDepth;
+  const floorY = front.y + front.h;
+  const farX = projection.topology.farX === 'min' ? front.x : front.x + front.w;
+  if (drawValMajorGridlines(chart)) {
+    const line = resolveGridline(
+      chart.valAxisGridlineColor,
+      chart.valAxisGridlineWidthEmu,
+      ptToPx,
+    );
+    for (const value of surfaceMajorLines) {
+      const gridY = toValueY(value);
+      strokeScenePath([
+        { x: front.x, y: gridY, depth: farDepth },
+        { x: front.x + front.w, y: gridY, depth: farDepth },
+      ], line.color, line.width, chart.valAxisGridlineDash);
+      strokeScenePath([
+        { x: farX, y: gridY, depth: nearDepth },
+        { x: farX, y: gridY, depth: farDepth },
+      ], line.color, line.width, chart.valAxisGridlineDash);
+    }
+  }
+  if (chart.catAxisMajorGridlines) {
+    const line = resolveGridline(
+      chart.catAxisGridlineColor,
+      chart.catAxisGridlineWidthEmu,
+      ptToPx,
+    );
+    // Gridlines mark category boundaries under crossBetween="between"; data
+    // points remain at the interval centres. Using `toX(column)` here would
+    // incorrectly draw lines through the 25%/75% data points of a two-column
+    // Surface instead of the 0%/50%/100% boundaries authored by the axis.
+    for (const fraction of catGridlineFractions(chart, columnCount)) {
+      strokeScenePath([
+        { x: front.x + fraction * front.w, y: floorY, depth: nearDepth },
+        { x: front.x + fraction * front.w, y: floorY, depth: farDepth },
+      ], line.color, line.width, chart.catAxisGridlineDash);
+    }
+  }
+
+  for (let row = 0; row < rowCount - 1; row++) {
+    for (let column = 0; column < columnCount - 1; column++) {
+      const values = [
+        rows[row].values[column],
+        rows[row].values[column + 1],
+        rows[row + 1].values[column + 1],
+        rows[row + 1].values[column],
+      ];
+      if (values.some(value => value == null || !Number.isFinite(value))) continue;
+      const rowColumn = {
+        x: toX(column), y: toValueY(values[0] as number), depth: toDepth(row),
+        value: values[0] as number,
+      };
+      const rowColumnNext = {
+        x: toX(column + 1), y: toValueY(values[1] as number), depth: toDepth(row),
+        value: values[1] as number,
+      };
+      const rowNextColumnNext = {
+        x: toX(column + 1), y: toValueY(values[2] as number), depth: toDepth(row + 1),
+        value: values[2] as number,
+      };
+      const rowNextColumn = {
+        x: toX(column), y: toValueY(values[3] as number), depth: toDepth(row + 1),
+        value: values[3] as number,
+      };
+      // Office's filled Surface keeps the upper of the two possible cell
+      // diagonals. The 2x2 plane/saddle/reversed-saddle boundaries isolate all
+      // three cases: equal opposing sums retain the source-grid B-D diagonal;
+      // otherwise the opposing pair with the larger value sum forms the ridge.
+      // This is an application rendering rule — OOXML stores only the matrix.
+      const forwardDiagonalSum = rowColumn.value + rowNextColumnNext.value;
+      const reverseDiagonalSum = rowColumnNext.value + rowNextColumn.value;
+      if (forwardDiagonalSum > reverseDiagonalSum) {
+        paintTriangle([rowColumn, rowColumnNext, rowNextColumnNext]);
+        paintTriangle([rowColumn, rowNextColumnNext, rowNextColumn]);
+      } else {
+        paintTriangle([rowColumn, rowColumnNext, rowNextColumn]);
+        paintTriangle([rowColumnNext, rowNextColumnNext, rowNextColumn]);
+      }
+    }
+  }
+  paints.sort((left, right) => left.depth - right.depth);
+  for (const paint of paints) {
+    const format = bandFormats.get(paint.band);
+    ctx.beginPath();
+    ctx.moveTo(paint.points[0].x, paint.points[0].y);
+    for (let index = 1; index < paint.points.length; index++) {
+      ctx.lineTo(paint.points[index].x, paint.points[index].y);
+    }
+    ctx.closePath();
+    if (format?.fillHidden !== true) {
+      const minX = Math.min(...paint.points.map(point => point.x));
+      const maxX = Math.max(...paint.points.map(point => point.x));
+      const minY = Math.min(...paint.points.map(point => point.y));
+      const maxY = Math.max(...paint.points.map(point => point.y));
+      const authored = format?.fill
+        ? resolveFill(format.fill, ctx, minX, minY, maxX - minX, maxY - minY)
+        : null;
+      ctx.fillStyle = authored ?? scaleHexColor(
+        bandColors[paint.band],
+        useObservedAutomaticMaterial
+          ? surfaceMaterialFactor(projection.cameraNormal(paint.scenePoints))
+          : 1,
+      );
+      ctx.fill();
+    }
+    if (format && format.lineHidden !== true && format.lineColor) {
+      ctx.strokeStyle = `#${format.lineColor}`;
+      ctx.lineWidth = format.lineWidthEmu != null
+        ? axisLineWidthPx(format.lineWidthEmu, ptToPx)
+        : 1;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+  }
+  if (chart.surfaceWireframe === true) {
+    ctx.strokeStyle = '#595959';
+    ctx.lineWidth = Math.max(1, 0.75 * ptToPx);
+    ctx.setLineDash([]);
+    for (let row = 0; row < rowCount; row++) {
+      ctx.beginPath();
+      for (let column = 0; column < columnCount; column++) {
+        const value = rows[row].values[column];
+        if (value == null || !Number.isFinite(value)) continue;
+        const point = projection.project(toX(column), toValueY(value), toDepth(row));
+        if (column === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      }
+      ctx.stroke();
+    }
+    for (let column = 0; column < columnCount; column++) {
+      ctx.beginPath();
+      for (let row = 0; row < rowCount; row++) {
+        const value = rows[row].values[column];
+        if (value == null || !Number.isFinite(value)) continue;
+        const point = projection.project(toX(column), toValueY(value), toDepth(row));
+        if (row === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  const categoryAxisStart = projection.project(front.x, floorY, nearDepth);
+  const categoryAxisEnd = projection.project(front.x + front.w, floorY, nearDepth);
+  const surfaceCatLineWidth = chart.catAxisLineWidthEmu != null
+    ? axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx)
+    : 1;
+  strokeAxisSegment(
+    ctx,
+    categoryAxisStart.x,
+    categoryAxisStart.y,
+    categoryAxisEnd.x,
+    categoryAxisEnd.y,
+    chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#000000',
+    surfaceCatLineWidth,
+    chart.catAxisLineDash,
+  );
+  ctx.font = chartFontCss(
+    catFontPx,
+    chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+    chart.catAxisFontBold ?? false,
+    chart.catAxisFontItalic ?? false,
+  );
+  ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#000000';
+  ctx.textBaseline = 'top';
+  for (let column = 0; column < columnCount; column++) {
+    const anchor = categoryLabelAnchorFraction(
+      column,
+      columnCount,
+      isCrossBetween(chart),
+      catAxisReversed(chart),
+      chart.catAxisLabelAlignment,
+    );
+    const point = projection.project(front.x + anchor.fraction * front.w, floorY, nearDepth);
+    ctx.textAlign = anchor.textAlign;
+    ctx.fillText(
+      categories[column] ?? '',
+      point.x,
+      point.y + categoryLabelOffsetPx(8, chart.catAxisLabelOffsetPercent),
+    );
+  }
+
+  if (!seriesAxis?.hidden) {
+    const seriesAxisWidth = seriesAxis?.lineWidthEmu != null
+      ? axisLineWidthPx(seriesAxis.lineWidthEmu, ptToPx)
+      : 1;
+    const seriesAxisMinPoint = projection.project(front.x, floorY, 0.5);
+    const seriesAxisMaxPoint = projection.project(front.x + front.w, floorY, 0.5);
+    const seriesAxisX = seriesAxisMinPoint.x >= seriesAxisMaxPoint.x
+      ? front.x : front.x + front.w;
+    const seriesStart = projection.project(seriesAxisX, floorY, nearDepth);
+    const seriesEnd = projection.project(seriesAxisX, floorY, farDepth);
+    strokeAxisSegment(
+      ctx, seriesStart.x, seriesStart.y, seriesEnd.x, seriesEnd.y,
+      seriesAxis?.lineColor ? `#${seriesAxis.lineColor}` : '#000000',
+      seriesAxisWidth, seriesAxis?.lineDash,
+    );
+    ctx.font = chartFontCss(
+      seriesFontPx,
+      chartFontFamily(chart, seriesAxis?.fontFace, 'minor'),
+      seriesAxis?.fontBold ?? false,
+      seriesAxis?.fontItalic ?? false,
+    );
+    ctx.fillStyle = seriesAxis?.fontColor ? `#${seriesAxis.fontColor}` : '#000000';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    for (let row = 0; row < rowCount; row++) {
+      const point = projection.project(seriesAxisX, floorY, toDepth(row));
+      ctx.fillText(rows[row].name, point.x + 8, point.y);
+    }
+  }
+
+  if (!chart.valAxisHidden) {
+    const valueAxisX = projection.topology.axisX === 'min' ? front.x : front.x + front.w;
+    const valueAxisBottom = projection.project(valueAxisX, front.y + front.h, nearDepth);
+    const valueAxisTop = projection.project(valueAxisX, front.y, nearDepth);
+    if (Math.hypot(valueAxisTop.x - valueAxisBottom.x, valueAxisTop.y - valueAxisBottom.y) > 4) {
+      const valueAxisWidth = chart.valAxisLineWidthEmu != null
+        ? axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx)
+        : 1;
+      strokeAxisSegment(
+        ctx, valueAxisBottom.x, valueAxisBottom.y, valueAxisTop.x, valueAxisTop.y,
+        chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#000000',
+        valueAxisWidth, chart.valAxisLineDash,
+      );
+      const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+      ctx.font = chartFontCss(
+        valFontPx,
+        chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+        chart.valAxisFontBold ?? false,
+        chart.valAxisFontItalic ?? false,
+      );
+      ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#000000';
+      const left = (valueAxisBottom.x + valueAxisTop.x) / 2 < px0 + pw / 2;
+      ctx.textAlign = left ? 'right' : 'left';
+      ctx.textBaseline = 'middle';
+      for (const value of surfaceMajorLines) {
+        const point = projection.project(valueAxisX, toValueY(value), nearDepth);
+        ctx.fillText(
+          formatChartValWithCode(value, chart.valAxisFormatCode, chart.date1904),
+          point.x + (left ? -6 : 6),
+          point.y,
+        );
+      }
+    }
+  }
+  drawLegendForLayout(
+    ctx,
+    legendChart,
+    legend,
+    x,
+    y,
+    w,
+    h,
+    px0,
+    py0,
+    pw,
+    ph,
+    titleBand.bandH + 2,
+    ptToPx,
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Area chart
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderAreaChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg = 0,
+): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
   // A plot area can contain both `<c:areaChart>` and `<c:lineChart>` groups.
   // Only the ordered area-group series participate in the filled stack; line
   // series share the axes but remain independent overlays (§21.2.2.145).
@@ -4157,26 +7622,34 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
   // see cartesianTitleBand / catAxisLabelBandH in layout.ts. The default 0.22
   // side-legend reserve is unchanged.
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const titleH = titleBand.bandH;
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
   const catTitlePx = axBands.catFontPx;
   const valTitlePx = axBands.valFontPx;
   const catTitleH = axBands.catBandH;
   const valTitleW = axBands.valBandW;
+  const hasDataTable = chartHasDataTable(chart);
+  const dataTableBaseH = chartDataTableBaseHeight(chart, ptToPx);
+  const dataTableHeaderW = chartDataTableHeaderWidth(ctx, chart, ptToPx);
 
   // Vertical pads first so the estimated plot height is known before the
   // secondary-axis scale + right-gutter measurement (same ordering as bar/line).
   // Top: title band + half a value-axis label above the top gridline. Bottom:
   // PowerPoint's category-label band (gap + line-height + margin).
   const padT = titleH + legTopH + valAxFontPx / 2 + 2;
-  const padB = catAxisLabelBandH(catAxFontPx) + catTitleH + legBottomH;
+  const padB = (hasDataTable
+    ? dataTableBaseH
+    : catAxisLabelBandH(catAxFontPx, chart.catAxisLabelOffsetPercent))
+    + catTitleH + legBottomH;
   const phEst = h - padT - padB;
 
   const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
@@ -4237,7 +7710,37 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     if (pct) return { min: min < 0 ? -100 : 0, max: max > 0 ? 100 : 0 };
     return { min, max };
   };
-  const areaExtent = computeAreaDataExtent();
+  let areaExtent = computeAreaDataExtent();
+  if (!pct) {
+    const includeEndpoint = (value: number): void => {
+      areaExtent = {
+        min: Math.min(areaExtent.min, value),
+        max: Math.max(areaExtent.max, value),
+      };
+    };
+    for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+      const { series } = areaSeries[areaIndex];
+      if (isSecondarySeries(series)) continue;
+      forEachErrorBarEndpoint(
+        series,
+        'y',
+        index => {
+          if (series.values[index] == null) return null;
+          if (!stacked) return series.values[index];
+          let sum = 0;
+          for (let prior = 0; prior <= areaIndex; prior++) {
+            sum += stackedValue(prior, index);
+          }
+          return sum;
+        },
+        includeEndpoint,
+      );
+    }
+    for (const { series } of lineSeries) {
+      if (isSecondarySeries(series)) continue;
+      forEachErrorBarEndpoint(series, 'y', index => series.values[index] ?? null, includeEndpoint);
+    }
+  }
   const provisionalScale = planValueAxis(
     chart,
     areaExtent.min,
@@ -4255,7 +7758,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     && chart.plotAreaManualLayout.layoutTarget !== 'inner'
   ) {
     const prevFont = ctx.font;
-    ctx.font = `${manualValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      manualValTickFontPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     for (const value of provisionalScale.majorLines) {
       primaryLabelWidth = Math.max(
         primaryLabelWidth,
@@ -4274,8 +7782,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ? valueTickLabelGapPx(manualValTickFontPx)
       : 6,
     catLabelGapPx: chart.catAxisFontSizeHpt != null
-      ? categoryTickLabelGapPx(catAxFontPx)
-      : 3,
+      ? categoryLabelOffsetPx(
+        categoryTickLabelGapPx(catAxFontPx),
+        chart.catAxisLabelOffsetPercent,
+      )
+      : categoryLabelOffsetPx(3, chart.catAxisLabelOffsetPercent),
     outerTextMarginPx: AXIS_OUTER_TEXT_MARGIN_PT * ptToPx,
     valTitleBandW: valTitleW,
     catTitleBandH: catTitleH,
@@ -4286,12 +7797,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     t: padT,
     r: legRightW + w * 0.05 + secLabelBandW + secTitleBandW,
     b: padB,
-    l: w * 0.12 + valTitleW + legLeftW,
+    l: legLeftW + Math.max(w * 0.12 + valTitleW, dataTableHeaderW),
   };
 
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + titleTopPad, titleFontPx);
 
-  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+  const areaFrame = computeChartFrame(chart, x, y, w, h, ptToPx, {
     titleBand,
     legendSideReserveFrac: 0.22,
     legendReserve: leg,
@@ -4299,12 +7810,18 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     honorPlotAreaManualLayout: true,
     manualOuterInsets,
   });
+  const { px0, py0, pw } = areaFrame.plotRect;
+  let { ph } = areaFrame.plotRect;
   if (pw <= 0 || ph <= 0) return;
 
-  if (chart.plotAreaBg) {
-    ctx.fillStyle = `#${chart.plotAreaBg}`;
-    ctx.fillRect(px0, py0, pw, ph);
+  const dataTableLayout = hasDataTable
+    ? measureChartDataTable(ctx, chart, pw / n, ptToPx)
+    : null;
+  if (dataTableLayout && dataTableLayout.totalHeight > dataTableBaseH) {
+    ph = Math.max(1, ph - (dataTableLayout.totalHeight - dataTableBaseH));
   }
+
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
   // Primary extent from the PRIMARY series only (secondary series live on their
   // own axis). When `sec` is null every series is primary, byte-identical to
@@ -4320,12 +7837,15 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // "midCat" anchors points on the category dividers (flush to the axes).
   const between = isCrossBetween(chart);
   const catRev = catAxisReversed(chart);
-  const toX = between
-    ? (index: number) => {
+  const dateAxisPlan = chartDateAxisPlan(chart, cats);
+  const toX = dateAxisPlan
+    ? (index: number) => px0 + dateAxisPlan.positions[index]! * pw
+    : between
+      ? (index: number) => {
         const i = catRev ? n - 1 - index : index;
         return px0 + ((i + 0.5) / n) * pw;
       }
-    : (index: number) => {
+      : (index: number) => {
         const i = catRev ? n - 1 - index : index;
         return px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
       };
@@ -4335,6 +7855,19 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : toY;
   const yMapFor = (s: ChartSeries): ((v: number) => number) =>
     isSecondarySeries(s) ? toYSecondary : toY;
+  const primaryCategoryAxisY = toY(
+    categoryAxisCrossingValue(chart, areaPlan.min, areaPlan.max),
+  );
+  const secondaryCategoryAxisY = sec && secScale
+    ? toYSecondary(axisCrossingValue(
+      chart.secondaryCatAxis?.crossesAt,
+      chart.secondaryCatAxis?.crosses,
+      secScale.min,
+      secScale.max,
+    ))
+    : primaryCategoryAxisY;
+  const categoryAxisYFor = (series: ChartSeries): number =>
+    isSecondarySeries(series) ? secondaryCategoryAxisY : primaryCategoryAxisY;
 
   // Axis line colour/weight from `<c:*Ax><c:spPr><a:ln>` (EMU → px at scale),
   // mirroring the bar/line renderers. Office leaves the value-axis rule off by
@@ -4379,7 +7912,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.lineWidth = cg.width;
     const previousDash = cg.dash.length > 0 && ctx.getLineDash ? ctx.getLineDash() : [];
     if (cg.dash.length > 0) ctx.setLineDash(cg.dash);
-    for (const frac of catGridlineFractions(chart, n)) {
+    const fractions = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => tick.fraction)
+      : catGridlineFractions(chart, n);
+    for (const frac of fractions) {
       const gx = px0 + frac * pw;
       ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
     }
@@ -4395,6 +7931,22 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const seriesOrder = stacked
     ? areaSeries.map((_, index) => index)
     : areaSeries.map((_, index) => areaSeries.length - 1 - index);
+  const stackedTopValues = stacked
+    ? areaSeries.map(() => new Array<number>(n).fill(0))
+    : null;
+  if (stackedTopValues) {
+    for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+      let running = 0;
+      for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+        running += stackedValue(areaIndex, categoryIndex);
+        stackedTopValues[areaIndex][categoryIndex] = running;
+      }
+    }
+  }
+  const plottedAreaValue = (areaIndex: number, categoryIndex: number): number => {
+    if (!stacked) return areaSeries[areaIndex].series.values[categoryIndex] ?? 0;
+    return stackedTopValues?.[areaIndex]?.[categoryIndex] ?? 0;
+  };
   for (const areaIndex of seriesOrder) {
     const { series: s, chartIndex } = areaSeries[areaIndex];
     const color = chartColor(chartIndex, s);
@@ -4449,6 +8001,54 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     }
   }
 
+  // `CT_AreaChart` includes `dropLines` through `EG_AreaChartShared`
+  // (ECMA-376 Part 1, dml-chart.xsd). Office vector output establishes one
+  // drop line per category, spanning the extrema of the category-axis crossing
+  // and every plotted point in the owning group. This matters for a standard
+  // multi-series area chart (one envelope line, not one line per series) and
+  // for an interior crossing (the line spans points on both sides). Paint after
+  // the opaque area fills so the authored geometry remains visible, but before
+  // point markers and labels.
+  const areaGroupMembers = new Map<number, Array<{ series: ChartSeries; areaIndex: number }>>();
+  for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+    const series = areaSeries[areaIndex].series;
+    const groupIndex = series.areaGroupIndex ?? 0;
+    const members = areaGroupMembers.get(groupIndex) ?? [];
+    members.push({ series, areaIndex });
+    areaGroupMembers.set(groupIndex, members);
+  }
+  for (const decoration of chart.areaGroupDecorations ?? []) {
+    if (!decoration.dropLines) {
+      continue;
+    }
+    const dropLineStyle = chartStyleRoleLine(chart, decoration.dropLines, 'dropLine');
+    if (!applyDecorationLineStyle(ctx, dropLineStyle, ptToPx)) {
+      continue;
+    }
+    const members = areaGroupMembers.get(decoration.groupIndex) ?? [];
+    for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+      let minY = Infinity;
+      let maxY = -Infinity;
+      let hasPoint = false;
+      for (const member of members) {
+        if (member.series.values[categoryIndex] == null) continue;
+        const pointY = yMapFor(member.series)(
+          plottedAreaValue(member.areaIndex, categoryIndex),
+        );
+        const axisY = categoryAxisYFor(member.series);
+        if (!Number.isFinite(pointY) || !Number.isFinite(axisY)) continue;
+        minY = Math.min(minY, pointY, axisY);
+        maxY = Math.max(maxY, pointY, axisY);
+        hasPoint = true;
+      }
+      if (!hasPoint || Math.abs(maxY - minY) < 0.01) continue;
+      ctx.beginPath();
+      ctx.moveTo(toX(categoryIndex), minY);
+      ctx.lineTo(toX(categoryIndex), maxY);
+      ctx.stroke();
+    }
+  }
+
   // Markers, error bars, and per-point data labels for area series. Drawn in a
   // SEPARATE forward pass (after all fills) so the fill loop above stays
   // byte-identical, and each block fires ONLY for series carrying the relevant
@@ -4466,41 +8066,38 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // Top of each series' band per category (stacked); the raw value otherwise.
     // Rebuilt independently of the fill loop's mutated stackBase. The ordered
     // series sequence stacks forward, so band si reaches Σ_{k=0..si}.
-    const topValue = (areaIndex: number, ci: number): number => {
-      if (stacked) {
-        let sum = 0;
-        for (let k = 0; k <= areaIndex; k++) sum += stackedValue(k, ci);
-        return sum;
-      }
-      return areaSeries[areaIndex].series.values[ci] ?? 0;
-    };
     for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
       const { series: s, chartIndex } = areaSeries[areaIndex];
       const pointOverrides = indexPointOverrides(s.dataPointOverrides);
       const color = chartColor(chartIndex, s);
       const yOf = yMapFor(s);
-      const plottedOf = (ci: number): number => topValue(areaIndex, ci);
+      const plottedOf = (ci: number): number => plottedAreaValue(areaIndex, ci);
       // Error bars first (markers overlay their tips).
       for (const eb of s.errBars ?? []) {
-        drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
+        drawCategoryErrorBars(
+          ctx, s, chartStyleRoleErrorBar(chart, eb), n, toX, yOf, plottedOf, color,
+        );
       }
       // Markers only when the series opts in (`<c:marker>` symbol/size/… — area
       // charts default to NO markers, so nothing fires without explicit detail).
-      if (s.showMarker === true || seriesHasMarkerDetail(s)) {
+      const seriesMarkersVisible = (s.showMarker === true || seriesHasMarkerDetail(s))
+        && s.markerSymbol !== 'none';
+      if (seriesMarkersVisible || hasVisiblePointMarkerOverride(s)) {
         for (let ci = 0; ci < n; ci++) {
           if (s.values[ci] == null) continue;
           const dpt = pointOverrides.get(ci);
-          const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle');
+          const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
           if (symbol === 'none') continue;
           const px = toX(ci); const py = yOf(plottedOf(ci));
           if (seriesHasMarkerDetail(s)) {
             const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
-            const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? color;
+            const fill = markerFillColorFor(s, dpt, ci, color);
             const line = dpt?.markerLine ?? s.markerLine ?? null;
             const lineWidthEmu = dpt?.markerLineWidthEmu ?? s.markerLineWidthEmu;
             drawMarker(
               ctx, px, py, symbol, sizePt, fill, line, ptToPx,
               lineWidthEmu != null ? axisLineWidthPx(lineWidthEmu, ptToPx) : undefined,
+              markerFillPaintFor(s, dpt, ci), shapeRotationDeg,
             );
           } else {
             ctx.fillStyle = color;
@@ -4528,6 +8125,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
         undefined,
         face => chartFontFamily(chart, face, 'minor'),
         isSecondarySeries(s) ? sec?.displayUnits : chart.valAxisDisplayUnits,
+        ci => dataLabelLegendKey(chartIndex, ci),
+        value => dataLabelWithinAxisMaximum(
+          chart, value,
+          isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
+        ),
       );
     }
   }
@@ -4566,22 +8168,27 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 
     const plottedOf = (ci: number): number => s.values[ci] ?? 0;
     for (const eb of s.errBars ?? []) {
-      drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, stroke);
+      drawCategoryErrorBars(
+        ctx, s, chartStyleRoleErrorBar(chart, eb), n, toX, yOf, plottedOf, stroke,
+      );
     }
-    if (s.showMarker === true || seriesHasMarkerDetail(s)) {
+    const seriesMarkersVisible = (s.showMarker === true || seriesHasMarkerDetail(s))
+      && s.markerSymbol !== 'none';
+    if (seriesMarkersVisible || hasVisiblePointMarkerOverride(s)) {
       for (let ci = 0; ci < n; ci++) {
         const value = s.values[ci];
         if (value == null) continue;
         const dpt = pointOverrides.get(ci);
-        const symbol = dpt?.markerSymbol ?? s.markerSymbol ?? 'circle';
+        const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
         if (symbol === 'none') continue;
         drawMarker(
           ctx, toX(ci), yOf(value), symbol, dpt?.markerSize ?? s.markerSize ?? 5,
-          dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? stroke,
+          markerFillColorFor(s, dpt, ci, stroke),
           dpt?.markerLine ?? s.markerLine ?? null, ptToPx,
           (dpt?.markerLineWidthEmu ?? s.markerLineWidthEmu) != null
             ? axisLineWidthPx((dpt?.markerLineWidthEmu ?? s.markerLineWidthEmu) as number, ptToPx)
             : undefined,
+          markerFillPaintFor(s, dpt, ci), shapeRotationDeg,
         );
       }
     }
@@ -4594,6 +8201,11 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       undefined,
       face => chartFontFamily(chart, face, 'minor'),
       isSecondarySeries(s) ? sec?.displayUnits : chart.valAxisDisplayUnits,
+      ci => dataLabelLegendKey(chartIndex, ci),
+      value => dataLabelWithinAxisMaximum(
+        chart, value,
+        isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
+      ),
     );
     drawSeriesTrendlines(
       ctx, s, stroke, toX, yOf, ptToPx, undefined,
@@ -4608,11 +8220,16 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     const drawnValTickFontPx = chart.valAxisFontSizeHpt != null
       ? valAxFontPx
       : Math.max(8, Math.min(11, ph / 20));
-    ctx.font = `${drawnValTickFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      drawnValTickFontPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     ctx.textBaseline = 'middle';
     for (const v of areaPlan.majorLines) {
       const gy = toY(v);
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW, false, chart.valAxisLineHidden, 'major', ptToPx);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, valLineColor, valLineW, false, chart.valAxisLineHidden, 'major', ptToPx, chart.valAxisLineDash);
       ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
       ctx.textAlign = 'right';
       const gap = chart.valAxisFontSizeHpt != null
@@ -4622,7 +8239,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
       for (const value of areaPlan.minorTicks) {
-        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), valLineColor, valLineW, false, chart.valAxisLineHidden, 'minor', ptToPx);
+        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', px0, toY(value), valLineColor, valLineW, false, chart.valAxisLineHidden, 'minor', ptToPx, chart.valAxisLineDash);
       }
     }
   }
@@ -4631,35 +8248,66 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   // while labels/gridlines remain. The value rule is drawn only when the file
   // gives it a colour, matching the bar/line renderers.
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-    ctx.strokeStyle = catLineColor; ctx.lineWidth = catLineW;
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, primaryCategoryAxisY, px0 + pw, primaryCategoryAxisY,
+      catLineColor, catLineW, chart.catAxisLineDash,
+    );
   }
   if (!chart.valAxisHidden && !chart.valAxisLineHidden && chart.valAxisLineColor != null) {
-    ctx.strokeStyle = valLineColor; ctx.lineWidth = valLineW;
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0, px0, py0 + ph,
+      valLineColor, valLineW, chart.valAxisLineDash,
+    );
   }
   // Category-axis major tick marks. With crossBetween="between" PowerPoint
   // draws them at the band BOUNDARIES (n+1 dividers); "midCat" ticks centers.
   if (!chart.catAxisHidden && chart.catAxisMajorTickMark && chart.catAxisMajorTickMark !== 'none') {
     const tickSkip = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
-    if (between) {
+    if (dateAxisPlan) {
+      for (const tick of dateAxisPlan.majorTicks) {
+        drawAxisTick(
+          ctx, chart.catAxisMajorTickMark, 'cat', primaryCategoryAxisY,
+          px0 + tick.fraction * pw, catLineColor, catLineW,
+          false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash,
+        );
+      }
+    } else if (between) {
       for (let ci = 0; ci <= n; ci += tickSkip) {
-        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, px0 + (ci / n) * pw, catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx);
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', primaryCategoryAxisY, px0 + (ci / n) * pw, catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
       }
     } else {
       for (let ci = 0; ci < n; ci += tickSkip) {
-        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, toX(ci), catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx);
+        drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', primaryCategoryAxisY, toX(ci), catLineColor, catLineW, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
       }
     }
   }
+  if (
+    !chart.catAxisHidden
+    && chart.catAxisMinorTickMark
+    && chart.catAxisMinorTickMark !== 'none'
+    && dateAxisPlan
+  ) {
+    for (const tick of dateAxisPlan.minorTicks) {
+      drawAxisTick(
+        ctx, chart.catAxisMinorTickMark, 'cat', primaryCategoryAxisY,
+        px0 + tick.fraction * pw, catLineColor, catLineW,
+        false, chart.catAxisLineHidden, 'minor', ptToPx, chart.catAxisLineDash,
+      );
+    }
+  }
 
-  if (!chart.catAxisHidden) {
+  if (!hasDataTable && !chart.catAxisHidden) {
     const drawnCatTickFontPx = chart.catAxisFontSizeHpt != null
       ? catAxFontPx
       : Math.max(8, Math.min(11, pw / n * 0.8));
     ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#555';
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = `${drawnCatTickFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      drawnCatTickFontPx,
+      chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+      chart.catAxisFontBold ?? false,
+      chart.catAxisFontItalic ?? false,
+    );
     // Category labels are controlled by the authored `<c:tickLblSkip>` interval.
     // Do not add an automatic collision interval: sparse category caches often
     // deliberately leave alternating entries empty to obtain a two-year label
@@ -4669,16 +8317,45 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     // §21.2.2.71: format numeric-serial categories (e.g. dateAx) via the
     // category-axis numFmt before measuring and drawing; string categories
     // pass through unchanged.
-    const labels = cats.map(c =>
-      formatCategoryLabel((c ?? '').toString(), chart.catAxisFormatCode, chart.date1904));
     const authoredSkip = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
-    for (let ci = 0; ci < n; ci += authoredSkip) {
-      const label = labels[ci] ?? '';
+    const labelEntries = dateAxisPlan
+      ? dateAxisPlan.majorTicks.map(tick => ({
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        x: px0 + tick.fraction * pw,
+        categoryIndex: -1,
+      }))
+      : Array.from({ length: Math.ceil(n / authoredSkip) }, (_, index) => {
+        const ci = index * authoredSkip;
+        return {
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904),
+          x: toX(ci),
+          categoryIndex: ci,
+        };
+      });
+    for (const entry of labelEntries) {
+      const label = entry.label;
       if (!label) continue;
-      const gap = chart.catAxisFontSizeHpt != null
-        ? categoryTickLabelGapPx(drawnCatTickFontPx)
-        : 3;
-      ctx.fillText(label, toX(ci), py0 + ph + gap);
+      const anchor = entry.categoryIndex < 0
+        ? null
+        : categoryLabelAnchorFraction(
+          entry.categoryIndex,
+          n,
+          isCrossBetween(chart),
+          catAxisReversed(chart),
+          chart.catAxisLabelAlignment,
+        );
+      const gap = categoryLabelOffsetPx(
+        chart.catAxisFontSizeHpt != null
+          ? categoryTickLabelGapPx(drawnCatTickFontPx)
+          : 3,
+        chart.catAxisLabelOffsetPercent,
+      );
+      ctx.textAlign = anchor?.textAlign ?? 'center';
+      const labelPosition = chart.catAxisTickLabelPos ?? 'nextTo';
+      const labelAxisY = labelPosition === 'nextTo'
+        ? primaryCategoryAxisY
+        : labelPosition === 'high' ? py0 : py0 + ph;
+      ctx.fillText(label, anchor ? px0 + anchor.fraction * pw : entry.x, labelAxisY + gap);
     }
   }
 
@@ -4689,6 +8366,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     drawSecondaryValueAxis(
       ctx, chart, sec, secScale, toYSecondary, r, px0, py0, pw, ph, ptToPx,
       secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
+    );
+  }
+
+  if (dataTableLayout) {
+    drawChartDataTable(
+      ctx, chart, dataTableLayout, px0, py0 + ph, pw, x + legLeftW, ptToPx,
     );
   }
 
@@ -4759,13 +8442,16 @@ function renderOfPieChart(
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): void {
   const source = chart.series[0];
   if (!source) return;
   const values = source.values.map(value => value == null ? 0 : Math.abs(value));
   const secondarySet = ofPieSecondaryIndices(chart, values);
   if (secondarySet.size === 0) {
-    renderPieChart(ctx, { ...chart, chartType: 'pie' }, r, false, ptToPx);
+    renderPieChart(
+      ctx, { ...chart, chartType: 'pie' }, r, false, ptToPx, shapeRotationDeg,
+    );
     return;
   }
   const primary: OfPiePoint[] = [];
@@ -4793,6 +8479,7 @@ function renderOfPieChart(
   );
   const { px0, py0, pw, ph } = frame.plotRect;
   if (!(pw > 0) || !(ph > 0)) return;
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
   const options = chart.ofPie;
   const sizeRatio = Math.max(0.05, Math.min(2, (options?.secondPieSizePercent ?? 75) / 100));
   const gapUnits = Math.max(0, options?.gapWidthPercent ?? 150) / 100;
@@ -4882,7 +8569,14 @@ function renderOfPieChart(
   }
 }
 
-function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, isDoughnut: boolean, ptToPx: number): void {
+function renderPieChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  isDoughnut: boolean,
+  ptToPx: number,
+  shapeRotationDeg = 0,
+): void {
   const { x, y, w, h } = r;
   const s = chart.series[0]; if (!s) return;
   const cats = (s.categories && s.categories.length > 0) ? s.categories : chart.categories;
@@ -4912,6 +8606,9 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, titleFontPx);
 
   const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(
+    ctx, chart, plotLeft, plotTop, pw, ph, ptToPx, shapeRotationDeg,
+  );
   const cx2 = frame.center.cx;
   const cy2 = frame.center.cy;
   const outerR = Math.min(pw, ph) * 0.42;
@@ -4948,7 +8645,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // slider), not a spec-mandated range (see `ChartDataPointOverride.explosion`
   // in types/chart.ts). Absent / zero explosion → no offset (byte-stable).
   const explodeOffset = (ser: ChartSeries, i: number): number => {
-    const e = pointOverridesBySeries.get(ser)?.get(i)?.explosion ?? 0;
+    const e = pointOverridesBySeries.get(ser)?.get(i)?.explosion ?? ser.explosion ?? 0;
     return e > 0 ? (e / 100) * outerR : 0;
   };
 
@@ -5013,6 +8710,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         ctx.lineWidth = lineWidth;
         ctx.setLineDash(dashPatternForPreset(
           point?.lineDash ?? rs.chartexStyle?.lineDash ?? undefined,
+          lineWidth,
         ));
         ctx.lineCap = rs.chartexStyle?.lineCap === 'rnd'
           ? 'round' : rs.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt';
@@ -5099,6 +8797,10 @@ function drawPieRichLabels(
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(
+    { ...chart, series: [{ ...s, categories: cats }] },
+    ptToPx,
+  );
   const calloutIndices = new Set<number>();
   for (let index = 0; index < vals.length; index++) {
     const override = overridesByIndex.get(index);
@@ -5139,6 +8841,7 @@ function drawPieRichLabels(
     const showSerName = ov?.showSerName ?? def.showSerName;
     const showVal     = ov?.showVal ?? def.showVal;
     const showPercent = ov?.showPercent ?? def.showPercent;
+    const showLegendKey = ov?.showLegendKey ?? def.showLegendKey ?? false;
     // §21.2.2.35 label composition. A per-point custom `<c:tx>` (non-empty
     // override text) wins outright; otherwise compose from the resolved flags.
     // Positioning is handled below (§21.2.2.48 `dLblPos`). Percent is the
@@ -5158,7 +8861,8 @@ function drawPieRichLabels(
       date1904: chart.date1904 ?? false,
       separator: ov?.separator ?? def.separator,
     });
-    if (!text) continue;
+    const legendKey = showLegendKey ? dataLabelLegendKey(0, i) : undefined;
+    if (!text && !legendKey) continue;
     const pos = ov?.position ?? def.position ?? 'bestFit';
     const outside = pos === 'outEnd';
     const sizeHpt = ov?.fontSizeHpt ?? def.fontSizeHpt;
@@ -5189,6 +8893,7 @@ function drawPieRichLabels(
         ov.manualLayout,
         { x: chartX, y: chartY, w: chartW, h: chartH },
         rich,
+        legendKey,
       );
       continue;
     }
@@ -5203,20 +8908,25 @@ function drawPieRichLabels(
         lineHeight, value => ctx.measureText(value).width,
       );
       if (rich && !richBlock) continue;
-      if (!richBlock && fittedLines.length === 0) continue;
+      if (!richBlock && fittedLines.length === 0 && !legendKey) continue;
       const textW = richBlock?.width ?? fittedLines.reduce(
         (max, line) => Math.max(max, ctx.measureText(line).width), 0,
       );
       const textH = richBlock?.height
         ?? (sizePx + Math.max(0, fittedLines.length - 1) * lineHeight);
+      const keyW = legendKey
+        ? (legendSwatchWidths([legendKey.entry], sizePx, ptToPx)[0] ?? 0)
+        : 0;
+      const keyH = legendKey ? legendSwatchHeight(legendKey.entry, sizePx, ptToPx) : 0;
       outsideLabels.push(createPieOutsideLabel(
         fittedLines, midAngle, cx2, cy2, outerR,
-        Math.min(textW, Math.max(0, chartW - sizePx)),
-        Math.min(textH, Math.max(0, chartH - sizePx)),
+        Math.min(keyW + (text ? LEGEND_SWATCH_TEXT_GAP : 0) + textW, Math.max(0, chartW - sizePx)),
+        Math.min(Math.max(keyH, textH), Math.max(0, chartH - sizePx)),
         lineHeight, sizePx, bold ?? false,
         fontColor ? `#${fontColor}` : '#333',
         labelFont,
         richBlock ?? undefined,
+        legendKey,
       ));
       continue;
     }
@@ -5266,11 +8976,12 @@ function drawPieRichLabels(
       undefined,
       { x: chartX, y: chartY, w: chartW, h: chartH },
       rich,
+      legendKey,
     );
   }
 
   drawPieOutsideLabels(
-    ctx, def, outsideLabels, cx2, cy2, outerR, ptToPx,
+    ctx, chart, def, outsideLabels, cx2, cy2, outerR, ptToPx,
     chartX, chartY, chartW, chartH,
   );
 }
@@ -5282,6 +8993,7 @@ function drawPieRichLabels(
 interface PieOutsideLabel {
   lines: string[];
   rich?: RichDataLabelBlock;
+  legendKey?: DataLabelLegendKey;
   rimX: number;
   rimY: number;
   boxW: number;
@@ -5346,6 +9058,7 @@ function createPieOutsideLabel(
   fontColor: string,
   font: string,
   rich?: RichDataLabelBlock,
+  legendKey?: DataLabelLegendKey,
 ): PieOutsideLabel {
   const clearance = fontPx * 0.5;
   const distance = outsideLabelRadialDistance(
@@ -5354,7 +9067,7 @@ function createPieOutsideLabel(
   const cxBox = pieCx + Math.cos(midAngle) * distance;
   const cyBox = pieCy + Math.sin(midAngle) * distance;
   return {
-    lines, rich,
+    lines, rich, legendKey,
     rimX: pieCx + Math.cos(midAngle) * outerR,
     rimY: pieCy + Math.sin(midAngle) * outerR,
     boxW, boxH, lineHeight, fontPx, bold, fontColor, font,
@@ -5369,6 +9082,7 @@ function createPieOutsideLabel(
  * be pushed back across the pie rim. */
 function drawPieOutsideLabels(
   ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
   def: ChartSeriesDataLabels,
   labels: PieOutsideLabel[],
   pieCx: number,
@@ -5429,14 +9143,16 @@ function drawPieOutsideLabels(
   ctx.beginPath();
   ctx.rect(boundsX, boundsY, boundsW, boundsH);
   ctx.clip();
-  const leaderColor = def.leaderLineColor ? `#${def.leaderLineColor}` : '#a6a6a6';
-  const leaderPx = def.leaderLineWidthEmu
-    ? Math.max(0.5, (def.leaderLineWidthEmu / EMU_PER_PT) * ptToPx)
+  const leader = chartStyleRoleLeaderLine(chart, def);
+  const leaderColor = leader.color ? `#${leader.color}` : '#a6a6a6';
+  const leaderPx = leader.widthEmu
+    ? Math.max(0.5, (leader.widthEmu / EMU_PER_PT) * ptToPx)
     : 1;
+  ctx.setLineDash(dashPatternForPreset(leader.dash ?? undefined, leaderPx));
   for (const label of labels) {
     const moved = Math.abs(label.cxBox - label.initialCx) > 0.5
       || Math.abs(label.cyBox - label.initialCy) > 0.5;
-    if (!def.showLeaderLines || !moved) continue;
+    if (!def.showLeaderLines || leader.hidden === true || !moved) continue;
     const edgeX = clamp(label.rimX, label.cxBox - label.boxW / 2, label.cxBox + label.boxW / 2);
     const edgeY = clamp(label.rimY, label.cyBox - label.boxH / 2, label.cyBox + label.boxH / 2);
     ctx.beginPath();
@@ -5448,17 +9164,68 @@ function drawPieOutsideLabels(
   }
 
   for (const label of labels) {
-    if (label.rich) {
-      paintRichDataLabelBlock(ctx, label.rich, label.cxBox, label.cyBox);
+    if (!label.legendKey) {
+      if (label.rich) {
+        paintRichDataLabelBlock(ctx, label.rich, label.cxBox, label.cyBox);
+        continue;
+      }
+      ctx.font = `${label.bold ? 'bold ' : ''}${label.fontPx}px ${label.font}`;
+      ctx.fillStyle = label.fontColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const firstY = label.cyBox - ((label.lines.length - 1) * label.lineHeight) / 2;
+      for (let i = 0; i < label.lines.length; i++) {
+        ctx.fillText(label.lines[i], label.cxBox, firstY + i * label.lineHeight);
+      }
       continue;
     }
     ctx.font = `${label.bold ? 'bold ' : ''}${label.fontPx}px ${label.font}`;
+    const keyWidth = label.legendKey
+      ? (legendSwatchWidths([label.legendKey.entry], label.fontPx, label.legendKey.ptToPx)[0] ?? 0)
+      : 0;
+    const keyHeight = label.legendKey
+      ? legendSwatchHeight(label.legendKey.entry, label.fontPx, label.legendKey.ptToPx)
+      : 0;
+    const textWidth = label.rich?.width ?? label.lines.reduce(
+      (max, line) => Math.max(max, ctx.measureText(line).width), 0,
+    );
+    const gap = label.legendKey && (label.rich || label.lines.length > 0)
+      ? LEGEND_SWATCH_TEXT_GAP
+      : 0;
+    const contentWidth = keyWidth + gap + textWidth;
+    const contentLeft = label.cxBox - contentWidth / 2;
+    if (label.legendKey) {
+      drawLegendSwatch(
+        ctx,
+        label.legendKey.entry.swatchStyle,
+        label.legendKey.entry.color,
+        contentLeft,
+        label.cyBox - keyHeight / 2,
+        keyWidth,
+        keyHeight,
+        label.legendKey.entry.marker,
+        label.legendKey.entry.fillPaint,
+        label.legendKey.entry.outlineColor,
+        label.legendKey.entry.outlineWidthEmu,
+        label.legendKey.entry.outlineDash,
+        label.legendKey.entry.outlineCap,
+        label.legendKey.entry.outlineJoin,
+        label.legendKey.ptToPx,
+        label.legendKey.shapeRotationDeg,
+      );
+    }
+    if (label.rich) {
+      paintRichDataLabelBlock(
+        ctx, label.rich, contentLeft + keyWidth + gap, label.cyBox, 'left', 'middle',
+      );
+      continue;
+    }
     ctx.fillStyle = label.fontColor;
-    ctx.textAlign = 'center';
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     const firstY = label.cyBox - ((label.lines.length - 1) * label.lineHeight) / 2;
     for (let i = 0; i < label.lines.length; i++) {
-      ctx.fillText(label.lines[i], label.cxBox, firstY + i * label.lineHeight);
+      ctx.fillText(label.lines[i], contentLeft + keyWidth + gap, firstY + i * label.lineHeight);
     }
   }
   ctx.restore();
@@ -5469,6 +9236,7 @@ function drawPieOutsideLabels(
 interface PieCalloutLabel {
   lines: string[];
   rich?: RichDataLabelBlock;
+  legendKey?: DataLabelLegendKey;
   lineHeight: number;
   /** Slice mid-angle (canvas radians) — the leader-line target direction. */
   midAngle: number;
@@ -5522,6 +9290,7 @@ function drawPieCalloutLabels(
   indices: ReadonlySet<number>,
   overridesByIndex: ReadonlyMap<number, ChartDataLabelOverride>,
 ): void {
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
   const findOverride = (i: number): ChartDataLabelOverride | undefined =>
     overridesByIndex.get(i);
 
@@ -5555,6 +9324,7 @@ function drawPieCalloutLabels(
     const showSerName = ov?.showSerName ?? def.showSerName;
     const showVal     = ov?.showVal ?? def.showVal;
     const showPercent = ov?.showPercent ?? def.showPercent;
+    const showLegendKey = ov?.showLegendKey ?? def.showLegendKey ?? false;
     // Per-point overrides (font colour/size/bold + box), else series defaults.
     const fontPx = chartTextFontSizePx(ov?.fontSizeHpt, ptToPx) ?? baseFontPx;
     const bold = ov?.fontBold ?? def.fontBold ?? false;
@@ -5586,7 +9356,8 @@ function drawPieCalloutLabels(
       separator: ov?.separator ?? def.separator,
       defaultSeparator: '\n',
     });
-    if (!text) continue;
+    const legendKey = showLegendKey ? dataLabelLegendKey(0, i) : undefined;
+    if (!text && !legendKey) continue;
     const richOptions = customRichDataLabelOptions(chart, ov, ptToPx, labelFont, bold);
 
     const padX = Math.max(4, fontPx * 0.45);
@@ -5605,11 +9376,16 @@ function drawPieCalloutLabels(
       lineH,
       value => ctx.measureText(value).width,
     );
-    if (!rich && lines.length === 0) continue;
+    if (!rich && lines.length === 0 && !legendKey) continue;
     let textW = rich?.width ?? 0;
     if (!rich) for (const ln of lines) textW = Math.max(textW, ctx.measureText(ln).width);
-    let boxW = Math.min(textW + padX * 2, boundsW);
-    let boxH = rich?.height ?? (lines.length * lineH - lineGap);
+    const keyW = legendKey
+      ? (legendSwatchWidths([legendKey.entry], fontPx, ptToPx)[0] ?? 0)
+      : 0;
+    const keyH = legendKey ? legendSwatchHeight(legendKey.entry, fontPx, ptToPx) : 0;
+    const keyGap = legendKey && text ? LEGEND_SWATCH_TEXT_GAP : 0;
+    let boxW = Math.min(keyW + keyGap + textW + padX * 2, boundsW);
+    let boxH = Math.max(keyH, rich?.height ?? (lines.length > 0 ? lines.length * lineH - lineGap : 0));
     boxH = Math.min(boxH + padY * 2, boundsH);
 
     const rimX = cx2 + Math.cos(midAngle) * outerR;
@@ -5638,12 +9414,12 @@ function drawPieCalloutLabels(
       if (!rich) {
         lines = fitDataLabelLines(
           text,
-          Math.max(0, boxW - padX * 2),
+          Math.max(0, boxW - padX * 2 - keyW - keyGap),
           Math.max(0, boxH - padY * 2),
           lineH,
           value => ctx.measureText(value).width,
         );
-        if (lines.length === 0) continue;
+        if (lines.length === 0 && !legendKey) continue;
       }
       cxBox = manual.rect.x + manual.rect.w / 2;
       cyBox = manual.rect.y + manual.rect.h / 2;
@@ -5673,15 +9449,15 @@ function drawPieCalloutLabels(
       if (!rich) {
         lines = fitDataLabelLines(
           text,
-          Math.max(0, sliceBounds.w - padX * 2),
+          Math.max(0, sliceBounds.w - padX * 2 - keyW - keyGap),
           Math.max(0, sliceBounds.h - padY * 2),
           lineH,
           value => ctx.measureText(value).width,
         );
-        if (lines.length === 0) continue;
+        if (lines.length === 0 && !legendKey) continue;
         textW = lines.reduce((width, line) => Math.max(width, ctx.measureText(line).width), 0);
-        boxW = textW + padX * 2;
-        boxH = lines.length * lineH - lineGap + padY * 2;
+        boxW = keyW + keyGap + textW + padX * 2;
+        boxH = Math.max(keyH, lines.length > 0 ? lines.length * lineH - lineGap : 0) + padY * 2;
       } else {
         boxW = Math.min(boxW, sliceBounds.w);
         boxH = Math.min(boxH, sliceBounds.h);
@@ -5712,7 +9488,7 @@ function drawPieCalloutLabels(
     }
 
     labels.push({
-      lines, rich: rich ?? undefined, lineHeight: lineH, midAngle, rimX, rimY, boxW, boxH, cxBox, cyBox,
+      lines, rich: rich ?? undefined, legendKey, lineHeight: lineH, midAngle, rimX, rimY, boxW, boxH, cxBox, cyBox,
       leftSide, fontColor, boxFill, boxBorder, boxBorderPx, fontPx, bold, font: labelFont, inside, manualClip,
     });
   }
@@ -5817,10 +9593,12 @@ function drawPieCalloutLabels(
   ctx.beginPath();
   ctx.rect(boundsX, boundsY, boundsW, boundsH);
   ctx.clip();
-  const leaderColor = def.leaderLineColor ? `#${def.leaderLineColor}` : '#a6a6a6';
-  const leaderPx = def.leaderLineWidthEmu
-    ? Math.max(0.5, (def.leaderLineWidthEmu / EMU_PER_PT) * ptToPx)
+  const leader = chartStyleRoleLeaderLine(chart, def);
+  const leaderColor = leader.color ? `#${leader.color}` : '#a6a6a6';
+  const leaderPx = leader.widthEmu
+    ? Math.max(0.5, (leader.widthEmu / EMU_PER_PT) * ptToPx)
     : 1;
+  ctx.setLineDash(dashPatternForPreset(leader.dash ?? undefined, leaderPx));
 
   for (const l of labels) {
     // The box edge nearest the pie centre — where a leader line should meet.
@@ -5831,7 +9609,7 @@ function drawPieCalloutLabels(
     const dx = edgeX - l.rimX;
     const dy = edgeY - l.rimY;
     const dist = Math.hypot(dx, dy);
-    if (!l.inside && def.showLeaderLines && dist > l.fontPx * 0.9) {
+    if (!l.inside && def.showLeaderLines && leader.hidden !== true && dist > l.fontPx * 0.9) {
       ctx.beginPath();
       ctx.moveTo(l.rimX, l.rimY);
       ctx.lineTo(edgeX, edgeY);
@@ -5860,24 +9638,79 @@ function drawPieCalloutLabels(
     }
     // Text: centred, stacked lines. A custom rich body uses the same bounded
     // inline block that measured the box, keeping measurement and paint exact.
+    if (!l.legendKey) {
+      if (l.rich) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(bx, by, l.boxW, l.boxH);
+        ctx.clip();
+        paintRichDataLabelBlock(ctx, l.rich, l.cxBox, l.cyBox);
+        ctx.restore();
+        if (l.manualClip) ctx.restore();
+        continue;
+      }
+      ctx.font = `${l.bold ? 'bold ' : ''}${l.fontPx}px ${l.font}`;
+      ctx.fillStyle = l.fontColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const lineGap = l.lineHeight - l.fontPx;
+      const blockTop = l.cyBox
+        - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2;
+      for (let li = 0; li < l.lines.length; li++) {
+        ctx.fillText(l.lines[li], l.cxBox, blockTop + li * l.lineHeight);
+      }
+      if (l.manualClip) ctx.restore();
+      continue;
+    }
+    const keyWidth = l.legendKey
+      ? (legendSwatchWidths([l.legendKey.entry], l.fontPx, l.legendKey.ptToPx)[0] ?? 0)
+      : 0;
+    const keyHeight = l.legendKey
+      ? legendSwatchHeight(l.legendKey.entry, l.fontPx, l.legendKey.ptToPx)
+      : 0;
+    const keyGap = l.legendKey && (l.rich || l.lines.length > 0) ? LEGEND_SWATCH_TEXT_GAP : 0;
+    const textWidth = l.rich?.width ?? l.lines.reduce(
+      (width, line) => Math.max(width, ctx.measureText(line).width), 0,
+    );
+    const contentLeft = l.cxBox - (keyWidth + keyGap + textWidth) / 2;
+    if (l.legendKey) {
+      drawLegendSwatch(
+        ctx,
+        l.legendKey.entry.swatchStyle,
+        l.legendKey.entry.color,
+        contentLeft,
+        l.cyBox - keyHeight / 2,
+        keyWidth,
+        keyHeight,
+        l.legendKey.entry.marker,
+        l.legendKey.entry.fillPaint,
+        l.legendKey.entry.outlineColor,
+        l.legendKey.entry.outlineWidthEmu,
+        l.legendKey.entry.outlineDash,
+        l.legendKey.entry.outlineCap,
+        l.legendKey.entry.outlineJoin,
+        l.legendKey.ptToPx,
+        l.legendKey.shapeRotationDeg,
+      );
+    }
     if (l.rich) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(bx, by, l.boxW, l.boxH);
       ctx.clip();
-      paintRichDataLabelBlock(ctx, l.rich, l.cxBox, l.cyBox);
+      paintRichDataLabelBlock(ctx, l.rich, contentLeft + keyWidth + keyGap, l.cyBox, 'left', 'middle');
       ctx.restore();
       if (l.manualClip) ctx.restore();
       continue;
     }
     ctx.font = `${l.bold ? 'bold ' : ''}${l.fontPx}px ${l.font}`;
     ctx.fillStyle = l.fontColor;
-    ctx.textAlign = 'center';
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     const lineGap = l.lineHeight - l.fontPx;
     const blockTop = l.cyBox - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2;
     for (let li = 0; li < l.lines.length; li++) {
-      ctx.fillText(l.lines[li], l.cxBox, blockTop + li * l.lineHeight);
+      ctx.fillText(l.lines[li], contentLeft + keyWidth + keyGap, blockTop + li * l.lineHeight);
     }
     if (l.manualClip) ctx.restore();
   }
@@ -5888,7 +9721,13 @@ function drawPieCalloutLabels(
 // Radar / Spider chart
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderRadarChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg = 0,
+): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n < 3) return;
@@ -5908,6 +9747,9 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, titleFontPx);
 
   const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(
+    ctx, chart, plotLeft, plotTop, pw, ph, ptToPx, shapeRotationDeg,
+  );
   const cx2 = frame.center.cx;
   const cy2 = frame.center.cy;
   const rd  = Math.min(pw, ph) * 0.38;
@@ -6002,7 +9844,12 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   // overlapping the origin point.
   if (!chart.valAxisHidden) {
     const valAxPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-    ctx.font = `${chart.valAxisFontItalic ? 'italic ' : ''}${chart.valAxisFontBold ? 'bold ' : ''}${valAxPx}px ${chartFontFamily(chart, chart.valAxisFontFace, 'minor')}`;
+    ctx.font = chartFontCss(
+      valAxPx,
+      chartFontFamily(chart, chart.valAxisFontFace, 'minor'),
+      chart.valAxisFontBold ?? false,
+      chart.valAxisFontItalic ?? false,
+    );
     ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
@@ -6013,6 +9860,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
       drawAxisTick(
         ctx, chart.valAxisMajorTickMark, 'val', cx2, y,
         valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden, 'major', ptToPx,
+        chart.valAxisLineDash,
       );
       if (chart.valAxisTickLabelPos !== 'none') {
         ctx.fillText(formatPrimaryValueAxisTick(chart, v, false), cx2 - 3, y);
@@ -6033,6 +9881,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
           chart.valAxisLineHidden,
           'minor',
           ptToPx,
+          chart.valAxisLineDash,
         );
       }
     }
@@ -6041,7 +9890,12 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const radarCatFontPx = chart.catAxisFontSizeHpt != null
     ? axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx)
     : Math.max(8, Math.min(11, rd * 0.2));
-  ctx.font = `${chart.catAxisFontItalic ? 'italic ' : ''}${chart.catAxisFontBold ? 'bold ' : ''}${radarCatFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+  ctx.font = chartFontCss(
+    radarCatFontPx,
+    chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+    chart.catAxisFontBold ?? false,
+    chart.catAxisFontItalic ?? false,
+  );
   ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#444';
   ctx.textBaseline = 'middle';
   // Spoke labels radiate from just outside the ring. Cap each at the room
@@ -6053,9 +9907,17 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const plotRightX = cx2 + pw / 2;
   if (!chart.catAxisHidden && catLabelsVisible(chart)) for (let i = 0; i < n; i++) {
     const a = spoke(i);
-    const lx = cx2 + Math.cos(a) * (rd + 12);
-    const ly = cy2 + Math.sin(a) * (rd + 12);
-    const align: CanvasTextAlign = Math.cos(a) < -0.1 ? 'right' : Math.cos(a) > 0.1 ? 'left' : 'center';
+    const radialLabelOffset = categoryLabelOffsetPx(12, chart.catAxisLabelOffsetPercent);
+    const lx = cx2 + Math.cos(a) * (rd + radialLabelOffset);
+    const ly = cy2 + Math.sin(a) * (rd + radialLabelOffset);
+    const authoredAlignment = chart.catAxisLabelAlignment;
+    const align: CanvasTextAlign = authoredAlignment === 'l'
+      ? 'left'
+      : authoredAlignment === 'r'
+        ? 'right'
+        : authoredAlignment === 'ctr'
+          ? 'center'
+          : Math.cos(a) < -0.1 ? 'right' : Math.cos(a) > 0.1 ? 'left' : 'center';
     ctx.textAlign = align;
     const maxPx =
       align === 'right' ? lx - plotLeftX
@@ -6074,7 +9936,9 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   // A chart may set radarStyle="marker" while every series carries
   // `<c:marker><c:symbol val="none"/>`, in which case Office draws
   // lines only — no dots.
-  const filled = chart.radarStyle === 'filled';
+  const filled = markersSuppressedByChartStyle(
+    'radar', chart.chartType, chart.scatterStyle, chart.radarStyle,
+  );
   const markerRadius = Math.max(2, rd * 0.025);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
@@ -6116,7 +9980,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
       ctx.lineWidth = s.lineWidthEmu != null
         ? axisLineWidthPx(s.lineWidthEmu, ptToPx)
         : 2;
-      ctx.setLineDash(dashPatternForPreset(s.chartexStyle?.lineDash ?? undefined));
+      ctx.setLineDash(dashPatternForPreset(s.chartexStyle?.lineDash ?? undefined, ctx.lineWidth));
       ctx.lineCap = s.chartexStyle?.lineCap === 'rnd'
         ? 'round'
         : s.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt';
@@ -6133,21 +9997,23 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     // explicitly carries `<c:marker><c:symbol val="none"/>`, the parser
     // sets showMarker=false — respect that even for radarStyle="marker"
     // charts (the chart-level style is the default; series overrides win).
-    if (!filled && s.showMarker !== false && s.markerSymbol !== 'none') {
+    const seriesMarkersVisible = !filled && s.showMarker !== false && s.markerSymbol !== 'none';
+    if (!filled && (seriesMarkersVisible || hasVisiblePointMarkerOverride(s))) {
       const pointOverrides = indexPointOverrides(s.dataPointOverrides);
       for (let pointIndex = 0; pointIndex < pts.length; pointIndex++) {
         const pt = pts[pointIndex];
         if (pt == null) continue;
         const point = pointOverrides.get(pointIndex);
-        const symbol = point?.markerSymbol ?? s.markerSymbol ?? 'circle';
+        const symbol = effectiveMarkerSymbol(s, point, 'circle', seriesMarkersVisible);
         if (symbol === 'none') continue;
         const size = point?.markerSize ?? s.markerSize ?? Math.max(4, markerRadius * 2 / ptToPx);
-        const fill = point?.markerFill ?? s.markerFill ?? color;
+        const fill = markerFillColorFor(s, point, pointIndex, color);
         const line = point?.markerLine ?? s.markerLine ?? null;
         const lineWidth = point?.markerLineWidthEmu ?? s.markerLineWidthEmu;
         drawMarker(
           ctx, pt[0], pt[1], symbol, size, fill, line, ptToPx,
           lineWidth != null ? axisLineWidthPx(lineWidth, ptToPx) : 1,
+          markerFillPaintFor(s, point, pointIndex), shapeRotationDeg,
         );
       }
     }
@@ -6194,6 +10060,7 @@ function visibleBubbleSize(chart: ChartModel, value: number | null | undefined):
 
 type ScatterSeriesLayer = {
   series: ChartSeries;
+  seriesIndex: number;
   fallbackColor: string;
   cats: string[];
   pointOverrides: Map<number, NonNullable<ChartSeries['dataPointOverrides']>[number]>;
@@ -6205,11 +10072,7 @@ function scatterPointFill(
   index: number,
   fallbackColor: string,
 ): string {
-  return point?.markerFill
-    ?? point?.color
-    ?? series.dataPointColors?.[index]
-    ?? series.markerFill
-    ?? fallbackColor;
+  return markerFillColorFor(series, point, index, fallbackColor);
 }
 
 function makeScatterSeriesLayer(
@@ -6219,6 +10082,7 @@ function makeScatterSeriesLayer(
 ): ScatterSeriesLayer {
   return {
     series,
+    seriesIndex: index,
     fallbackColor: chartColor(index, series),
     cats: series.categories ?? chart.categories,
     pointOverrides: new Map((series.dataPointOverrides ?? []).map(point => [point.idx, point])),
@@ -6280,12 +10144,17 @@ function drawScatterSeriesLayer(
   isBubble: boolean,
   style: string,
   layoutReferenceRect: DataLabelRect,
+  valueAxisMaximum: number,
   valueDisplayUnits?: ChartDisplayUnits | null,
+  shapeRotationDeg = 0,
 ): void {
   const drawLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
   const drawSmooth = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
-  const hideMarkersByStyle = style === 'lineNoMarker' || style === 'smoothNoMarker';
+  const hideMarkersByStyle = markersSuppressedByChartStyle(
+    'scatter', chart.chartType, style, chart.radarStyle,
+  );
   const layers = entries.map(({ series, index }) => makeScatterSeriesLayer(chart, series, index));
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
   const bubbleScale = isBubble
     ? bubbleSizeToDiameterScale(chart, layers, useIndexX, pw, ph)
     : 0;
@@ -6297,7 +10166,10 @@ function drawScatterSeriesLayer(
   // placed those guides on top of earlier series' dots and labels.
   for (const { series: s, fallbackColor, cats } of layers) {
     for (const eb of s.errBars ?? []) {
-      drawSeriesErrorBars(ctx, s, eb, cats, useIndexX, toX, toY, fallbackColor);
+      drawSeriesErrorBars(
+        ctx, s, chartStyleRoleErrorBar(chart, eb), cats, useIndexX, toX, toY,
+        fallbackColor,
+      );
     }
   }
 
@@ -6342,17 +10214,17 @@ function drawScatterSeriesLayer(
   }
 
   for (const { series: s, fallbackColor, cats, pointOverrides } of layers) {
-    const hideMarkers = hideMarkersByStyle
-      || s.showMarker === false
-      || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
-    if (!hideMarkers) {
+    const seriesMarkersVisible = !hideMarkersByStyle
+      && s.showMarker !== false
+      && s.markerSymbol !== 'none';
+    if (seriesMarkersVisible || (!hideMarkersByStyle && hasVisiblePointMarkerOverride(s))) {
       for (let ci = 0; ci < s.values.length; ci++) {
         const yv = s.values[ci];
         if (yv == null) continue;
         const xv = scatterXValue(cats, ci, useIndexX);
         if (xv == null) continue;
         const dpt = pointOverrides.get(ci);
-        const symbol = dpt?.markerSymbol ?? s.markerSymbol ?? 'circle';
+        const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
         if (symbol === 'none') continue;
         let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
         if (isBubble) {
@@ -6372,12 +10244,15 @@ function drawScatterSeriesLayer(
         const lineWidthPx = lineWidthEmu != null
           ? axisLineWidthPx(lineWidthEmu, ptToPx)
           : undefined;
-        drawMarker(ctx, toX(xv), toY(yv), symbol, sizePt, fill, line, ptToPx, lineWidthPx);
+        drawMarker(
+          ctx, toX(xv), toY(yv), symbol, sizePt, fill, line, ptToPx, lineWidthPx,
+          markerFillPaintFor(s, dpt, ci), shapeRotationDeg,
+        );
       }
     }
   }
 
-  for (const { series: s, cats } of layers) {
+  for (const { series: s, seriesIndex, cats } of layers) {
     drawSeriesDataLabels(
       ctx,
       s,
@@ -6394,6 +10269,8 @@ function drawScatterSeriesLayer(
       layoutReferenceRect,
       face => chartFontFamily(chart, face, 'minor'),
       valueDisplayUnits,
+      pointIndex => dataLabelLegendKey(seriesIndex, pointIndex),
+      value => dataLabelWithinAxisMaximum(chart, value, valueAxisMaximum),
     );
   }
 
@@ -6411,7 +10288,13 @@ function drawScatterSeriesLayer(
   }
 }
 
-function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
+function renderScatterChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+  shapeRotationDeg = 0,
+): void {
   const { x, y, w, h } = r;
   const primaryEntries = chart.series
     .map((series, index) => ({ series, index }))
@@ -6450,6 +10333,21 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
         xs.push(xValue);
         ys.push(yValue);
       }
+      forEachErrorBarEndpoint(
+        series,
+        'x',
+        index => series.values[index] == null ? null : scatterXValue(cats, index, useIndexX),
+        value => xs.push(value),
+      );
+      forEachErrorBarEndpoint(
+        series,
+        'y',
+        index => {
+          const xValue = scatterXValue(cats, index, useIndexX);
+          return xValue == null ? null : series.values[index] ?? null;
+        },
+        value => ys.push(value),
+      );
     }
     if (useIndexX && xs.length === 0) {
       let count = 0;
@@ -6466,13 +10364,15 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // axis is a numeric value axis, so the bottom band holds its single line of
   // X-value labels (sized like any value-axis label). Default 0.22 side-legend
   // reserve unchanged.
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
   const titleFontPx = titleBand.fontPx;
   const titleTopPad = titleBand.topPad;
   const xAxLabelFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const yAxLabelFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const leg = measuredLegendReserve(ctx, chart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
   const catTitlePx = axBands.catFontPx;
   const valTitlePx = axBands.valFontPx;
@@ -6540,10 +10440,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   });
   if (pw <= 0 || ph <= 0) return;
 
-  if (chart.plotAreaBg) {
-    ctx.fillStyle = `#${chart.plotAreaBg}`;
-    ctx.fillRect(px0, py0, pw, ph);
-  }
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
   // X / Y data extents. Secondary-group points have their own independent
   // top/right value axes and therefore must not stretch the primary scales.
@@ -6705,11 +10602,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       // Scatter keeps its own undefined colour default (→ drawAxisTick's '#888'),
       // so only the width formula is shared. `axisLineWidthPx`'s 1 px fallback is
       // equivalent to undefined here (drawAxisTick treats both as a hairline).
-      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', yAxisX, gy, yAxisLineColor, yAxisLineWidth, false, chart.valAxisLineHidden, 'major', ptToPx);
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', yAxisX, gy, yAxisLineColor, yAxisLineWidth, false, chart.valAxisLineHidden, 'major', ptToPx, chart.valAxisLineDash);
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
       for (const value of yMinorTicks) {
-        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', yAxisX, toY(value), yAxisLineColor, yAxisLineWidth, false, chart.valAxisLineHidden, 'minor', ptToPx);
+        drawAxisTick(ctx, chart.valAxisMinorTickMark, 'val', yAxisX, toY(value), yAxisLineColor, yAxisLineWidth, false, chart.valAxisLineHidden, 'minor', ptToPx, chart.valAxisLineDash);
       }
     }
   }
@@ -6750,17 +10647,21 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // `<c:catAx><c:spPr><a:ln>` when present; default otherwise.
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
     ctx.save();
-    ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
-    ctx.lineWidth = axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx);
     ctx.lineCap = 'butt';
-    ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, xAxisY, px0 + pw, xAxisY,
+      chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888',
+      axisLineWidthPx(chart.catAxisLineWidthEmu, ptToPx), chart.catAxisLineDash,
+    );
     ctx.restore();
   }
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
     ctx.save();
-    ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
-    ctx.lineWidth = axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx);
-    ctx.beginPath(); ctx.moveTo(yAxisX, py0); ctx.lineTo(yAxisX, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, yAxisX, py0, yAxisX, py0 + ph,
+      chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888',
+      axisLineWidthPx(chart.valAxisLineWidthEmu, ptToPx), chart.valAxisLineDash,
+    );
     ctx.restore();
   }
 
@@ -6800,11 +10701,11 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       if (labelPos !== 'none') {
         ctx.fillText(formatAxisTickWithUnits(v, chart.catAxisFormatCode, chart.date1904, chart.catAxisDisplayUnits), gx, labelY);
       }
-      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, lineWidth, false, chart.catAxisLineHidden, 'major', ptToPx);
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, lineWidth, false, chart.catAxisLineHidden, 'major', ptToPx, chart.catAxisLineDash);
     }
     if (chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none') {
       for (const value of xMinorTicks) {
-        drawAxisTick(ctx, chart.catAxisMinorTickMark, 'cat', xAxisY, toX(value), xAxisLineColor, lineWidth, false, chart.catAxisLineHidden, 'minor', ptToPx);
+        drawAxisTick(ctx, chart.catAxisMinorTickMark, 'cat', xAxisY, toX(value), xAxisLineColor, lineWidth, false, chart.catAxisLineHidden, 'minor', ptToPx, chart.catAxisLineDash);
       }
     }
   }
@@ -6817,13 +10718,17 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   drawScatterSeriesLayer(
     ctx, chart, primaryEntries, useIndexX, toX, toY, r,
     px0, py0, pw, ph, ptToPx, isBubble, style, { x, y, w, h },
+    yAxisPlan.max,
     chart.valAxisDisplayUnits,
+    shapeRotationDeg,
   );
   if (secondaryEntries.length > 0 && secondaryXPlan && secondaryYPlan) {
     drawScatterSeriesLayer(
       ctx, chart, secondaryEntries, useIndexX, toSecondaryX, toSecondaryY, r,
       px0, py0, pw, ph, ptToPx, isBubble, style, { x, y, w, h },
+      secondaryYPlan.max,
       secondaryY?.displayUnits,
+      shapeRotationDeg,
     );
   }
 
@@ -6833,12 +10738,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (secondaryX && secondaryXPlan && !secondaryX.hidden) {
     const line = resolveAxisLine(secondaryX.lineColor, secondaryX.lineWidthEmu, ptToPx);
     if (!secondaryX.lineHidden) {
-      ctx.strokeStyle = line.color;
-      ctx.lineWidth = line.width;
-      ctx.beginPath();
-      ctx.moveTo(px0, py0);
-      ctx.lineTo(px0 + pw, py0);
-      ctx.stroke();
+      strokeAxisSegment(
+        ctx, px0, py0, px0 + pw, py0,
+        line.color, line.width, secondaryX.lineDash,
+      );
     }
     const fontPx = chartTextFontSizePx(secondaryX.fontSizeHpt, ptToPx) ?? xAxLabelFontPx;
     ctx.font = chartFontCss(
@@ -6864,7 +10767,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       }
       drawAxisTick(
         ctx, secondaryX.majorTickMark, 'cat', py0, sx, line.color, line.width,
-        true, secondaryX.lineHidden, 'major', ptToPx,
+        true, secondaryX.lineHidden, 'major', ptToPx, secondaryX.lineDash,
       );
     }
     if (secondaryX.minorTickMark && secondaryX.minorTickMark !== 'none') {
@@ -6872,6 +10775,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
         drawAxisTick(
           ctx, secondaryX.minorTickMark, 'cat', py0, toSecondaryX(value), line.color,
           line.width, true, secondaryX.lineHidden, 'minor', ptToPx,
+          secondaryX.lineDash,
         );
       }
     }
@@ -6904,8 +10808,8 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
  *  is 5). `fill` and `line` are hex strings; a leading `#` is tolerated so
  *  callers that route through `chartColor` (which returns `#RRGGBB`)
  *  don't end up double-prefixing into an invalid `##RRGGBB`. `line` may
- *  be null in which case no outline is drawn. `picture` falls back to a
- *  square because we don't ship the embedded image yet. */
+ *  be null in which case no outline is drawn. `picture` fails closed because
+ *  the chart model does not yet carry the marker image relationship. */
 function drawMarker(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number,
@@ -6915,13 +10819,22 @@ function drawMarker(
   line: string | null,
   ptToPx: number,
   lineWidthPx: number = 1,
+  /** undefined uses `fill`; null is authored noFill. */
+  fillPaint: Fill | null | undefined = undefined,
+  shapeRotationDeg = 0,
 ): void {
   const sizePx = Math.max(2, sizePt * ptToPx);
   const half = sizePx / 2;
   const fillCss = fill.startsWith('#') ? fill : `#${fill}`;
   const lineCss = line ? (line.startsWith('#') ? line : `#${line}`) : null;
   ctx.save();
-  ctx.fillStyle = fillCss;
+  ctx.fillStyle = fillPaint === undefined
+    ? fillCss
+    : (fillPaint == null
+        ? 'rgba(0,0,0,0)'
+        : resolveFill(
+            fillPaint, ctx, cx - half, cy - half, sizePx, sizePx, shapeRotationDeg,
+          ) ?? 'rgba(0,0,0,0)');
   if (lineCss) {
     ctx.strokeStyle = lineCss;
     ctx.lineWidth = lineWidthPx;
@@ -6954,7 +10867,7 @@ function drawMarker(
       break;
     }
     case 'x': {
-      ctx.strokeStyle = fillCss;
+      ctx.strokeStyle = ctx.fillStyle;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy - half); ctx.lineTo(cx + half, cy + half);
@@ -6963,7 +10876,7 @@ function drawMarker(
       break;
     }
     case 'plus': {
-      ctx.strokeStyle = fillCss;
+      ctx.strokeStyle = ctx.fillStyle;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
@@ -6996,7 +10909,10 @@ function drawMarker(
       ctx.fillRect(cx - half, cy - dh / 2, sizePx, dh);
       break;
     }
-    case 'picture':
+    case 'picture': {
+      ctx.restore();
+      return;
+    }
     case 'circle':
     default: {
       ctx.beginPath();
@@ -7022,10 +10938,11 @@ function drawSeriesErrorBars(
   toY: (v: number) => number,
   fallbackColor: string,
 ): void {
+  if (eb.hidden === true) return;
   ctx.save();
   ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
   ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT) : 1;
-  ctx.setLineDash(dashPatternForPreset(eb.dash));
+  ctx.setLineDash(dashPatternForPreset(eb.dash, ctx.lineWidth));
   const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
   const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
   const isX = eb.dir === 'x';
@@ -7103,6 +11020,8 @@ function drawSeriesDataLabels(
   layoutReferenceRect: DataLabelRect = bounds,
   richFontFamilyForFace?: (face: string) => string,
   valueDisplayUnits?: ChartDisplayUnits | null,
+  legendKeyAt?: (pointIndex: number) => DataLabelLegendKey | undefined,
+  isValueVisible?: (value: number) => boolean,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -7110,6 +11029,7 @@ function drawSeriesDataLabels(
   const seriesDef = s.seriesDataLabels;
   for (let i = 0; i < s.values.length; i++) {
     const yv = s.values[i]; if (yv == null) continue;
+    if (isValueVisible && !isValueVisible(yv)) continue;
     const xv = scatterXValue(cats, i, useIndexX);
     if (xv == null) continue;
     const ovr = overridesByIndex.get(i);
@@ -7121,22 +11041,27 @@ function drawSeriesDataLabels(
     const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
     const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
     const showVal     = ovr?.showVal ?? seriesDef?.showVal;
+    const showBubbleSize = ovr?.showBubbleSize ?? seriesDef?.showBubbleSize;
+    const showLegendKey = ovr?.showLegendKey ?? seriesDef?.showLegendKey ?? false;
     const text = effectiveDataLabelText({
       customText: ovr?.text,
       showCategory: showCatName && !useIndexX,
       showSeries: showSerName,
       showValue: showVal,
+      showBubbleSize,
       category: formatChartValWithCode(
         xv, s.catFormatCodes?.[i] ?? s.catFormatCode ?? null, date1904,
       ),
       seriesName: s.name,
       sourceValue: yv,
+      bubbleSize: s.bubbleSizes?.[i] ?? undefined,
       valueDivisor: displayUnitDivisor(valueDisplayUnits),
       formatCode: ovr?.formatCode ?? seriesDef?.formatCode ?? null,
       date1904,
       separator: ovr?.separator ?? seriesDef?.separator,
     });
-    if (!text) continue;
+    const legendKey = showLegendKey ? legendKeyAt?.(i) : undefined;
+    if (!text && !legendKey) continue;
     const pos = ovr?.position ?? seriesDef?.position ?? defaultPos;
     const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
     const fontSizePx = chartTextFontSizePx(sizeHpt, ptToPx)
@@ -7154,6 +11079,7 @@ function drawSeriesDataLabels(
       ovr?.richRuns,
       ptToPx,
       richFontFamilyForFace,
+      legendKey,
     );
   }
 }
@@ -7177,6 +11103,7 @@ function drawDataLabelText(
   richRuns?: readonly ChartTextRun[],
   ptToPx = 1,
   richFontFamilyForFace?: (face: string) => string,
+  legendKey?: DataLabelLegendKey,
 ): void {
   ctx.save();
   ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
@@ -7198,6 +11125,7 @@ function drawDataLabelText(
           fontFamilyForFace: richFontFamilyForFace,
         }
       : undefined,
+    legendKey,
   );
   ctx.restore();
 }
@@ -7233,8 +11161,16 @@ function drawBoundedDataLabelText(
   manualLayout?: ChartDataLabelOverride['manualLayout'],
   layoutReferenceRect: DataLabelRect = bounds,
   rich?: RichDataLabelOptions,
+  legendKey?: DataLabelLegendKey,
 ): void {
-  if (!text || !Number.isFinite(fontSizePx) || fontSizePx <= 0) return;
+  if ((!text && !legendKey) || !Number.isFinite(fontSizePx) || fontSizePx <= 0) return;
+  if (legendKey) {
+    drawBoundedDataLabelWithLegendKey(
+      ctx, text, anchor, bounds, fontSizePx, color, manualLayout,
+      layoutReferenceRect, rich, legendKey,
+    );
+    return;
+  }
   if (rich) {
     const block = resolveRichDataLabelBlock(ctx, rich, fontSizePx, color);
     if (!block) return;
@@ -7294,6 +11230,122 @@ function drawBoundedDataLabelText(
   ctx.restore();
 }
 
+/** Measure and paint a data-label legend key and its optional text as one
+ * bounded block. Existing legend swatch geometry is reused verbatim, while the
+ * shared data-label placement resolver owns clipping and manual layout. */
+function drawBoundedDataLabelWithLegendKey(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  anchor: DataLabelAnchor,
+  bounds: DataLabelRect,
+  fontSizePx: number,
+  color: string,
+  manualLayout: ChartDataLabelOverride['manualLayout'] | undefined,
+  layoutReferenceRect: DataLabelRect,
+  rich: RichDataLabelOptions | undefined,
+  legendKey: DataLabelLegendKey,
+): void {
+  const { entry, ptToPx, shapeRotationDeg } = legendKey;
+  const keyWidth = legendSwatchWidths([entry], fontSizePx, ptToPx)[0] ?? 0;
+  const keyHeight = legendSwatchHeight(entry, fontSizePx, ptToPx);
+  const gap = text ? LEGEND_SWATCH_TEXT_GAP : 0;
+  const richBlock = text && rich
+    ? resolveRichDataLabelBlock(ctx, rich, fontSizePx, color)
+    : null;
+  if (text && rich && !richBlock) return;
+  const lineHeight = fontSizePx * 1.15;
+  const sourceLines = text && !richBlock
+    ? boundDataLabelText(text).value.split(/\r?\n/)
+    : [];
+  const sourceTextWidth = richBlock?.width ?? sourceLines.reduce(
+    (max, line) => Math.max(max, ctx.measureText(line).width), 0,
+  );
+  const sourceTextHeight = richBlock?.height
+    ?? (sourceLines.length > 0 ? Math.max(lineHeight, sourceLines.length * lineHeight) : 0);
+  let placement = resolveDataLabelPlacement(
+    anchor,
+    bounds,
+    { w: keyWidth + gap + sourceTextWidth, h: Math.max(keyHeight, sourceTextHeight) },
+    fontSizePx,
+    manualLayout,
+    layoutReferenceRect,
+  );
+  if (!placement) return;
+
+  let lines = sourceLines;
+  if (text && !richBlock) {
+    lines = fitDataLabelLines(
+      text,
+      Math.max(0, placement.maxWidth - keyWidth - gap),
+      placement.maxHeight,
+      lineHeight,
+      value => ctx.measureText(value).width,
+    );
+    if (lines.length === 0) return;
+  }
+  const textWidth = richBlock?.width ?? lines.reduce(
+    (max, line) => Math.max(max, ctx.measureText(line).width), 0,
+  );
+  const textHeight = richBlock?.height ?? (lines.length * lineHeight);
+  const totalWidth = keyWidth + gap + textWidth;
+  const totalHeight = Math.max(keyHeight, textHeight);
+  placement = resolveDataLabelPlacement(
+    anchor, bounds, { w: totalWidth, h: totalHeight }, fontSizePx, manualLayout,
+    layoutReferenceRect,
+  );
+  if (!placement) return;
+
+  const left = placement.textAlign === 'left'
+    ? placement.x
+    : placement.textAlign === 'right'
+      ? placement.x - totalWidth
+      : placement.x - totalWidth / 2;
+  const top = placement.textBaseline === 'top'
+    ? placement.y
+    : placement.textBaseline === 'bottom'
+      ? placement.y - totalHeight
+      : placement.y - totalHeight / 2;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(placement.clip.x, placement.clip.y, placement.clip.w, placement.clip.h);
+  ctx.clip();
+  drawLegendSwatch(
+    ctx,
+    entry.swatchStyle,
+    entry.color,
+    left,
+    top + (totalHeight - keyHeight) / 2,
+    keyWidth,
+    keyHeight,
+    entry.marker,
+    entry.fillPaint,
+    entry.outlineColor,
+    entry.outlineWidthEmu,
+    entry.outlineDash,
+    entry.outlineCap,
+    entry.outlineJoin,
+    ptToPx,
+    shapeRotationDeg,
+  );
+  if (text) {
+    const textX = left + keyWidth + gap;
+    if (richBlock) {
+      paintRichDataLabelBlock(
+        ctx, richBlock, textX, top + (totalHeight - textHeight) / 2, 'left', 'top',
+      );
+    } else {
+      ctx.fillStyle = color;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const firstY = top + (totalHeight - textHeight) / 2;
+      for (let index = 0; index < lines.length; index++) {
+        ctx.fillText(lines[index], textX, firstY + index * lineHeight);
+      }
+    }
+  }
+  ctx.restore();
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -7328,18 +11380,18 @@ function appendCurve(
   }
 }
 
-function dashPatternForPreset(preset: string | undefined): number[] {
-  if (!preset) return [];
-  switch (preset) {
-    case 'solid':                  return [];
-    case 'dot':       case 'sysDot': return [1, 2];
-    case 'dash':      case 'sysDash':return [4, 2];
-    case 'lgDash':                  return [8, 3];
-    case 'dashDot':   case 'sysDashDot':   return [4, 2, 1, 2];
-    case 'lgDashDot':                       return [8, 3, 1, 3];
-    case 'dashDotDot':case 'sysDashDotDot':case 'lgDashDotDot': return [4, 2, 1, 2, 1, 2];
-    default: return [];
-  }
+function dashPatternForPreset(preset: string | undefined, lineWidth = 1): number[] {
+  const scale = Number.isFinite(lineWidth) && lineWidth > 0 ? lineWidth : 1;
+  return pptxPresetDashArray(preset ?? 'solid', scale);
+}
+
+function dashPatternForLine(
+  customDash: ChartModel['chartBorderCustomDash'],
+  preset: string | null | undefined,
+  lineWidth = 1,
+): number[] {
+  const scale = Number.isFinite(lineWidth) && lineWidth > 0 ? lineWidth : 1;
+  return drawingmlLineDashArray(customDash, preset, scale);
 }
 
 /** True when the series carries any explicit `<c:marker>` detail (symbol, size,
@@ -7354,6 +11406,8 @@ function seriesHasMarkerDetail(s: ChartSeries): boolean {
     s.markerSymbol != null ||
     s.markerSize != null ||
     s.markerFill != null ||
+    s.markerFillPaint !== undefined ||
+    s.markerFillPaintAuthored === true ||
     s.markerLine != null ||
     s.markerLineWidthEmu != null ||
     (s.dataPointOverrides != null && s.dataPointOverrides.length > 0)
@@ -7378,13 +11432,13 @@ function drawCategoryErrorBars(
   plotted: (ci: number) => number,
   fallbackColor: string,
 ): void {
-  if (eb.dir === 'x') return; // no data-unit X scale on a category axis
+  if (eb.hidden === true || eb.dir === 'x') return; // no data-unit X scale on a category axis
   const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
   const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
   ctx.save();
   ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
   ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT) : 1;
-  ctx.setLineDash(dashPatternForPreset(eb.dash));
+  ctx.setLineDash(dashPatternForPreset(eb.dash, ctx.lineWidth));
   const capHalf = ctx.lineWidth / 2;
   for (let ci = 0; ci < n; ci++) {
     if (s.values[ci] == null) continue;
@@ -7403,6 +11457,63 @@ function drawCategoryErrorBars(
     };
     if (drawPlus) { const v = eb.plus[ci]; if (v != null) drawSeg(v); }
     if (drawMinus) { const v = eb.minus[ci]; if (v != null) drawSeg(-v); }
+  }
+  ctx.restore();
+}
+
+/** Draw value-axis error bars for a bar/column series. CT_ErrBars `errDir`
+ * follows the numeric axis: Y for columns and X for horizontal bars. Deltas
+ * have already been expanded by the shared parser (percentage/fixed/stdDev/
+ * custom), so this layer only maps the authored geometry. */
+function drawBarErrorBars(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  eb: NonNullable<ChartSeries['errBars']>[number],
+  n: number,
+  horizontal: boolean,
+  categoryAt: (ci: number) => number,
+  valueAt: (value: number) => number,
+  plotted: (ci: number) => number,
+  fallbackColor: string,
+  ptToPx: number,
+): void {
+  if (eb.hidden === true) return;
+  if ((!horizontal && eb.dir === 'x') || (horizontal && eb.dir === 'y')) return;
+  const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
+  const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
+  ctx.save();
+  ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
+  ctx.lineWidth = eb.lineWidthEmu
+    ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT * ptToPx)
+    : Math.max(0.5, ptToPx * 0.75);
+  ctx.setLineDash(dashPatternForPreset(eb.dash, ctx.lineWidth));
+  const capHalf = Math.max(ctx.lineWidth / 2, 2 * ptToPx);
+  for (let ci = 0; ci < n; ci++) {
+    if (s.values[ci] == null) continue;
+    const pv = plotted(ci);
+    const category = categoryAt(ci);
+    const origin = valueAt(pv);
+    const drawSegment = (delta: number): void => {
+      const endpoint = valueAt(pv + delta);
+      ctx.beginPath();
+      if (horizontal) {
+        ctx.moveTo(origin, category); ctx.lineTo(endpoint, category);
+      } else {
+        ctx.moveTo(category, origin); ctx.lineTo(category, endpoint);
+      }
+      ctx.stroke();
+      if (!eb.noEndCap) {
+        ctx.save(); ctx.setLineDash([]); ctx.beginPath();
+        if (horizontal) {
+          ctx.moveTo(endpoint, category - capHalf); ctx.lineTo(endpoint, category + capHalf);
+        } else {
+          ctx.moveTo(category - capHalf, endpoint); ctx.lineTo(category + capHalf, endpoint);
+        }
+        ctx.stroke(); ctx.restore();
+      }
+    };
+    if (drawPlus) { const value = eb.plus[ci]; if (value != null) drawSegment(value); }
+    if (drawMinus) { const value = eb.minus[ci]; if (value != null) drawSegment(-value); }
   }
   ctx.restore();
 }
@@ -7448,6 +11559,8 @@ function drawCategoryDataLabels(
   markerGapAt?: (index: number) => number,
   richFontFamilyForFace?: (face: string) => string,
   valueDisplayUnits?: ChartDisplayUnits | null,
+  legendKeyAt?: (pointIndex: number) => DataLabelLegendKey | undefined,
+  isValueVisible?: (value: number) => boolean,
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -7456,6 +11569,7 @@ function drawCategoryDataLabels(
   for (let ci = 0; ci < n; ci++) {
     if (s.values[ci] == null && !plotNullAsZero) continue;
     const anchorValue = plotted(ci);
+    if (isValueVisible && !isValueVisible(anchorValue)) continue;
     const sourceValue = s.values[ci] ?? 0;
     const ovr = overridesByIndex.get(ci);
     // Genuine `<c:delete val="1"/>` (§21.2.2.43) skips; a style/flag-only
@@ -7466,6 +11580,7 @@ function drawCategoryDataLabels(
     const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
     const showVal     = ovr?.showVal ?? seriesDef?.showVal;
     const showPercent = ovr?.showPercent ?? seriesDef?.showPercent;
+    const showLegendKey = ovr?.showLegendKey ?? seriesDef?.showLegendKey ?? false;
     const text = effectiveDataLabelText({
       customText: ovr?.text,
       showCategory: showCatName,
@@ -7481,7 +11596,8 @@ function drawCategoryDataLabels(
       date1904,
       separator: ovr?.separator ?? seriesDef?.separator,
     });
-    if (!text) continue;
+    const legendKey = showLegendKey ? legendKeyAt?.(ci) : undefined;
+    if (!text && !legendKey) continue;
     const pos = ovr?.position ?? seriesDef?.position ?? defaultPos;
     const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
     const fontSizePx = chartTextFontSizePx(sizeHpt, ptToPx)
@@ -7500,6 +11616,7 @@ function drawCategoryDataLabels(
       ovr?.richRuns,
       ptToPx,
       richFontFamilyForFace,
+      legendKey,
     );
   }
   return true;
@@ -7513,6 +11630,7 @@ type ChartExStyle = NonNullable<ChartModel['chartexDataPointStyle']>;
 
 interface ResolvedChartExLabel {
   text: string;
+  showLegendKey: boolean;
   position?: string;
   fontColor?: string;
   fontSizeHpt?: number;
@@ -7569,6 +11687,7 @@ function resolveChartExLabel(
     ?? definition?.showPercent
     ?? defaults.showPercent
     ?? false;
+  const showLegendKey = override?.showLegendKey ?? definition?.showLegendKey ?? false;
   const authoredFormatCode = override?.formatCode
     ?? definition?.formatCode
     ?? chart.dataLabelFormatCode
@@ -7589,9 +11708,10 @@ function resolveChartExLabel(
     date1904: chart.date1904,
     separator: override?.separator ?? definition?.separator,
   });
-  if (!text) return null;
+  if (!text && !showLegendKey) return null;
   return {
     text,
+    showLegendKey,
     position: override?.position ?? definition?.position,
     fontColor: override?.fontColor ?? definition?.fontColor,
     fontSizeHpt: override?.fontSizeHpt ?? definition?.fontSizeHpt,
@@ -7665,6 +11785,15 @@ function chartExStyleFillPaint(
   const paints = style?.fillPaints;
   if (!paints?.length) return null;
   return paints[(style?.fillColorIndex ?? index) % paints.length] ?? null;
+}
+
+function chartExStyleLinePaint(
+  style: ChartExStyle | null | undefined,
+  index: number,
+): ChartModel['plotAreaLineFill'] {
+  const paints = style?.linePaints;
+  if (!paints?.length) return null;
+  return paints[(style?.lineColorIndex ?? index) % paints.length] ?? null;
 }
 
 /** Resolve one ChartEx style paint layer. `undefined` means this layer supplied
@@ -7773,7 +11902,13 @@ function resolveChartExSeriesLineStyle(
     || local?.lineCap != null
     || local?.lineJoin != null;
   if (localHasLine && !(local?.lineHidden && local.lineNoStyle)) {
-    return resolved(local, fallbackColor);
+    const line = resolved(local, series?.lineColor ?? fallbackColor);
+    // Classic `<c:ser><c:spPr><a:ln>` keeps its legacy color/width fields for
+    // the ordinary chart API while dash/cap/join share the structured carrier
+    // introduced for ChartEx. Merge those authored properties instead of
+    // letting the presence of a dash reset the same line to the 1px fallback.
+    line.widthEmu ??= series?.lineWidthEmu ?? null;
+    return line;
   }
   const hasLegacyLocalLine = series?.lineHidden != null
     || series?.lineColor != null
@@ -7804,7 +11939,7 @@ function applyResolvedChartExLineStyle(
   ctx.lineWidth = line.widthEmu != null
     ? axisLineWidthPx(line.widthEmu, ptToPx)
     : 1;
-  ctx.setLineDash(dashPatternForPreset(line.dash ?? undefined));
+  ctx.setLineDash(dashPatternForPreset(line.dash ?? undefined, ctx.lineWidth));
   ctx.lineCap = line.cap === 'rnd' ? 'round' : line.cap === 'sq' ? 'square' : 'butt';
   ctx.lineJoin = line.join === 'round' || line.join === 'bevel' ? line.join : 'miter';
   return true;
@@ -7877,6 +12012,11 @@ function chartExLegendSeries(
 // Refuse an oversized paint atomically instead of drawing a misleading prefix.
 // This is an availability boundary, not an automatic chart-layout heuristic.
 const MAX_CANVAS_CHART_POINTS = 10_000;
+// Marker gradients are resolved for each painted marker. Bound both one
+// recipe and the chart-wide stop registrations so a valid public model cannot
+// turn a bounded point count into unbounded synchronous Canvas work.
+const MAX_CANVAS_MARKER_GRADIENT_STOPS = 4_096;
+const MAX_CANVAS_MARKER_PAINT_COMPONENTS = 1_048_576;
 // The package parser already applies its XML-depth ceiling. Keep the same kind
 // of stack-safety boundary for caller-constructed public ChartModel objects.
 const MAX_CANVAS_HIERARCHY_DEPTH = 512;
@@ -7886,7 +12026,7 @@ const CLASSIC_CANVAS_POINT_FAMILIES = new Set([
   'stackedBarPct', 'stackedBarHPct', 'clusteredColumn',
   'line', 'stackedLine', 'stackedLinePct',
   'area', 'stackedArea', 'stackedAreaPct',
-  'pie', 'doughnut', 'radar', 'scatter', 'bubble', 'stock',
+  'pie', 'doughnut', 'radar', 'scatter', 'bubble', 'stock', 'surface',
 ]);
 
 /**
@@ -7917,6 +12057,141 @@ function classicCanvasPointCount(chart: ChartModel): number | null {
       return MAX_CANVAS_CHART_POINTS + 1;
     }
     total += points;
+  }
+  return total;
+}
+
+function classicMarkerPointIsPainted(
+  chart: ChartModel,
+  series: ChartSeries,
+  family: string,
+  index: number,
+  scatterHasNumericX: boolean,
+): boolean {
+  const value = series.values[index];
+  let painted = value != null;
+  if (!painted && (family === 'line' || family === 'stackedLine'
+    || family === 'stackedLinePct')) {
+    const renderedByLineFamily = chart.chartType === 'line'
+      || chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
+    painted = renderedByLineFamily
+      && (chart.chartType !== 'line' || chart.dispBlanksAs === 'zero');
+  }
+  if (!painted) return false;
+  if (family === 'scatter' && scatterHasNumericX) {
+    const category = (series.categories ?? chart.categories)[index];
+    if (category == null || !Number.isFinite(Number.parseFloat(category))) return false;
+  }
+  if (family === 'scatter' && chart.chartType === 'bubble') {
+    return (chart.bubbleScale ?? 100) > 0
+      && visibleBubbleSize(chart, series.bubbleSizes?.[index]) != null;
+  }
+  return true;
+}
+
+function dataLabelLegendKeyCount(
+  chart: ChartModel,
+  series: ChartSeries,
+  family: string,
+  pointCount: number,
+  scatterHasNumericX: boolean,
+): number {
+  if (!series.seriesDataLabels && !(series.dataLabelOverrides?.length)) return 0;
+  const overrides = indexPointOverrides(series.dataLabelOverrides);
+  let count = 0;
+  for (let index = 0; index < pointCount; index++) {
+    const point = overrides.get(index);
+    if (point?.deleted === true) continue;
+    if ((point?.showLegendKey ?? series.seriesDataLabels?.showLegendKey ?? false) !== true) continue;
+    if (!classicMarkerPointIsPainted(chart, series, family, index, scatterHasNumericX)) continue;
+    count++;
+  }
+  return count;
+}
+
+/** @internal Exported for resource-boundary regression tests; package entry
+ * points do not expose the renderer module as public API. */
+export function classicMarkerPaintWorkCount(chart: ChartModel): number | null {
+  if (!CLASSIC_CANVAS_POINT_FAMILIES.has(chart.chartType)) return null;
+  const scatterHasNumericX = chart.series.some(series => {
+    const family = series.seriesType ?? chart.chartType;
+    if (family !== 'scatter') return false;
+    return (series.categories ?? chart.categories).some(category =>
+      Number.isFinite(Number.parseFloat(category))
+    );
+  });
+  const dataTableMarkerKeysVisible = chartHasDataTable(chart)
+    && chartCategories(chart).length > 0
+    && chart.dataTable?.showKeys === true;
+  let total = 0;
+  const chargePaint = (paint: Fill | null | undefined, repetitions = 1): boolean => {
+    if (repetitions <= 0 || paint == null) return true;
+    const components = markerPaintComponents(paint);
+    if (paint.fillType === 'gradient' && components > MAX_CANVAS_MARKER_GRADIENT_STOPS) {
+      return false;
+    }
+    if (!Number.isSafeInteger(repetitions)
+      || components > Math.floor((MAX_CANVAS_MARKER_PAINT_COMPONENTS - total) / repetitions)) {
+      return false;
+    }
+    total += components * repetitions;
+    return true;
+  };
+  for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
+    const series = chart.series[seriesIndex];
+    const family = series.seriesType ?? chart.chartType;
+    const markerFamily = family === 'line' || family === 'stackedLine'
+      || family === 'stackedLinePct' || family === 'area'
+      || family === 'stackedArea' || family === 'stackedAreaPct'
+      || family === 'scatter' || family === 'radar' || family === 'stock';
+    if (!markerFamily) continue;
+    // Family-level style choices override every series marker. Keep the
+    // availability preflight on the same path as the painters: filled radar
+    // never paints markers, and the two no-marker scatter styles suppress even
+    // point-local marker overrides. Bubble geometry is unaffected by the
+    // scatter style token and therefore remains chargeable.
+    if (markersSuppressedByChartStyle(
+      family, chart.chartType, chart.scatterStyle, chart.radarStyle,
+    )) continue;
+    const areaFamily = family === 'area' || family === 'stackedArea'
+      || family === 'stackedAreaPct';
+    const seriesVisible = areaFamily
+      ? (series.showMarker === true || seriesHasMarkerDetail(series))
+        && series.markerSymbol !== 'none'
+      : family === 'stock'
+        ? series.markerSymbol != null && series.markerSymbol !== 'none'
+        : series.showMarker !== false && series.markerSymbol !== 'none';
+    if (!seriesVisible && !hasVisiblePointMarkerOverride(series)) continue;
+    const pointCount = Math.max(
+      series.values.length,
+      series.categories?.length ?? 0,
+      chart.categories.length,
+    );
+    const overrides = indexPointOverrides(series.dataPointOverrides);
+    for (let index = 0; index < pointCount; index++) {
+      if (!classicMarkerPointIsPainted(
+        chart, series, family, index, scatterHasNumericX,
+      )) continue;
+      const point = overrides.get(index);
+      if (effectiveMarkerSymbol(series, point, 'circle', seriesVisible) === 'none') continue;
+      const paint = markerFillPaintFor(series, point, index);
+      if (!chargePaint(paint)) return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+    }
+
+    if (seriesLegendMarkerIsVisible(chart.chartType, chart.scatterStyle, series)) {
+      let repeatedKeys = 0;
+      const legendEntryDeleted = chart.legendEntries?.some(entry =>
+        entry.idx === seriesIndex && entry.deleted === true
+      ) === true;
+      if (chart.showLegend && !legendEntryDeleted) repeatedKeys++;
+      if (dataTableMarkerKeysVisible) repeatedKeys++;
+      repeatedKeys += dataLabelLegendKeyCount(
+        chart, series, family, pointCount, scatterHasNumericX,
+      );
+      if (!chargePaint(seriesMarkerFillPaint(series), repeatedKeys)) {
+        return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+      }
+    }
   }
   return total;
 }
@@ -7986,6 +12261,7 @@ function renderHistogramChart(
   chart: ChartModel,
   rect: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): void {
   const source = chart.series[0];
   if (!source) return;
@@ -7999,7 +12275,7 @@ function renderHistogramChart(
     chartType: 'clusteredBar',
     categories: plan.categories,
     series: [{ ...source, categories: undefined, values: plan.counts }],
-  }, rect, ptToPx, { gapPolicy: 'chartex' });
+  }, rect, ptToPx, { gapPolicy: 'chartex' }, shapeRotationDeg);
 }
 
 function renderWaterfallChart(
@@ -8094,7 +12370,7 @@ function renderWaterfallChart(
     && chart.valAxisTickLabelPos !== 'none'
     && !suppressImplicitValueTickLabels;
 
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
   const valFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
@@ -8175,7 +12451,9 @@ function renderWaterfallChart(
     ],
   };
   const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const pad = {
     t: titleBand.bandH + legTopH + valFontPx / 2 + 2,
     r: legRightW + w * 0.02,
@@ -8193,9 +12471,11 @@ function renderWaterfallChart(
     legendSideReserveFrac: 0,
     legendReserve: leg,
     pad,
+    honorPlotAreaManualLayout: true,
   });
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
   const plan = planValueAxis(chart, rawMin, rawMax, ph / ptToPx);
   const yOf = (value: number): number => py0 + ph - plan.frac(value) * ph;
 
@@ -8261,12 +12541,14 @@ function renderWaterfallChart(
         chart.valAxisLineHidden,
         'major',
         ptToPx,
+        chart.valAxisLineDash,
       );
     }
     for (const value of plan.minorTicks) {
       drawAxisTick(
         ctx, chart.valAxisMinorTickMark, 'val', px0, yOf(value),
         valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden, 'minor', ptToPx,
+        chart.valAxisLineDash,
       );
     }
   }
@@ -8277,14 +12559,16 @@ function renderWaterfallChart(
   const drawValLine = !chart.valAxisHidden && !chart.valAxisLineHidden;
   const drawCatLine = !chart.catAxisHidden && !chart.catAxisLineHidden;
   if (drawValLine) {
-    ctx.strokeStyle = valAxisLine.color;
-    ctx.lineWidth = valAxisLine.width;
-    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0, px0, py0 + ph,
+      valAxisLine.color, valAxisLine.width, chart.valAxisLineDash,
+    );
   }
   if (drawCatLine) {
-    ctx.strokeStyle = catAxisLine.color;
-    ctx.lineWidth = catAxisLine.width;
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0 + ph, px0 + pw, py0 + ph,
+      catAxisLine.color, catAxisLine.width, chart.catAxisLineDash,
+    );
   }
 
   // ECMA-376 / chartEx §17.18.34 ST_GapAmount: gapWidth is the gap between
@@ -8461,7 +12745,7 @@ function renderFunnelChart(
   }
   if (!(max > 0)) return;
   const { x, y, w, h } = r;
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
   const series = chart.series[0];
   const labelOverrides = indexPointOverrides(series?.dataLabelOverrides);
   const color = `#${series?.color ?? chartExDataPointFill(chart, 0, 1, series?.chartexStyle)}`;
@@ -8479,7 +12763,9 @@ function renderFunnelChart(
     )],
   };
   const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const catFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   ctx.save();
   ctx.font = chartFontCss(
@@ -8506,9 +12792,11 @@ function renderFunnelChart(
     legendSideReserveFrac: 0.22,
     legendReserve: leg,
     pad,
+    honorPlotAreaManualLayout: true,
   });
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
   const rowH = ph / n;
   const gapWidthPct = resolveCategoryGapWidthPercent(chart.barGapWidth, 'chartex');
   const barH = rowH / (1 + gapWidthPct / 100);
@@ -8579,6 +12867,7 @@ function renderParetoLineChart(
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): void {
   const source = chart.series[0];
   if (!source) return;
@@ -8630,7 +12919,7 @@ function renderParetoLineChart(
     valMin: chart.valMin ?? 0,
     valMax: chart.valMax ?? 1.2,
     valAxisMajorUnit: chart.valAxisMajorUnit ?? 0.2,
-  }, r, ptToPx);
+  }, r, ptToPx, shapeRotationDeg);
 }
 
 /** Owner-backed ChartEx Pareto: sorted frequency columns plus cumulative line. */
@@ -8639,6 +12928,7 @@ function renderParetoChart(
   chart: ChartModel,
   r: ChartRect,
   ptToPx: number,
+  shapeRotationDeg = 0,
 ): void {
   const owner = chart.series[0];
   if (!owner) return;
@@ -8704,7 +12994,7 @@ function renderParetoChart(
   }, r, ptToPx, {
     gapPolicy: 'chartex',
     semanticLineNoStyleFallback: true,
-  });
+  }, shapeRotationDeg);
 }
 
 // ─── chartEx: box-and-whisker (CH15, MS 2014 chartex ext) ────────────────────
@@ -8882,7 +13172,7 @@ function renderBoxWhiskerChart(
 
   // Shared title band + cartesian plot rect. Reserve category/value-axis bands
   // and, when present in the chart model, the authored legend band.
-  const titleBand = cartesianTitleBand(chart, h, ptToPx);
+  const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
   const catAxFontPx0 = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx0 = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
@@ -8911,7 +13201,9 @@ function renderBoxWhiskerChart(
     series: boxLegendSeries,
   };
   const leg = measuredLegendReserve(ctx, legendChart, w, h, 0.22, ptToPx);
-  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(
+    leg, chart.legendOverlay === true,
+  );
   const pad = {
     t: titleBand.bandH + legTopH + valAxFontPx0 / 2 + 2,
     r: legRightW + w * 0.02,
@@ -8923,8 +13215,10 @@ function renderBoxWhiskerChart(
     legendSideReserveFrac: 0.22,
     legendReserve: leg,
     pad,
+    honorPlotAreaManualLayout: true,
   });
   const { px0, py0, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
   const cats = box.categories;
   const nCat = cats.length;
@@ -8988,18 +13282,21 @@ function renderBoxWhiskerChart(
         chart.valAxisLineHidden,
         'major',
         ptToPx,
+        chart.valAxisLineDash,
       );
     }
     for (const value of boxAxisPlan.minorTicks) {
       drawAxisTick(
         ctx, chart.valAxisMinorTickMark, 'val', px0, yOf(value),
         valAxisLine.color, valAxisLine.width, false, chart.valAxisLineHidden, 'minor', ptToPx,
+        chart.valAxisLineDash,
       );
     }
     if (!chart.valAxisLineHidden) {
-      ctx.strokeStyle = valAxisLine.color;
-      ctx.lineWidth = valAxisLine.width;
-      ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+      strokeAxisSegment(
+        ctx, px0, py0, px0, py0 + ph,
+        valAxisLine.color, valAxisLine.width, chart.valAxisLineDash,
+      );
     }
   }
   // Category-axis baseline. ChartEx carries the axis rule in the local
@@ -9011,9 +13308,10 @@ function renderBoxWhiskerChart(
     ptToPx,
   );
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-    ctx.strokeStyle = catAxisLine.color;
-    ctx.lineWidth = catAxisLine.width;
-    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+    strokeAxisSegment(
+      ctx, px0, py0 + ph, px0 + pw, py0 + ph,
+      catAxisLine.color, catAxisLine.width, chart.catAxisLineDash,
+    );
   }
 
   // ChartEx divides the plot into full category intervals, so the first and
@@ -9105,6 +13403,7 @@ function renderBoxWhiskerChart(
         chart.catAxisLineHidden,
         'major',
         ptToPx,
+        chart.catAxisLineDash,
       );
     }
     for (let si = 0; si < nSer; si++) {
@@ -9205,7 +13504,7 @@ function renderBoxWhiskerChart(
       // the box/whiskers when cx:visibility@nonoutliers is enabled.
       if (s.showNonoutliers) {
         const pR = observationMarkerRadiusPx;
-        const pointSymbol = chart.chartexMarkerSymbol ?? 'circle';
+        const pointSymbol = chart.chartStyleMarkerSymbol ?? chart.chartexMarkerSymbol ?? 'circle';
         for (const point of stats.inner) {
           if (pointSymbol === 'none') continue;
           const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
@@ -9238,6 +13537,8 @@ function renderBoxWhiskerChart(
               markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
               ptToPx,
               ctx.lineWidth,
+              markerFillPaint,
+              shapeRotationDeg,
             );
           }
         }
@@ -9257,7 +13558,7 @@ function renderBoxWhiskerChart(
 
       // Outlier dots.
       if (s.showOutliers) {
-        const pointSymbol = chart.chartexMarkerSymbol ?? 'circle';
+        const pointSymbol = chart.chartStyleMarkerSymbol ?? chart.chartexMarkerSymbol ?? 'circle';
         const oR = observationMarkerRadiusPx;
         for (const o of stats.outliers) {
           if (pointSymbol === 'none') continue;
@@ -9290,6 +13591,8 @@ function renderBoxWhiskerChart(
               markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
               ptToPx,
               ctx.lineWidth,
+              markerFillPaint,
+              shapeRotationDeg,
             );
           }
         }
@@ -9299,7 +13602,12 @@ function renderBoxWhiskerChart(
     // Category label (centered under the slot), word-wrapped like the other
     // cartesian renderers.
     if (!chart.catAxisHidden) {
-      ctx.font = `${catFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace, 'minor')}`;
+      ctx.font = chartFontCss(
+        catFontPx,
+        chartFontFamily(chart, chart.catAxisFontFace, 'minor'),
+        chart.catAxisFontBold ?? false,
+        chart.catAxisFontItalic ?? false,
+      );
       ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
@@ -9560,9 +13868,11 @@ function renderSunburstChart(
     legendSideReserveFrac: 0,
     legendReserve: leg,
     radialGapFrac: 0.02,
+    honorPlotAreaManualLayout: true,
   });
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
   const cx = px0 + pw / 2;
   const cy = py0 + ph / 2;
   const outerR = Math.min(pw, ph) * 0.46;
@@ -9721,7 +14031,7 @@ function renderSunburstChart(
   drawLegendForLayout(
     ctx,
     legendChart,
-    frame.legend,
+    leg,
     x,
     y,
     w,
@@ -9876,9 +14186,11 @@ function renderTreemapChart(
     legendSideReserveFrac: 0,
     legendReserve: leg,
     radialGapFrac: 0.015,
+    honorPlotAreaManualLayout: true,
   });
   drawChartTitleForLayout(ctx, chart, r.x, r.y, r.w, r.h, r.y + frame.title.topPad, frame.title.fontPx);
   const { px0, py0, pw, ph } = frame.plotRect;
+  paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
   const plotBounds = { x: px0, y: py0, w: pw, h: ph };
 
   const parentMode = treemap.parentLabelLayout ?? 'overlapping';
@@ -10063,7 +14375,7 @@ function renderTreemapChart(
   drawLegendForLayout(
     ctx,
     legendChart,
-    frame.legend,
+    leg,
     r.x,
     r.y,
     r.w,
@@ -10216,6 +14528,35 @@ function drawChartTextBoxes(
 
 // ─── Background frame + dispatcher ──────────────────────────────────────────
 
+/** ECMA-376 §21.2.2.159 defines only whether chart-space corners are rounded,
+ * not the application geometry. Keep the compatibility policy isolated: a
+ * fixed 5pt radius is transform-stable, independent of chart aspect ratio, and
+ * can be replaced without touching fill/border/clip semantics if a future
+ * Office vector boundary establishes a different radius. */
+const CHART_SPACE_CORNER_RADIUS_PT = 5;
+
+function chartSpaceRoundedPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+): void {
+  const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
 /**
  * Render a chart (background frame + dispatch on `chartType`).
  * `rect` is in pixel coordinates on the target canvas.
@@ -10251,31 +14592,71 @@ export function renderChart(
   // caller instead of requiring each call site to remember to do so.
   ctx.save();
   try {
+    chart = applyPlotVisibleOnly(chart);
+    chart = applyLinkedChartStyleRoles(chart);
     const { x, y, w, h } = rect;
+    const rounded = chart.roundedCorners === true;
+    const cornerRadius = rounded ? CHART_SPACE_CORNER_RADIUS_PT * ptToPx : 0;
+    if (rounded) {
+      chartSpaceRoundedPath(ctx, x, y, w, h, cornerRadius);
+      ctx.clip();
+    }
     // Only fill the outer chartSpace when chartBg is set; a null means noFill
     // (transparent) per OOXML, so the underlying slide/sheet shows through.
-    if (chart.chartBg) {
+    if (chart.chartFillHidden === true) {
+      // Direct or linked `noFill`: retain the host surface beneath the chart.
+    } else if (chart.chartFill) {
+      const fill = resolveFill(chart.chartFill, ctx, x, y, w, h, shapeRotationDeg);
+      if (fill) ctx.fillStyle = fill;
+      if (fill) ctx.fillRect(x, y, w, h);
+    } else if (chart.chartBg) {
       ctx.fillStyle = `#${chart.chartBg}`;
       ctx.fillRect(x, y, w, h);
     }
 
-    // Explicit chart border — drawn ONLY when the XML declared a paintable
-    // `<c:chartSpace><c:spPr><a:ln><a:solidFill>` (chartBorderColor is null
-    // otherwise; there is no default Excel-style frame). Width comes from
+    // Explicit chart border — drawn only when DrawingML declares a paintable
+    // line. Width comes from
     // `<a:ln@w>` (EMU → pt → px); absent width falls back to a 1px hairline.
-    if (chart.chartBorderColor) {
+    if (chart.chartBorderHidden !== true
+      && (chart.chartBorderLineFill || chart.chartBorderColor)) {
       ctx.save();
-      ctx.strokeStyle = `#${chart.chartBorderColor}`;
+      const stroke = chart.chartBorderLineFill
+        ? resolveFill(chart.chartBorderLineFill, ctx, x, y, w, h, shapeRotationDeg)
+        : chart.chartBorderColor ? `#${chart.chartBorderColor}` : null;
+      if (!stroke) {
+        ctx.restore();
+      } else {
+        ctx.strokeStyle = stroke;
       // `<a:ln>` with no `@w` means width 0 per ECMA-376 §20.1.2.2.24, i.e. invisible;
       // but Excel renders a fill-without-width line as a ~hairline, so we draw 1px to
       // match the app rather than dropping a declared border.
       ctx.lineWidth = chart.chartBorderWidthEmu
         ? Math.max(0.5, chart.chartBorderWidthEmu / EMU_PER_PT) * ptToPx
         : 1;
+      ctx.setLineDash(dashPatternForLine(
+        chart.chartBorderCustomDash, chart.chartBorderDash, ctx.lineWidth,
+      ));
+      ctx.lineCap = chart.chartBorderCap === 'rnd'
+        ? 'round' : chart.chartBorderCap === 'sq' ? 'square' : 'butt';
+      ctx.lineJoin = chart.chartBorderJoin === 'round' || chart.chartBorderJoin === 'bevel'
+        ? chart.chartBorderJoin : 'miter';
       // Inset by half the line width so the full stroke stays inside the rect.
       const lw = ctx.lineWidth;
-      ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
-      ctx.restore();
+      if (rounded) {
+        chartSpaceRoundedPath(
+          ctx,
+          x + lw / 2,
+          y + lw / 2,
+          Math.max(0, w - lw),
+          Math.max(0, h - lw),
+          Math.max(0, cornerRadius - lw / 2),
+        );
+        ctx.stroke();
+      } else {
+        ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
+      }
+        ctx.restore();
+      }
     }
 
     // chartEx box-and-whisker / sunburst / treemap carry their data in the structured
@@ -10294,13 +14675,22 @@ export function renderChart(
     }
 
     const classicPointCount = classicCanvasPointCount(chart);
+    const classicMarkerPaintWork = classicPointCount != null
+      && classicPointCount <= MAX_CANVAS_CHART_POINTS
+      ? classicMarkerPaintWorkCount(chart) : null;
     const classicThreeDWork = classicThreeDWorkCount(chart, threeD);
     if (
-      (classicPointCount != null || classicThreeDWork != null)
+      (classicPointCount != null || classicMarkerPaintWork != null || classicThreeDWork != null)
       && rejectOversizedCanvasChart(
         ctx,
         rect,
-        Math.max(classicPointCount ?? 0, classicThreeDWork ?? 0),
+        Math.max(
+          classicPointCount ?? 0,
+          classicMarkerPaintWork != null
+            && classicMarkerPaintWork > MAX_CANVAS_MARKER_PAINT_COMPONENTS
+            ? MAX_CANVAS_CHART_POINTS + 1 : 0,
+          classicThreeDWork ?? 0,
+        ),
       )
     ) {
       drawChartTextBoxes(ctx, chart, rect, ptToPx);
@@ -10311,12 +14701,12 @@ export function renderChart(
     // model, while `threeD` carries the authored view/depth contract.  Consume
     // that contract before ordinary dispatch; 2-D charts return false and keep
     // their existing byte-stable family paths.
-    if (threeD?.render(ctx, chart, rect, ptToPx)) {
+    if (threeD?.render(ctx, chart, rect, ptToPx, shapeRotationDeg)) {
       drawChartDisplayUnitLabels(ctx, chart, rect, ptToPx);
       drawChartTextBoxes(ctx, chart, rect, ptToPx);
       return;
     }
-    if (regionMap?.render(ctx, chart, rect, ptToPx)) {
+    if (regionMap?.render(ctx, chart, rect, ptToPx, shapeRotationDeg)) {
       drawChartTextBoxes(ctx, chart, rect, ptToPx);
       return;
     }
@@ -10328,26 +14718,26 @@ export function renderChart(
       case 'stackedBarH':
       case 'stackedBarPct':
       case 'stackedBarHPct':
-        renderBarChart(ctx, chart, rect, ptToPx); break;
+        renderBarChart(ctx, chart, rect, ptToPx, {}, shapeRotationDeg); break;
       case 'line':
       case 'stackedLine':
       case 'stackedLinePct':
-        renderLineChart(ctx, chart, rect, ptToPx); break;
+        renderLineChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'area':
       case 'stackedArea':
       case 'stackedAreaPct':
-        renderAreaChart(ctx, chart, rect, ptToPx); break;
+        renderAreaChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'pie':
-        renderPieChart(ctx, chart, rect, false, ptToPx); break;
+        renderPieChart(ctx, chart, rect, false, ptToPx, shapeRotationDeg); break;
       case 'ofPie':
-        renderOfPieChart(ctx, chart, rect, ptToPx); break;
+        renderOfPieChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'doughnut':
-        renderPieChart(ctx, chart, rect, true, ptToPx); break;
+        renderPieChart(ctx, chart, rect, true, ptToPx, shapeRotationDeg); break;
       case 'radar':
-        renderRadarChart(ctx, chart, rect, ptToPx); break;
+        renderRadarChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'scatter':
       case 'bubble':
-        renderScatterChart(ctx, chart, rect, ptToPx); break;
+        renderScatterChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'waterfall':
         renderWaterfallChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'clusteredColumn':
@@ -10357,17 +14747,20 @@ export function renderChart(
           rect,
           ptToPx,
           { gapPolicy: 'chartex' },
+          shapeRotationDeg,
         ); break;
       case 'histogram':
-        renderHistogramChart(ctx, chart, rect, ptToPx); break;
+        renderHistogramChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'funnel':
         renderFunnelChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'paretoLine':
-        renderParetoLineChart(ctx, chart, rect, ptToPx); break;
+        renderParetoLineChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'pareto':
-        renderParetoChart(ctx, chart, rect, ptToPx); break;
+        renderParetoChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'stock':
-        renderStockChart(ctx, chart, rect, ptToPx); break;
+        renderStockChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
+      case 'surface':
+        renderSurfaceChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'boxWhisker':
         renderBoxWhiskerChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'sunburst':

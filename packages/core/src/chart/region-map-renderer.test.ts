@@ -11,6 +11,8 @@ interface RecordedMapContext {
   ctx: CanvasRenderingContext2D;
   fills: string[];
   texts: string[];
+  rects: Array<{ x: number; y: number; w: number; h: number; fill: string }>;
+  gradients: number[][];
   nonFiniteArguments: number[];
   beginPathCount: number;
 }
@@ -19,6 +21,8 @@ function recordingContext(): RecordedMapContext {
   const fills: string[] = [];
   const texts: string[] = [];
   const nonFiniteArguments: number[] = [];
+  const rects: RecordedMapContext['rects'] = [];
+  const gradients: number[][] = [];
   let beginPathCount = 0;
   const state: Record<string, unknown> = { fillStyle: '#000000', strokeStyle: '#000000' };
   const gradient = { addColorStop() {} };
@@ -26,11 +30,17 @@ function recordingContext(): RecordedMapContext {
     get(_target, property) {
       if (property in state) return state[String(property)];
       if (property === 'measureText') return (value: string) => ({ width: [...String(value)].length * 6 });
-      if (property === 'createLinearGradient') return () => gradient;
+      if (property === 'createLinearGradient') return (...args: number[]) => {
+        gradients.push(args);
+        return gradient;
+      };
       if (property === 'fill') return () => fills.push(String(state.fillStyle));
       if (property === 'fillRect') return (...args: number[]) => {
         for (const value of args) if (!Number.isFinite(value)) nonFiniteArguments.push(value);
         fills.push(String(state.fillStyle));
+        rects.push({
+          x: args[0], y: args[1], w: args[2], h: args[3], fill: String(state.fillStyle),
+        });
       };
       if (property === 'fillText') return (value: string, ...args: number[]) => {
         for (const number of args) if (!Number.isFinite(number)) nonFiniteArguments.push(number);
@@ -50,6 +60,8 @@ function recordingContext(): RecordedMapContext {
     ctx,
     fills,
     texts,
+    rects,
+    gradients,
     nonFiniteArguments,
     get beginPathCount() { return beginPathCount; },
   };
@@ -211,5 +223,42 @@ describe('offline ChartEx Region Map renderer', () => {
     renderRegionMapChart(rec.ctx, model, { x: 0, y: 0, w: 640, h: 360 }, 1);
     expect(rec.texts).toContain('25.0%');
     expect(rec.texts).toContain('75.0%');
+  });
+
+  it('shares plot/legend frame paint, manual layout, overlay, and host rotation', () => {
+    const rec = recordingContext();
+    const unrotated = recordingContext();
+    const model = chart({
+      rows: [{ label: 'Canada', value: 1 }],
+      geography: { projectionType: 'robinson', cachePresent: false },
+    });
+    Object.assign(model, {
+      plotAreaFill: {
+        fillType: 'gradient', gradType: 'linear', angle: 0, rotWithShape: false,
+        stops: [
+          { position: 0, color: '123456' },
+          { position: 1, color: '654321' },
+        ],
+      },
+      plotAreaFillPaintAuthored: true,
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', wMode: 'factor', hMode: 'factor',
+        x: .1, y: .2, w: .5, h: .4,
+      },
+      legendFillColor: 'ABCDEF',
+      legendFillPaintAuthored: true,
+      legendOverlay: true,
+      legendManualLayout: {
+        xMode: 'edge', yMode: 'edge', wMode: 'factor', hMode: 'factor',
+        x: .7, y: .1, w: .2, h: .2,
+      },
+    });
+
+    renderRegionMapChart(unrotated.ctx, model, { x: 0, y: 0, w: 640, h: 360 }, 1, 0);
+    renderRegionMapChart(rec.ctx, model, { x: 0, y: 0, w: 640, h: 360 }, 1, 30);
+
+    expect(rec.rects).toContainEqual({ x: 64, y: 72, w: 320, h: 144, fill: '[object Object]' });
+    expect(rec.rects).toContainEqual({ x: 448, y: 36, w: 128, h: 72, fill: '#ABCDEF' });
+    expect(rec.gradients[0]).not.toEqual(unrotated.gradients[0]);
   });
 });

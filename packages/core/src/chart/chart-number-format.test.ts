@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { formatChartVal, formatChartValWithCode, formatCategoryLabel } from './chart-number-format.js';
+import {
+  formatChartVal,
+  formatChartValWithCode,
+  formatCategoryLabel,
+  formatLocalizedExcelShortDate,
+} from './chart-number-format.js';
 
 describe('formatChartVal (General)', () => {
   it('shows integers raw with no abbreviation', () => {
@@ -55,6 +60,11 @@ describe('formatChartValWithCode — percent & null', () => {
 });
 
 describe('chart date1904 (c:date1904 §21.2.2.38 / §18.17.4.1)', () => {
+  it('localizes worksheet built-in short-date format 14', () => {
+    expect(formatLocalizedExcelShortDate(45_658, false, 'ja-JP')).toBe('2025/1/1');
+    expect(formatLocalizedExcelShortDate(45_658, false, 'en-US')).toBe('1/1/2025');
+  });
+
   it('formatChartValWithCode shifts a date serial to the 1904 epoch when date1904=true', () => {
     // 1900-system serial 44927 and 1904-system serial 43465 are both
     // 2023-01-01 (offset 1462 days).
@@ -97,5 +107,13 @@ describe('formatCategoryLabel — category-axis numFmt (§21.2.2.71)', () => {
     // "General" routes through formatChartValWithCode → formatChartVal, which
     // shows the raw number (44927), matching the pre-format behavior.
     expect(formatCategoryLabel('44927', 'General')).toBe('44927');
+  });
+
+  it('renders abbreviated and full month names for date-axis format tokens', () => {
+    // 45658 = 2025-01-01 in the 1900 date system. The `mmm` token displays
+    // "Jan-25" and must not be folded to the numeric form used by `mm`.
+    expect(formatCategoryLabel('45658', 'mmm\\-yy')).toBe('Jan-25');
+    expect(formatCategoryLabel('45658', 'mmmm yyyy')).toBe('January 2025');
+    expect(formatCategoryLabel('45658', 'mm/dd/yy')).toBe('01/01/25');
   });
 });

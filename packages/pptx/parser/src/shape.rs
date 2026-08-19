@@ -4,7 +4,7 @@
 //! `fill`, text-body parsing from `text`, chart parsing from `chart`, and the
 //! shared XML/zip helpers + `TableStyleDef` from the crate root.
 
-use crate::chart::{parse_chartex, parse_legacy_chart_with_user_shapes};
+use crate::chart::{parse_chartex, parse_legacy_chart_with_style_parts};
 use crate::fill::{
     line_properties_to_stroke, parse_blip_alpha, parse_color_node, parse_cust_geom,
     parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
@@ -133,6 +133,51 @@ mod chartex_sidecar_package_tests {
                 "bg": "FFFFFF",
                 "preset": "diagCross",
             }),
+        );
+    }
+
+    #[test]
+    fn pptx_package_loads_classic_chart_style_roles() {
+        let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+        let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOffice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
+        let presentation_xml = r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rIdSlide"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#;
+        let presentation_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
+        let slide_xml = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Chart 1"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
+        let slide_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+        let chart_xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:strLit><c:ptCount val="2"/><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser><c:dropLines/></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let rels_xml = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#;
+        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dropLine><cs:spPr><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></cs:spPr></cs:dropLine></cs:chartStyle>"#;
+        let colors_xml = r#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#;
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, xml) in [
+                ("[Content_Types].xml", content_types),
+                ("_rels/.rels", root_rels),
+                ("ppt/presentation.xml", presentation_xml),
+                ("ppt/_rels/presentation.xml.rels", presentation_rels),
+                ("ppt/slides/slide1.xml", slide_xml),
+                ("ppt/slides/_rels/slide1.xml.rels", slide_rels),
+                ("ppt/charts/chart1.xml", chart_xml),
+                ("ppt/charts/_rels/chart1.xml.rels", rels_xml),
+                ("ppt/charts/style1.xml", style_xml),
+                ("ppt/charts/colors1.xml", colors_xml),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(xml.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let json = crate::parse_pptx_native(&bytes).expect("full PPTX package parses");
+        let presentation: serde_json::Value =
+            serde_json::from_str(&json).expect("presentation JSON");
+        let chart = &presentation["slides"][0]["elements"][0]["chart"];
+        assert_eq!(
+            chart["chartStyleRoles"]["dropLine"]["lineColors"][0],
+            serde_json::Value::String("336699".to_string()),
         );
     }
 }
@@ -584,8 +629,8 @@ fn custom_dash(line: &LineProperties) -> Vec<StrokeDashSegment> {
         Some(LineDash::Custom(stops)) => stops
             .iter()
             .map(|stop| StrokeDashSegment {
-                dash: stop.dash as f64 / 100_000.0,
-                space: stop.space as f64 / 100_000.0,
+                dash: stop.dash / 100_000.0,
+                space: stop.space / 100_000.0,
             })
             .collect(),
         _ => Vec::new(),
@@ -2633,12 +2678,17 @@ pub(crate) fn parse_sp_tree_node(
                                     theme_source.format_scheme(),
                                 )
                             } else {
+                                let style_xml = load_chart_style_xml(zip, &chart_path);
+                                let color_style_xml = load_chart_color_style_xml(zip, &chart_path);
                                 let user_shapes_xml =
                                     load_chart_user_shapes_xml(zip, &chart_path, &chart_xml);
-                                parse_legacy_chart_with_user_shapes(
+                                parse_legacy_chart_with_style_parts(
                                     &chart_xml,
+                                    style_xml.as_deref(),
+                                    color_style_xml.as_deref(),
                                     user_shapes_xml.as_deref(),
                                     theme,
+                                    theme_source.format_scheme(),
                                 )
                             };
                             if let Some(mut chart) = chart_opt {

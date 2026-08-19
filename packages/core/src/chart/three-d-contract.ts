@@ -13,6 +13,7 @@ export interface ChartThreeDRenderer {
     chart: ChartModel,
     rect: ChartRect,
     ptToPx: number,
+    shapeRotationDeg?: number,
   ): boolean;
 }
 

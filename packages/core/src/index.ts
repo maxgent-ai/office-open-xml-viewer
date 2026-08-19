@@ -1,6 +1,7 @@
 export type {
   ArrowEnd,
   Bullet,
+  DrawingMLCustomDashSegment,
   EquationRun,
   Fill,
   FillRect,
@@ -28,10 +29,16 @@ export type {
   TileInfo,
 } from './types/common';
 export type {
+  ChartAreaGroupDecorations,
+  ChartBarGroupDecorations,
   ChartDataLabelOverride,
+  ChartDataTable,
   ChartDataPointOverride,
+  ChartDecorationLineStyle,
   ChartErrBars,
   ChartLabelBox,
+  ChartLegendEntryOverride,
+  ChartLineGroupDecorations,
   ChartManualLayout,
   ChartModel,
   ChartRect,
@@ -39,6 +46,7 @@ export type {
   ChartSeriesDataLabels,
   ChartStockBarPaint,
   ChartStockUpDownBarStyle,
+  ChartSurfaceBandFormat,
   ChartTextBox,
   ChartTextParagraph,
   ChartTextRun,
@@ -51,6 +59,7 @@ export type {
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
   ChartExElementStyle,
+  ChartLineDashSegment,
   ChartexHistogramBinning,
   ChartexBoxSeries,
   ChartexBoxWhisker,
@@ -151,6 +160,7 @@ export {
   type SymbolTextSegment,
 } from './fonts/symbol-font';
 export { renderChart } from './chart/renderer';
+export { formatLocalizedExcelShortDate } from './chart/chart-number-format';
 export { autoResize, type AutoResizeOptions } from './autoResize';
 export {
   buildCustomPath,

@@ -376,6 +376,11 @@ struct WorkbookShared {
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
+    /// Lightweight style projections used while materializing sheets. Full
+    /// workbook styles stay owned by the full-parse path instead of being
+    /// retained and deeply cloned here.
+    default_font: (Option<String>, Option<f64>),
+    chart_number_formats: ChartNumberFormatCache,
     shared_strings: Rc<[SharedString]>,
     /// #773: a part-tagged degradation error set when `xl/sharedStrings.xml` was
     /// PRESENT but corrupt (a broken shared-string table blanks every string cell
@@ -435,6 +440,21 @@ impl WorkbookShared {
     /// `parse_sheet_with`, where an empty rels string fails `resolve_sheet_path`
     /// exactly as the old `?` on the rels read did.
     fn load(archive: &mut XlsxZip) -> Result<WorkbookShared, String> {
+        let (shared, _) = Self::load_impl(archive, false)?;
+        Ok(shared)
+    }
+
+    fn load_with_styles(
+        archive: &mut XlsxZip,
+    ) -> Result<(WorkbookShared, Result<Styles, String>), String> {
+        let (shared, styles) = Self::load_impl(archive, true)?;
+        Ok((shared, styles.expect("full style loading requested")))
+    }
+
+    fn load_impl(
+        archive: &mut XlsxZip,
+        include_full_styles: bool,
+    ) -> Result<(WorkbookShared, Option<Result<Styles, String>>), String> {
         let workbook_xml = read_zip_string(archive, "xl/workbook.xml")?;
         let (sheets, date1904) = {
             let wb_doc = parse_guarded(&workbook_xml).map_err(|e| e.to_string())?;
@@ -448,19 +468,43 @@ impl WorkbookShared {
         let theme_colors: Rc<[String]> = theme.colors.into();
         let theme_format_scheme = Rc::new(theme.format_scheme);
         let theme_fonts = theme.fonts;
+        let (default_font, chart_number_formats, styles) = if include_full_styles {
+            match parse_styles(archive, theme_colors.as_ref()) {
+                Ok(parsed) => (
+                    parsed.default_font,
+                    parsed.chart_number_formats,
+                    Some(Ok(parsed.styles)),
+                ),
+                Err(error) => (
+                    (None, None),
+                    ChartNumberFormatCache::default(),
+                    Some(Err(error)),
+                ),
+            }
+        } else {
+            match styles::parse_style_projection(archive) {
+                Ok(parsed) => (parsed.default_font, parsed.chart_number_formats, None),
+                Err(_) => ((None, None), ChartNumberFormatCache::default(), None),
+            }
+        };
         let (shared_strings, shared_strings_error) =
             read_shared_strings(archive, theme_colors.as_ref());
-        Ok(WorkbookShared {
-            workbook_xml,
-            rels_xml,
-            sheets,
-            theme_colors,
-            theme_format_scheme,
-            theme_fonts,
-            shared_strings: shared_strings.into(),
-            shared_strings_error,
-            date1904,
-        })
+        Ok((
+            WorkbookShared {
+                workbook_xml,
+                rels_xml,
+                sheets,
+                theme_colors,
+                theme_format_scheme,
+                theme_fonts,
+                default_font,
+                chart_number_formats,
+                shared_strings: shared_strings.into(),
+                shared_strings_error,
+                date1904,
+            },
+            styles,
+        ))
     }
 }
 
@@ -595,11 +639,13 @@ fn finalize_projected_sheet(
         sheet_path,
         Some(ChartReferenceContext {
             materialized_rows,
+            materialized_col_hidden: Some(&ws.col_hidden),
             sheet_name: name,
             sheets: &shared.sheets,
             workbook_rels: &rels_doc,
             shared_strings: shared.shared_strings.as_ref(),
             defined_names: &defined_names,
+            number_formats: &shared.chart_number_formats,
             session: &mut reference_session,
         }),
         theme_colors,
@@ -635,9 +681,8 @@ fn finalize_projected_sheet(
         &mut reference_session,
     );
     ws.sparkline_groups = sparkline_groups;
-    let (df_family, df_size) = parse_default_font(archive);
-    ws.default_font_family = df_family;
-    ws.default_font_size = df_size;
+    ws.default_font_family = shared.default_font.0.clone();
+    ws.default_font_size = shared.default_font.1;
     // Denormalize the workbook-wide date system onto this sheet so the cell
     // formatter can resolve serial dates without a workbook back-reference
     // (ECMA-376 §18.2.28 / §18.17.4.1).
@@ -649,9 +694,10 @@ fn finalize_projected_sheet(
 fn parse_xlsx_inner_with(
     archive: &mut XlsxZip,
     shared: &WorkbookShared,
+    styles: Result<Styles, String>,
 ) -> Result<ParsedWorkbook, String> {
     let theme_colors = shared.theme_colors.as_ref();
-    let styles = parse_styles(archive, theme_colors)?;
+    let styles = styles?;
 
     // Surface each sheet's tab color (`<sheetPr><tabColor>`) on the workbook
     // sheet list so the viewer can paint every tab up front. `<sheetPr>` is the
@@ -885,8 +931,8 @@ fn parse_xlsx_inner_with_limits(
         Err(e) => return Ok(degraded_container_workbook(e)),
     };
     archive.run_operation("parse", |archive| {
-        let shared = WorkbookShared::load(archive)?;
-        parse_xlsx_inner_with(archive, &shared)
+        let (shared, styles) = WorkbookShared::load_with_styles(archive)?;
+        parse_xlsx_inner_with(archive, &shared, styles)
     })
 }
 
@@ -3374,10 +3420,23 @@ impl XlsxArchive {
             .begin_operation("parse")
             .map_err(|error| JsValue::from_str(&error))?;
         let result = (|| -> Result<Vec<u8>, String> {
-            self.ensure_shared()?;
+            let styles = if let Some(shared) = &self.shared {
+                // A sheet cursor may have initialized only the lightweight style
+                // projection. Parse the full style model only when the caller
+                // later asks for the workbook index, and move it directly into
+                // the serialized result.
+                let theme_colors = Rc::clone(&shared.theme_colors);
+                let zip = self.archive.as_mut().expect("container open checked above");
+                parse_styles(zip, theme_colors.as_ref()).map(|parsed| parsed.styles)
+            } else {
+                let zip = self.archive.as_mut().expect("container open checked above");
+                let (shared, styles) = WorkbookShared::load_with_styles(zip)?;
+                self.shared = Some(shared);
+                styles
+            };
             let shared = self.shared.as_ref().expect("shared loaded above");
             let zip = self.archive.as_mut().expect("container open checked above");
-            let workbook = parse_xlsx_inner_with(zip, shared)?;
+            let workbook = parse_xlsx_inner_with(zip, shared, styles)?;
             serde_json::to_vec(&workbook).map_err(|error| format!("serialize error: {error}"))
         })();
         let zip = self.archive.as_mut().expect("container open checked above");
@@ -3643,10 +3702,10 @@ impl XlsxArchive {
                         shared.theme_colors.as_ref(),
                         &active.name,
                     )?;
-                    let current_index = active
-                        .reference_index
-                        .take()
-                        .map(WorksheetCellLookupBuilder::finish);
+                    let current_index = active.reference_index.take().and_then(|mut builder| {
+                        builder.mark_hidden_columns(&parsed.0.col_hidden)?;
+                        Some(builder.finish())
+                    });
                     let zip = self.archive.as_mut().expect("container open checked above");
                     let worksheet = finalize_projected_sheet(
                         zip,
@@ -5986,9 +6045,11 @@ mod rb7_partial_degradation_tests {
         let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
         let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="1" name="Chart"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
         let drawing_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="165" formatCode="0.0000"/></numFmts><fonts count="1"><font><sz val="13"/><name val="Cursor Test Font"/></font></fonts><fills count="0"/><borders count="0"/><cellStyleXfs count="1"><xf fontId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="165" fontId="0"/></cellXfs></styleSheet>"#;
         let mut entries = vec![
             ("xl/workbook.xml", workbook.as_str()),
             ("xl/_rels/workbook.xml.rels", workbook_rels.as_str()),
+            ("xl/styles.xml", styles),
             ("xl/worksheets/sheet1.xml", sheet1),
             ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels),
             ("xl/drawings/drawing1.xml", drawing),
@@ -6044,6 +6105,41 @@ mod rb7_partial_degradation_tests {
         assert!(!archive.archive.as_ref().unwrap().operation.is_active());
         assert!(archive.sheet_cursor_resource_usage().is_ok());
         archive.close_sheet_cursor();
+    }
+
+    #[test]
+    fn full_parse_after_sheet_cursor_matches_fresh_styles_and_chart_formats() {
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Series</t></is></c></row><row r="2"><c r="A2" s="1"><v>1.25</v></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" s="1"><v>2.5</v></c><c r="B3"><v>20</v></c></row></sheetData><drawing r:id="rDrawing"/></worksheet>"#;
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Sheet1!A1</c:f></c:strRef></c:tx><c:cat><c:numRef><c:f>Sheet1!A2:A3</c:f></c:numRef></c:cat><c:val><c:numRef><c:f>Sheet1!B2:B3</c:f></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let data = build_chart_workbook(sheet, chart, None);
+
+        let mut fresh = XlsxArchive::new(data.clone(), None, None, None).unwrap();
+        let fresh_workbook = fresh.parse().unwrap();
+
+        let mut after_cursor = XlsxArchive::new(data, None, None, None).unwrap();
+        after_cursor.open_sheet_cursor(0, "Sheet1").unwrap();
+        let terminal = loop {
+            let payload = after_cursor.pull_sheet_cursor(128).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            if value["kind"] == "finished" {
+                break value;
+            }
+        };
+        assert_eq!(
+            terminal["worksheet"]["defaultFontFamily"],
+            "Cursor Test Font"
+        );
+        assert_eq!(
+            terminal["worksheet"]["charts"][0]["chart"]["series"][0]["catFormatBuiltinId"],
+            165
+        );
+        after_cursor.acknowledge_sheet_cursor_terminal().unwrap();
+
+        let after_cursor_workbook = after_cursor.parse().unwrap();
+        assert_eq!(after_cursor_workbook, fresh_workbook);
+        let workbook: serde_json::Value = serde_json::from_slice(&after_cursor_workbook).unwrap();
+        assert_eq!(workbook["styles"]["fonts"][0]["name"], "Cursor Test Font");
+        assert_eq!(workbook["styles"]["numFmts"][0]["formatCode"], "0.0000");
     }
 
     #[test]

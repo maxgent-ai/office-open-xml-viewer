@@ -372,6 +372,18 @@ describe('planLinearValueAxis (bounded automatic value-axis policy)', () => {
     expect(planLinearValueAxis({ dataMin: -nextUp(boundary), dataMax: -10 }).max).toBe(0);
   });
 
+  it('computes padding from the effective zero-anchored span', () => {
+    expect(planLinearValueAxis({ dataMin: 11_500, dataMax: 24_000 })).toMatchObject({
+      min: 0, max: 30_000, majorUnit: 5_000,
+    });
+    expect(planLinearValueAxis({ dataMin: -24_000, dataMax: -11_500 })).toMatchObject({
+      min: -30_000, max: 0, majorUnit: 5_000,
+    });
+    expect(planLinearValueAxis({ dataMin: 1_150, dataMax: 2_400 })).toMatchObject({
+      min: 0, max: 3_000, majorUnit: 500,
+    });
+  });
+
   it('mirrors negative-only data with the same major and minor units', () => {
     const positive = planLinearValueAxis({ dataMin: 10, dataMax: 12.000_001, needMinor: true });
     const negative = planLinearValueAxis({ dataMin: -12.000_001, dataMax: -10, needMinor: true });

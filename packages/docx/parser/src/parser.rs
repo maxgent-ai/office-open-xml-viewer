@@ -11430,8 +11430,8 @@ fn docx_line_wire_properties(line: &ooxml_common::line::LineProperties) -> DocxL
             .map(|stop| ShapeLineDashSegment {
                 // CT_DashStop values are percentages of the line width
                 // (§20.1.8.17-.18); core uses the same relative unit.
-                dash: stop.dash as f64 / 100_000.0,
-                space: stop.space as f64 / 100_000.0,
+                dash: stop.dash / 100_000.0,
+                space: stop.space / 100_000.0,
             })
             .collect(),
         _ => Vec::new(),
@@ -11780,7 +11780,12 @@ fn parse_docx_chart_with_style_parts(
             color_style_xml,
         )
     } else {
-        ooxml_common::chart::parse_chart_part(root, &resolver)
+        ooxml_common::chart::parse_chart_part_with_style_parts(
+            root,
+            &resolver,
+            style_xml,
+            color_style_xml,
+        )
     }
 }
 
@@ -19469,6 +19474,63 @@ mod anchor_image_relative_from_tests {
             Some(ooxml_common::chart::ChartStyleFill::Pattern { fg, bg, preset })
                 if fg == "336699" && bg == "FFFFFF" && preset == "diagCross"
         ));
+    }
+
+    #[test]
+    fn docx_package_loads_classic_chart_style_roles() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="4000000" cy="3000000"/><wp:docPr id="1" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
+        let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/></Relationships>"#;
+        let chart_xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:strLit><c:ptCount val="2"/><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser><c:dropLines/></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let chart_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#;
+        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dropLine><cs:spPr><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></cs:spPr></cs:dropLine></cs:chartStyle>"#;
+        let colors_xml = r#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#;
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            for (path, xml) in [
+                ("word/document.xml", document_xml),
+                ("word/_rels/document.xml.rels", document_rels),
+                ("word/charts/chart1.xml", chart_xml),
+                ("word/charts/_rels/chart1.xml.rels", chart_rels),
+                ("word/charts/style1.xml", style_xml),
+                ("word/charts/colors1.xml", colors_xml),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(xml.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let document = parse_from_bytes(&bytes).expect("DOCX package parses");
+        let chart = document
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.runs.iter().find_map(|run| {
+                    if let DocRun::Chart(chart) = run {
+                        Some(&chart.chart)
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .expect("classic chart run");
+        assert_eq!(
+            chart
+                .chart_style_roles
+                .as_ref()
+                .and_then(|roles| roles.get("dropLine"))
+                .and_then(|style| style.line_colors.as_ref())
+                .and_then(|colors| colors.first())
+                .and_then(Option::as_deref),
+            Some("336699"),
+        );
     }
 
     /// CH14 — the inline-drawing chart gate accepts the chartex

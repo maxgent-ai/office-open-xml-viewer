@@ -5,6 +5,21 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.80.2 — 2026-08-18
+
+Compatible patch release improving Office document fidelity and navigation
+without changing the 0.80 public integration contract.
+
+- **Excel chart fidelity:** improve authored date axes, grouped and stacked
+  bar scales, 3-D Surface geometry and materials, classic tick placement,
+  theme-derived axis widths, and multi-level category separators.
+- **Excel navigation:** follow internal hyperlinks to direct cell references,
+  ranges, and in-scope defined names, switching sheets when necessary.
+- **Word pagination resilience:** preserve completed pages when an unsupported
+  later section flow cannot be placed, while retaining a source-bound
+  diagnostic for the unsupported content.
+- **compatibility:** no application or API migration is required from 0.80.1.
+
 ## 0.80.1 — 2026-08-17
 
 Patch. Corrects numeric axis-label spacing across authored chart families

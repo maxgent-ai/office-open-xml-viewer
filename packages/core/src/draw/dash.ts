@@ -1,3 +1,5 @@
+import type { DrawingMLCustomDashSegment } from '../types/common.js';
+
 /**
  * Shared border / line dash-pattern core.
  *
@@ -161,6 +163,38 @@ const PPTX_PRESET_DASH_RELATIVE: Record<string, RelativeDashPattern> = {
 export function pptxPresetDashArray(style: string, lineW: number): number[] {
   const relative = PPTX_PRESET_DASH_RELATIVE[style];
   return relative ? dashArray(relative, lineW) : [];
+}
+
+/** Synchronous Canvas availability ceiling, kept in parity with the shared
+ * OOXML parser's `MAX_LINE_DASH_STOPS`. */
+const MAX_DRAWINGML_CUSTOM_DASH_STOPS = 512;
+
+/**
+ * Resolve the mutually-exclusive DrawingML dash choice. ECMA-376
+ * §20.1.8.22 defines each custom dash/space length relative to the rendered
+ * line width, so the same function serves shapes and all chart outlines.
+ * An authored empty custom list remains a continuous stroke and still wins
+ * over an inherited preset.
+ */
+export function drawingmlLineDashArray(
+  customDash: ReadonlyArray<DrawingMLCustomDashSegment> | null | undefined,
+  preset: string | null | undefined,
+  lineW: number,
+): number[] {
+  if (customDash != null) {
+    const pattern: number[] = [];
+    for (let index = 0;
+      index < Math.min(customDash.length, MAX_DRAWINGML_CUSTOM_DASH_STOPS);
+      index += 1) {
+      const segment = customDash[index];
+      if (!Number.isFinite(segment.dash) || !Number.isFinite(segment.space)
+        || segment.dash < 0 || segment.space < 0
+        || segment.dash === 0 && segment.space === 0) continue;
+      pattern.push(segment.dash * lineW, segment.space * lineW);
+    }
+    return pattern;
+  }
+  return pptxPresetDashArray(preset ?? 'solid', lineW);
 }
 
 /**

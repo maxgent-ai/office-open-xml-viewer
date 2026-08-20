@@ -182,6 +182,40 @@ export function insertSlideElement(
   return { ...presentation, slides };
 }
 
+export function insertBlankSlide(
+  presentation: Presentation,
+  slideId: string,
+  slideIndex: number,
+): Presentation {
+  const slides = presentation.slides.slice();
+  slides.splice(slideIndex, 0, {
+    index: 0,
+    slideNumber: 1,
+    partName: slideId,
+    background: null,
+    elements: [],
+    elementSources: [],
+  });
+  return { ...presentation, slides: reindexSlides(slides) };
+}
+
+export function removePresentationSlide(
+  presentation: Presentation,
+  slideIndex: number,
+): Presentation {
+  const slides = presentation.slides.slice();
+  slides.splice(slideIndex, 1);
+  return { ...presentation, slides: reindexSlides(slides) };
+}
+
+function reindexSlides(slides: readonly Slide[]): Slide[] {
+  return slides.map((slide, index) => (
+    slide.index === index && slide.slideNumber === index + 1
+      ? slide
+      : { ...slide, index, slideNumber: index + 1 }
+  ));
+}
+
 function getElementSource(
   slide: Slide,
   elementIndex: number,

@@ -1,6 +1,8 @@
 import type { Mutation } from '../domain/mutation';
 
 export type MutationExecutionErrorCode =
+  | 'slide.alreadyExists'
+  | 'slide.invalidIndex'
   | 'slide.notFound'
   | 'element.alreadyExists'
   | 'element.invalidIndex'

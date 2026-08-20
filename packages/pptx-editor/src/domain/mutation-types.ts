@@ -1,4 +1,6 @@
 export const MUTATION_TYPES = Object.freeze({
+  INSERT_SLIDE: 'slide.insert',
+  REMOVE_SLIDE: 'slide.remove',
   ADD_ELEMENT: 'element.add',
   UPDATE_SHAPE: 'element.updateShape',
   UPDATE_TEXT: 'element.updateText',

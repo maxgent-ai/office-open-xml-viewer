@@ -1,6 +1,6 @@
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef, Mutation } from '../domain/mutation';
+import type { ElementMutation, ElementRef } from '../domain/mutation';
 import { MutationExecutionError } from './errors';
 import type { MutationExecutionResult } from './types';
 
@@ -12,7 +12,7 @@ export function createUnchangedResult(presentation: Presentation): MutationExecu
   };
 }
 
-export function textNotEditable(mutation: Mutation): MutationExecutionError {
+export function textNotEditable(mutation: ElementMutation): MutationExecutionError {
   return new MutationExecutionError(
     'element.textNotEditable',
     mutation,

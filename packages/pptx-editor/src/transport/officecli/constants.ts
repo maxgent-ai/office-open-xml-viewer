@@ -8,5 +8,6 @@ export const OFFICECLI_COMMAND_TYPES = Object.freeze({
 } as const);
 
 export const OFFICECLI_ELEMENT_TYPES = Object.freeze({
+  SLIDE: 'slide',
   SHAPE: 'shape',
 } as const);

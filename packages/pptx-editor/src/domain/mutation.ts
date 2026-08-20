@@ -6,10 +6,19 @@ import type { OfficeCliCommand } from '../transport/officecli/types';
 import type { ElementOrigin } from './element-origin';
 import type { MutationType } from './mutation-types';
 
-export interface ElementRef {
-  readonly origin: ElementOrigin;
+export interface SlideRef {
   readonly slideId: string;
+}
+
+export interface ElementRef extends SlideRef {
+  readonly origin: ElementOrigin;
   readonly elementId: string;
+}
+
+export type MutationTarget = SlideRef | ElementRef;
+
+export function isElementRef(target: MutationTarget): target is ElementRef {
+  return 'elementId' in target;
 }
 
 export interface MutationCommandContext {
@@ -23,7 +32,7 @@ export interface MutationCommandContext {
  */
 export abstract class Mutation {
   abstract readonly type: MutationType;
-  abstract readonly target: ElementRef;
+  abstract readonly target: MutationTarget;
 
   abstract apply(presentation: Presentation): MutationExecutionResult;
 
@@ -37,3 +46,5 @@ export abstract class Mutation {
     context: MutationCommandContext,
   ): OfficeCliCommand | NonEmptyReadonlyArray<OfficeCliCommand>;
 }
+
+export type ElementMutation = Mutation & { readonly target: ElementRef };

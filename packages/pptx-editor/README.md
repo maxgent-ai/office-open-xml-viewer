@@ -226,7 +226,6 @@ import type { Command } from '@maxgent/ooxml-pptx-editor';
 const command: Command = {
   id: 'cmd-1',                 // unique per submission
   mutations: [/* at least one */],
-  label: 'Update title',       // optional UI label
   mergeKey: 'title-typing',    // optional history coalescing key
 };
 ```

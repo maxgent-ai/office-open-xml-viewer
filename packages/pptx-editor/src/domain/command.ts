@@ -9,7 +9,6 @@ export type NonEmptyReadonlyArray<T> = readonly [T, ...T[]];
 export interface Command<TMutation extends Mutation = Mutation> {
   readonly id: string;
   readonly mutations: NonEmptyReadonlyArray<TMutation>;
-  readonly label?: string;
   /** Consecutive commands with the same key may be coalesced by history. */
   readonly mergeKey?: string;
 }

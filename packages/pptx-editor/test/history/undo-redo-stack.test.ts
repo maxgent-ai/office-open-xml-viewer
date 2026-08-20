@@ -9,8 +9,8 @@ import { UndoRedoStackError } from '../../src/history/errors';
 import type { UndoRedoCommandIdFactory } from '../../src/history/types';
 import { UndoRedoStack } from '../../src/history/undo-redo-stack';
 import { RemoveElementMutation } from '../../src/mutations/remove-element';
+import { UpdateShapeMutation } from '../../src/mutations/update-shape';
 import { UpdateTextMutation } from '../../src/mutations/update-text';
-import { UpdateTransformMutation } from '../../src/mutations/update-transform';
 import { PptxEditorStore } from '../../src/store/editor-store';
 import {
   COMMAND_SUBMISSION_STATUSES,
@@ -33,7 +33,7 @@ describe('UndoRedoStack', () => {
     const edit = history.submit({
       id: 'edit-1',
       mutations: [
-        new UpdateTransformMutation({
+        new UpdateShapeMutation({
           target: ref,
           value: {
             x: 100,

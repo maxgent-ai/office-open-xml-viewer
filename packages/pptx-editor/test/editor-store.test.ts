@@ -4,9 +4,10 @@ import type { ShapeElement } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
 import type { Command } from '../src/domain/command';
-import type { ElementRef, ElementTransform } from '../src/domain/mutation';
+import type { ElementRef } from '../src/domain/mutation';
+import { UpdateShapeMutation } from '../src/mutations/update-shape';
+import type { ShapePatch } from '../src/mutations/update-shape';
 import { UpdateTextMutation } from '../src/mutations/update-text';
-import { UpdateTransformMutation } from '../src/mutations/update-transform';
 import { EditorStoreError } from '../src/store/errors';
 import { PptxEditorStore } from '../src/store/editor-store';
 import { EDITOR_SYNC_STATUSES } from '../src/store/sync-state';
@@ -163,11 +164,11 @@ function updateTextCommand(id: string, target: ElementRef, value: string): Comma
 function updateTransformCommand(
   id: string,
   target: ElementRef,
-  overrides: Partial<ElementTransform>,
+  overrides: ShapePatch,
 ): Command {
   return {
     id,
-    mutations: [new UpdateTransformMutation({
+    mutations: [new UpdateShapeMutation({
       target,
       value: {
         x: 0,

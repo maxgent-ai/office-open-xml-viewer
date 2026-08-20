@@ -237,7 +237,6 @@ Built-in mutations:
 | --- | --- | --- |
 | `UpdateTextMutation` | Replace shape plain text, whole-shape styles, or multi-span style edits | `set` path + `{ text, bold, … }` and/or `range=` |
 | `UpdateShapeMutation` | Patch shape position, size, rotation, flips, fill, or outline | `set` path + changed shape props |
-| `UpdateTransformMutation` | Position / size / rotation / flips (EMU + degrees) | `set` path + transform props |
 | `AddElementMutation` | Insert a slide element at indexes | `add` under slide path |
 | `RemoveElementMutation` | Remove a slide element | `remove` path |
 

@@ -4,7 +4,7 @@ import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import { RemoveElementMutation } from '../../src/mutations/remove-element';
-import { UpdateTransformMutation } from '../../src/mutations/update-transform';
+import { UpdateShapeMutation } from '../../src/mutations/update-shape';
 import { EDITOR_SELECTION_CHANGE_REASONS } from '../../src/interaction/constants';
 import { PptxEditorSelectionControllerError } from '../../src/interaction/errors';
 import { PptxEditorSelectionController } from '../../src/interaction/pptx-editor-selection-controller';
@@ -39,7 +39,7 @@ describe('PptxEditorSelectionController', () => {
     const ref = createElementRef(presentation.slides[0], target, 0);
     const submission = session.submit({
       id: 'move-1',
-      mutations: [new UpdateTransformMutation({
+      mutations: [new UpdateShapeMutation({
         target: ref,
         value: {
           x: 2,

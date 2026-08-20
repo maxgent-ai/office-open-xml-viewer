@@ -12,21 +12,6 @@ export interface ElementRef {
   readonly elementId: string;
 }
 
-export interface ElementTransform {
-  /** Horizontal position in English Metric Units (EMU). */
-  readonly x: number;
-  /** Vertical position in English Metric Units (EMU). */
-  readonly y: number;
-  /** Width in English Metric Units (EMU). */
-  readonly width: number;
-  /** Height in English Metric Units (EMU). */
-  readonly height: number;
-  /** Clockwise rotation in degrees. */
-  readonly rotation: number;
-  readonly flipH: boolean;
-  readonly flipV: boolean;
-}
-
 export interface MutationCommandContext {
   readonly commandId: string;
   readonly mutationIndex: number;
@@ -34,7 +19,7 @@ export interface MutationCommandContext {
 
 /**
  * An immutable editor operation. Public fields are its JSON representation;
- * prototype methods provide local behavior after construction or hydration.
+ * prototype methods provide local behavior after construction.
  */
 export abstract class Mutation {
   abstract readonly type: MutationType;

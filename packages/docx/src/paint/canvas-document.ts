@@ -3,7 +3,14 @@ import {
   clampCanvasSize,
   defaultDpr,
   isHTMLCanvas,
+  isOoxmlDecodedImageLimitError,
+  metafileRasterSize,
   PT_TO_PX,
+  chartImageFillKey,
+  collectChartMarkerImageFills,
+  collectChartMarkerImageFillsForCharts,
+  getCachedSvgImageByPath,
+  preferVectorBlip,
 } from '@silurus/ooxml-core';
 import type { Duotone } from '@silurus/ooxml-core';
 import type { ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
@@ -12,7 +19,7 @@ import type {
   LayoutPage,
   PaintResourceRegistry,
 } from '../layout/types.js';
-import { preloadPaintImages, imageKey, type DocxFetchImage } from './browser-images.js';
+import { decodeRaster, preloadPaintImages, imageKey, type DocxFetchImage } from './browser-images.js';
 import {
   createCanvasPaintResourcePainter,
   paintLayoutPageContent,
@@ -178,6 +185,50 @@ export async function renderSelectedDocumentPage<TTextRun>(
     }
     if (superseded()) return;
 
+    const chartImages = new Map<string, CanvasImageSource | null>();
+    if (options.fetchImage) {
+      const fetchImage = options.fetchImage;
+      const uniqueFills = new Map<string, ReturnType<typeof collectChartMarkerImageFills>[number]>();
+      for (const fill of collectChartMarkerImageFillsForCharts(
+        options.registry.descriptors
+          .filter(descriptor => descriptor.kind === 'chart')
+          .map(descriptor => descriptor.model as import('@silurus/ooxml-core').ChartModel),
+      )) {
+        const key = chartImageFillKey(fill);
+        if (!uniqueFills.has(key)) uniqueFills.set(key, fill);
+      }
+      await Promise.all([...uniqueFills].map(async ([key, fill]) => {
+        const raster = metafileRasterSize(fill.mimeType, fill.srcRect, 72, 72);
+        if (!raster) {
+          chartImages.set(key, null);
+          return;
+        }
+        try {
+          const decodeFallback = () => fill.mimeType === 'image/svg+xml'
+            ? fill.duotone ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage)
+            : decodeRaster(
+                fill.imagePath, fill.mimeType, undefined, fetchImage as DocxFetchImage,
+                raster.widthPt, raster.heightPt, fill.duotone, true,
+              );
+          let image: CanvasImageSource | null;
+          if (!fill.duotone && preferVectorBlip(fill)) {
+            try {
+              image = await getCachedSvgImageByPath(fill.svgImagePath, fetchImage);
+            } catch {
+              image = await decodeFallback();
+            }
+          } else {
+            image = await decodeFallback();
+          }
+          chartImages.set(key, image);
+        } catch (error) {
+          if (isOoxmlDecodedImageLimitError(error)) throw error;
+          chartImages.set(key, null);
+        }
+      }));
+    }
+    if (superseded()) return;
+
     const session = createProductionPaintResourceSession(options.registry, (descriptor) => {
       if (descriptor.kind === 'math') {
         return options.privateResources?.keys.includes(descriptor.resourceKey)
@@ -199,8 +250,12 @@ export async function renderSelectedDocumentPage<TTextRun>(
     });
     const resources = createCanvasPaintResourcePainter(
       session,
-      options.threeD || options.regionMap
-        ? createCanonicalCanvasPaintResourceHandlers(options.threeD, options.regionMap)
+      options.threeD || options.regionMap || chartImages.size > 0
+        ? createCanonicalCanvasPaintResourceHandlers(
+            options.threeD,
+            options.regionMap,
+            fill => chartImages.get(chartImageFillKey(fill)),
+          )
         : canonicalCanvasPaintResourceHandlers,
     );
     context.save();

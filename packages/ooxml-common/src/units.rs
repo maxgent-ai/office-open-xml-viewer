@@ -9,6 +9,100 @@
 /// px/inch = 9525 EMU/px.
 pub const EMU_PER_PX_96DPI: i64 = 9525;
 
+/// Parse DrawingML `ST_Percentage` into a fraction. Transitional OOXML uses
+/// an `xsd:int` in thousandths of a percent (`100000` = 100%), while Strict
+/// OOXML uses a signed decimal followed by `%` (`100%` = 100%).
+pub fn drawingml_percentage_to_thousandths(value: &str) -> Option<f64> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let digits = percent.strip_prefix('-').unwrap_or(percent);
+        if digits.is_empty() || percent.starts_with('+') {
+            return None;
+        }
+        let mut parts = digits.split('.');
+        let whole = parts.next().unwrap_or_default();
+        let fraction = parts.next();
+        if whole.is_empty()
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || fraction.is_some_and(|part| {
+                part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            || parts.next().is_some()
+        {
+            return None;
+        }
+        return finite_number(percent).map(|number| number * 1_000.0);
+    }
+    value.parse::<i32>().ok().map(f64::from)
+}
+
+pub fn drawingml_percentage_to_fraction(value: &str) -> Option<f64> {
+    drawingml_percentage_to_thousandths(value).map(|value| value / 100_000.0)
+}
+
+/// Parse DrawingML `ST_Coordinate32` into EMU.
+///
+/// ECMA-376 defines this as a union of `xsd:int` (already expressed in EMU)
+/// and `ST_UniversalMeasure`. The latter accepts a signed decimal followed by
+/// `mm`, `cm`, `in`, `pt`, `pc`, or `pi`. Universal measures can resolve to a
+/// fractional EMU; the integer wire model stores the nearest representable EMU.
+pub fn coordinate32_to_emu(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if !value.is_empty()
+        && value
+            .strip_prefix('+')
+            .or_else(|| value.strip_prefix('-'))
+            .unwrap_or(value)
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return value.parse::<i32>().ok().map(i64::from);
+    }
+
+    universal_measure_to_emu(value)
+}
+
+/// Parse DrawingML `ST_Coordinate` into EMU. Its unitless branch is an
+/// `xsd:long`, unlike `ST_Coordinate32`; the UniversalMeasure branch is shared.
+pub fn coordinate_to_emu(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if !value.is_empty()
+        && value
+            .strip_prefix('+')
+            .or_else(|| value.strip_prefix('-'))
+            .unwrap_or(value)
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return value.parse::<i64>().ok();
+    }
+    universal_measure_to_emu(value)
+}
+
+fn universal_measure_to_emu(value: &str) -> Option<i64> {
+    let (number, scale) = if let Some(number) = value.strip_suffix("pt") {
+        (number, 12_700.0)
+    } else if let Some(number) = value.strip_suffix("in") {
+        (number, 914_400.0)
+    } else if let Some(number) = value
+        .strip_suffix("pc")
+        .or_else(|| value.strip_suffix("pi"))
+    {
+        (number, 152_400.0)
+    } else if let Some(number) = value.strip_suffix("mm") {
+        (number, 36_000.0)
+    } else {
+        (value.strip_suffix("cm")?, 360_000.0)
+    };
+    if !is_universal_measure_number(number) {
+        return None;
+    }
+    let emu = finite_number(number)? * scale;
+    if emu < i64::MIN as f64 || emu > i64::MAX as f64 {
+        return None;
+    }
+    Some(emu.round() as i64)
+}
+
 /// Parse DrawingML `ST_TextPoint` (ECMA-376 §20.1.10.74) into points.
 ///
 /// A unitless value is an XSD integer in hundredths of a point. The union also
@@ -68,7 +162,63 @@ fn finite_number(value: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::text_point_to_pt;
+    use super::{
+        coordinate32_to_emu, coordinate_to_emu, drawingml_percentage_to_fraction, text_point_to_pt,
+    };
+
+    #[test]
+    fn drawingml_percentage_parses_strict_and_transitional_lexemes() {
+        for (value, expected) in [
+            ("25000", 0.25),
+            ("25%", 0.25),
+            ("-50000", -0.5),
+            ("-50%", -0.5),
+            ("125%", 1.25),
+        ] {
+            assert_eq!(drawingml_percentage_to_fraction(value), Some(expected));
+        }
+        for value in ["", "+25%", "25.%", ".25%", "1e2%", "1.5"] {
+            assert_eq!(
+                drawingml_percentage_to_fraction(value),
+                None,
+                "value={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn coordinate32_parses_integer_emu_and_universal_measures() {
+        for (value, expected) in [
+            ("12700", 12_700),
+            ("-12700", -12_700),
+            ("+12700", 12_700),
+            ("1pt", 12_700),
+            ("1in", 914_400),
+            ("1pc", 152_400),
+            ("1pi", 152_400),
+            ("25.4mm", 914_400),
+            ("2.54cm", 914_400),
+            ("-0.5pt", -6_350),
+        ] {
+            assert_eq!(coordinate32_to_emu(value), Some(expected), "value={value}");
+        }
+    }
+
+    #[test]
+    fn coordinate32_rejects_non_schema_lexemes_and_unitless_non_integers() {
+        for value in ["", "1.5", "+1pt", "1px", "pt", "1e2", "NaN", "inf"] {
+            assert_eq!(coordinate32_to_emu(value), None, "value={value}");
+        }
+    }
+
+    #[test]
+    fn coordinate_parses_long_emu_and_universal_measures() {
+        assert_eq!(coordinate_to_emu("9223372036854775807"), Some(i64::MAX));
+        assert_eq!(coordinate_to_emu("-9223372036854775808"), Some(i64::MIN));
+        assert_eq!(coordinate_to_emu("1pt"), Some(12_700));
+        assert_eq!(coordinate_to_emu("-0.5pt"), Some(-6_350));
+        assert_eq!(coordinate_to_emu("9223372036854775808"), None);
+    }
 
     #[test]
     fn text_point_parses_hundredths_and_universal_measures() {

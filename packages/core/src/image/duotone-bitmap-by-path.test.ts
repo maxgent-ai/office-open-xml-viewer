@@ -131,6 +131,28 @@ describe('getCachedDuotoneBitmapByPath', () => {
     );
   });
 
+  it('keeps strict chart fail-closed results separate from compatibility pass-throughs', async () => {
+    const bitmap = { width: 2, height: 2, close() {} } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1])], { type: mime }));
+    const duotone = { clr1: '000000', clr2: 'DAB6BA' };
+    const path = 'ppt/media/duo-strict.png';
+
+    // With no OffscreenCanvas the established shape path keeps its source,
+    // while chart marker paint must not silently drop the authored effect.
+    await expect(getCachedDuotoneBitmapByPath(
+      path, 'image/png', duotone, fetchImage, {},
+    )).resolves.toBe(bitmap);
+    await expect(getCachedDuotoneBitmapByPath(
+      path, 'image/png', duotone, fetchImage,
+      { failClosedOnDuotoneFailure: true },
+    )).resolves.toBeNull();
+
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
   // ── Second-layer × base-eviction interaction ────────────────────────────────
   // A PASS-THROUGH entry (the pixel pipeline was unavailable, so the recolour
   // resolved to the base bitmap itself) must not outlive the base: the base LRU

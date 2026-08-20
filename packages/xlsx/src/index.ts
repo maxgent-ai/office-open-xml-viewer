@@ -97,6 +97,7 @@ export type {
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
   SecondaryValueAxis,
+  SrcRect,
   NoFill,
   SpaceLine,
   TileInfo,

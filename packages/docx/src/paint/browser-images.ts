@@ -77,6 +77,7 @@ export async function decodeRaster(
   widthPt = 0,
   heightPt = 0,
   duotone?: Duotone,
+  failClosedOnDuotoneFailure = false,
 ): Promise<ImageBitmap | null> {
   const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, {
     widthPt,
@@ -85,7 +86,7 @@ export async function decodeRaster(
   });
   if (!base) return null;
   if (!colorReplaceFrom && !duotone) return base;
-  const key = imageKey(imagePath, colorReplaceFrom, duotone);
+  const key = `${imageKey(imagePath, colorReplaceFrom, duotone)}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
   return getCachedDerivedBitmap(
     DOCX_COLOR_EFFECT_CACHE_NAMESPACE,
     key,
@@ -98,7 +99,12 @@ export async function decodeRaster(
           const { w, h } = imageNaturalSize(bitmap);
           if (w > 0 && h > 0) {
             const source = bitmap;
-            bitmap = await applyDuotone(bitmap, duotone, { width: w, height: h }) as ImageBitmap;
+            const recoloured = await applyDuotone(bitmap, duotone, { width: w, height: h });
+            if (failClosedOnDuotoneFailure && recoloured === source) {
+              if (source !== base) releaseOwnedBitmap(source);
+              return { bitmap: null, owned: false };
+            }
+            bitmap = recoloured as ImageBitmap;
             // A clrChange surface is only an intermediate when duotone creates a
             // second surface. It is never cached or drawn, so release it now.
             if (source !== base && bitmap !== source) releaseOwnedBitmap(source);
@@ -132,6 +138,7 @@ function imageDecodeRequests(
       image.intrinsicSize.widthPt,
       image.intrinsicSize.heightPt,
     );
+    if (!raster) continue;
     const request: ImageDecodeRequest = {
       imagePath: image.partPath,
       mimeType: image.mimeType,

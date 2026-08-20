@@ -14,6 +14,8 @@
 use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 
+use crate::units::coordinate32_to_emu;
+
 /// Paragraph line spacing (`<a:lnSpc>`, ECMA-376 §21.1.2.2.5): a percentage of
 /// the natural single line, or an absolute per-line height in points. The serde
 /// shape (`{"type":"pct","val":..}` / `{"type":"pts","val":..}`) mirrors core's
@@ -167,11 +169,11 @@ impl BodyPrDefaults {
     }
 }
 
-/// Unqualified (no-namespace) integer attribute on `<a:bodyPr>`.
-fn attr_i64(node: Node<'_, '_>, local: &str) -> Option<i64> {
+/// Unqualified (no-namespace) `ST_Coordinate32` attribute on `<a:bodyPr>`.
+fn attr_coordinate32(node: Node<'_, '_>, local: &str) -> Option<i64> {
     node.attributes()
         .find(|a| a.name() == local && a.namespace().is_none())
-        .and_then(|a| a.value().parse::<i64>().ok())
+        .and_then(|a| coordinate32_to_emu(a.value()))
 }
 
 /// Unqualified (no-namespace) string attribute on `<a:bodyPr>`.
@@ -196,10 +198,10 @@ pub fn parse_body_pr(body_pr: Node<'_, '_>, defaults: &BodyPrDefaults) -> BodyPr
         anchor: attr_str(body_pr, "anchor").unwrap_or_else(|| defaults.anchor.clone()),
         wrap: attr_str(body_pr, "wrap").unwrap_or_else(|| defaults.wrap.clone()),
         vert: attr_str(body_pr, "vert").unwrap_or_else(|| defaults.vert.clone()),
-        l_ins: attr_i64(body_pr, "lIns").unwrap_or(defaults.l_ins),
-        t_ins: attr_i64(body_pr, "tIns").unwrap_or(defaults.t_ins),
-        r_ins: attr_i64(body_pr, "rIns").unwrap_or(defaults.r_ins),
-        b_ins: attr_i64(body_pr, "bIns").unwrap_or(defaults.b_ins),
+        l_ins: attr_coordinate32(body_pr, "lIns").unwrap_or(defaults.l_ins),
+        t_ins: attr_coordinate32(body_pr, "tIns").unwrap_or(defaults.t_ins),
+        r_ins: attr_coordinate32(body_pr, "rIns").unwrap_or(defaults.r_ins),
+        b_ins: attr_coordinate32(body_pr, "bIns").unwrap_or(defaults.b_ins),
         auto_fit,
         font_scale,
         ln_spc_reduction,
@@ -355,7 +357,7 @@ mod tests {
     #[test]
     fn parse_body_pr_reads_attrs_and_autofit_child() {
         let xml = format!(
-            r#"<a:bodyPr xmlns:a="{A_NS}" anchor="ctr" wrap="none" vert="vert270" lIns="0" tIns="12700" rIns="0" bIns="12700"><a:normAutofit fontScale="62500" lnSpcReduction="20000"/></a:bodyPr>"#
+            r#"<a:bodyPr xmlns:a="{A_NS}" anchor="ctr" wrap="none" vert="vert270" lIns="0" tIns="1pt" rIns="0" bIns="-0.5pt"><a:normAutofit fontScale="62500" lnSpcReduction="20000"/></a:bodyPr>"#
         );
         let doc = Document::parse(&xml).unwrap();
         let b = parse_body_pr(doc.root_element(), &BodyPrDefaults::spec());
@@ -365,7 +367,7 @@ mod tests {
         assert_eq!(b.l_ins, 0);
         assert_eq!(b.t_ins, 12_700);
         assert_eq!(b.r_ins, 0);
-        assert_eq!(b.b_ins, 12_700);
+        assert_eq!(b.b_ins, -6_350);
         assert_eq!(b.auto_fit, "norm");
         assert_eq!(b.font_scale, Some(0.625));
         assert_eq!(b.ln_spc_reduction, Some(0.20));

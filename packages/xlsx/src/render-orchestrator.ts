@@ -16,6 +16,9 @@ import {
   type SrcRect,
   type Duotone,
   type OffscreenFactory,
+  chartImageFillKey,
+  collectChartMarkerImageFills,
+  collectChartMarkerImageFillsForCharts,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import {
@@ -70,6 +73,9 @@ interface ImageRef {
    *  bitmap is decoded, then recoloured along the `clr1`→`clr2` ramp; the result
    *  is cached under {@link imageCacheKey}(imagePath, duotone). */
   duotone?: Duotone | null;
+  /** Chart marker effects are authored paint. If the pixel pipeline cannot
+   * apply them, omit the marker instead of substituting the original image. */
+  failClosedOnDuotoneFailure?: boolean;
 }
 
 interface CellAnchorRange {
@@ -194,23 +200,29 @@ export async function decodeImageSource(
   srcRect: SrcRect | null = null,
   duotone: Duotone | null = null,
   offscreenFactory?: OffscreenFactory,
+  failClosedOnDuotoneFailure = false,
 ): Promise<CanvasImageSource | null> {
   const dataIsSvg = mimeType === 'image/svg+xml';
+  // SVG pixels are not exposed to the shared bitmap effect pipeline. Without
+  // a raster twin, drawing the original SVG would silently discard duotone.
+  if (dataIsSvg && duotone) return null;
   // A cropped metafile must rasterize at its FULL picture frame, not the visible
   // sub-rect, so the fractional crop lands correctly; raster blips and uncropped
   // metafiles pass the box through unchanged. The shared base cache is path-keyed
   // ("first size wins"), matching pptx/docx.
   const sized = metafileRasterSize(mimeType, srcRect, widthPt, heightPt);
+  if (!sized) return null;
   const decodeRaster = (): Promise<ImageBitmap | null> =>
     getCachedDuotoneBitmapByPath(imagePath, mimeType, duotone, fetchImage, {
       widthPt: sized.widthPt,
       heightPt: sized.heightPt,
       offscreenFactory,
+      failClosedOnDuotoneFailure,
     });
   // Shared vector-vs-raster gate (see core preferVectorBlip). When it returns
   // true, `blip.svgImagePath` is narrowed to string.
   const blip = { svgImagePath, srcRect };
-  if (preferVectorBlip(blip)) {
+  if (!duotone && preferVectorBlip(blip)) {
     // No crop: prefer the vector original; fall back to the raster on decode
     // failure (or, when `imagePath` is itself the SVG, the SVG decoder again).
     // A cropped picture skips this branch so the crop math (below, in the
@@ -338,6 +350,21 @@ export async function prefetchImages(
       }
     }
   }
+  const visibleChartModels = (ws.charts ?? [])
+    .filter(chart => anchorMayIntersectViewport(chart, ws, opts?.viewport, geometry, frame))
+    .map(chart => chart.chart);
+  for (const fill of collectChartMarkerImageFillsForCharts(visibleChartModels)) {
+      refs.set(chartImageFillKey(fill), {
+        imagePath: fill.imagePath,
+        mimeType: fill.mimeType,
+        svgImagePath: fill.svgImagePath,
+        widthPt: 72,
+        heightPt: 72,
+        srcRect: fill.srcRect ?? null,
+        duotone: fill.duotone ?? null,
+        failClosedOnDuotoneFailure: true,
+      });
+  }
   if (refs.size === 0) return;
   await Promise.all(
     [...refs.entries()].map(async ([key, ref]) => {
@@ -356,6 +383,7 @@ export async function prefetchImages(
           ref.srcRect,
           ref.duotone,
           opts?.offscreenFactory,
+          ref.failClosedOnDuotoneFailure ?? false,
         );
         // Record the resolved drawable (INCLUDING a null for an unsupported
         // metafile, so the renderer skips a falsy source without a re-fetch).

@@ -3,6 +3,7 @@
 
 import type { MathNode } from './math';
 import type { Duotone } from '../image/duotone';
+import type { SrcRect } from '../image/crop';
 
 export type PathCmd =
   | { cmd: 'moveTo';     x: number; y: number }
@@ -82,20 +83,19 @@ export interface FillRect {
  * Mutually exclusive with {@link ImageFill.fillRect} (the `stretch` mode).
  */
 export interface TileInfo {
-  /** Horizontal offset of the first tile, in EMU (`tx`). Default 0. */
-  tx: number;
-  /** Vertical offset of the first tile, in EMU (`ty`). Default 0. */
-  ty: number;
-  /** Horizontal tile scale as a fraction (`sx` / 100000). Default 1.0. */
-  sx: number;
-  /** Vertical tile scale as a fraction (`sy` / 100000). Default 1.0. */
-  sy: number;
-  /** Mirror mode: `'none' | 'x' | 'y' | 'xy'` (`flip`). Default `'none'`. */
-  flip: string;
+  /** Horizontal offset of the first tile, in EMU (`tx`). */
+  tx?: number;
+  /** Vertical offset of the first tile, in EMU (`ty`). */
+  ty?: number;
+  /** Horizontal tile scale as a fraction (`sx` / 100000). */
+  sx?: number;
+  /** Vertical tile scale as a fraction (`sy` / 100000). */
+  sy?: number;
+  /** Mirror mode: `'none' | 'x' | 'y' | 'xy'` (`flip`, schema default `none`). */
+  flip?: string;
   /**
    * Anchor corner the tile grid registers against:
-   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`). The schema has no default; a host may
-   * apply a compatibility fallback when omitted.
+   * `tl|t|tr|l|ctr|r|bl|b|br` (`algn`).
    */
   algn?: string;
 }
@@ -115,13 +115,23 @@ export interface ImageFill {
    * loader ({@link RenderOptions.fetchImage}) instead of inlining base64.
    */
   imagePath: string;
+  /** Optional SVG original paired with the raster fallback in `imagePath`. */
+  svgImagePath?: string;
   /** MIME type of the blip at {@link ImageFill.imagePath} (e.g. `image/png`). */
   mimeType: string;
+  /** `<a:blipFill@dpi>` used to convert native image pixels to a physical tile size. */
+  dpi?: number;
+  /** `<a:blipFill@rotWithShape>`; absence is preserved because the schema has no default. */
+  rotWithShape?: boolean;
+  /** `<a:srcRect>` source-image crop, as signed fractions of the blip. */
+  srcRect?: SrcRect;
   /**
    * `<a:stretch><a:fillRect>` insets. Absent → fills the whole box (or the
    * fill is tiled — see {@link ImageFill.tile}).
    */
   fillRect?: FillRect;
+  /** Presence of `<a:stretch>`; absence is not an implicit stretch default. */
+  stretch?: boolean;
   /**
    * `<a:tile>` descriptor. Present only when the blipFill is tiled; mutually
    * exclusive with {@link ImageFill.fillRect}.

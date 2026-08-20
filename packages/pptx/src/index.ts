@@ -176,6 +176,7 @@ export type {
   GradientStop,
   ImageFill,
   FillRect,
+  SrcRect,
   TileInfo,
   Stroke,
   // Effect types (reachable via ShapeElement.shadow / .glow / …).

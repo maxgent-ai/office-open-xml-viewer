@@ -95,6 +95,7 @@ export type {
   ChartDisplayUnits,
   ChartDisplayUnitsLabel,
   SecondaryValueAxis,
+  SrcRect,
   TextSelectionContextOptions,
   TileInfo,
   ViewerContextMenuEvent,

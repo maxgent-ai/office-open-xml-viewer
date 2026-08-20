@@ -7,6 +7,7 @@ import type {
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
 import type { Stroke, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
+import { chartImageFillKey } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
@@ -4151,6 +4152,7 @@ function renderAnchoredDrawings(
         ctx, ws, colAxis, rowAxis, cs,
         startRow, startCol, scrollOffsetX, scrollOffsetY,
         scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH, rtl, canvasW,
+        loadedImages,
         [drawing.anchor],
         threeD,
         regionMap,
@@ -5287,6 +5289,7 @@ function renderCharts(
   scrollAreaH: number,
   rtl: boolean,
   canvasW: number,
+  loadedImages?: Map<string, CanvasImageSource | null>,
   anchors: readonly ChartAnchor[] = ws.charts,
   threeD?: ChartThreeDRenderer,
   regionMap?: ChartRegionMapRenderer,
@@ -5330,7 +5333,16 @@ function renderCharts(
     // `anchor.chart` is already the canonical ChartModel emitted by the Rust
     // parser (`ooxml_common::chart::ChartModel`) — the former `adaptChartData`
     // default/mapping logic now lives in the parser's `From<ChartData>`.
-    renderChart(ctx, anchor.chart, { x: cx, y: cy, w: cw, h: ch }, ptToPx, 0, threeD, regionMap);
+    renderChart(
+      ctx,
+      anchor.chart,
+      { x: cx, y: cy, w: cw, h: ch },
+      ptToPx,
+      0,
+      threeD,
+      regionMap,
+      fill => loadedImages?.get(chartImageFillKey(fill)),
+    );
     ctx.restore();
   }
 }

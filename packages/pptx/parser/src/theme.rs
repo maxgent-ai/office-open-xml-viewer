@@ -22,6 +22,7 @@ const RAW_SCHEME_PREFIX: &str = "+rawScheme-";
 pub(crate) struct PptxTheme {
     values: HashMap<String, String>,
     pub(crate) format_scheme: ThemeFormatScheme,
+    pub(crate) chart_images: ooxml_common::chart::ChartImageRelationships,
 }
 
 impl PptxTheme {
@@ -34,6 +35,7 @@ impl PptxTheme {
         Self {
             values: parse_theme_colors(xml),
             format_scheme,
+            chart_images: ooxml_common::chart::ChartImageRelationships::default(),
         }
     }
 }
@@ -66,6 +68,9 @@ pub(crate) trait PptxThemeSource {
     fn format_scheme(&self) -> Option<&ThemeFormatScheme> {
         None
     }
+    fn chart_images(&self) -> Option<&ooxml_common::chart::ChartImageRelationships> {
+        None
+    }
 }
 
 impl PptxThemeSource for HashMap<String, String> {
@@ -81,6 +86,10 @@ impl PptxThemeSource for PptxTheme {
 
     fn format_scheme(&self) -> Option<&ThemeFormatScheme> {
         Some(&self.format_scheme)
+    }
+
+    fn chart_images(&self) -> Option<&ooxml_common::chart::ChartImageRelationships> {
+        Some(&self.chart_images)
     }
 }
 
@@ -105,6 +114,12 @@ pub(crate) fn parse_theme_part(theme_path: &str, zip: &mut PptxZip) -> PptxTheme
     let mut theme = PptxTheme::from_xml(&theme_xml);
     let rels_xml = read_zip_str(zip, &relationship_part_path(theme_path)).unwrap_or_default();
     let theme_dir = theme_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+
+    theme.chart_images.insert_part_relationships(
+        ooxml_common::chart::ChartImageSource::Theme,
+        theme_path,
+        &rels_xml,
+    );
 
     for (relationship_id, target) in parse_rels(&rels_xml) {
         let path = resolve_path(theme_dir, &target);

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildPageLayers } from '../layout/page-graph.js';
 import type { DocumentLayout, LayoutPage, PaintResourceRegistry } from '../layout/types.js';
 import { renderSelectedDocumentPage } from './canvas-document.js';
+import type { ChartModel } from '@silurus/ooxml-core';
 
 class RecordingContext {
   readonly operations: string[] = [];
@@ -85,6 +86,57 @@ const registry: PaintResourceRegistry = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('vertical OpenType paint target projection', () => {
+  it('prefetches one relationship-backed chart picture marker before synchronous paint', async () => {
+    const fetchImage = vi.fn(async () => new Blob(['png'], { type: 'image/png' }));
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 8, height: 8 })));
+    const model = {
+      chartType: 'line', categories: ['A'],
+      series: [{
+        name: 'Picture', values: [1], markerFillPaint: {
+          fillType: 'image', stretch: true, imagePath: 'word/media/chart-marker-prefetch.png',
+          svgImagePath: 'word/media/chart-marker-prefetch.svg',
+          mimeType: 'image/png',
+          srcRect: { l: 0.1, t: 0, r: 0, b: 0 },
+        },
+      }],
+    } as ChartModel;
+    const chartDescriptor = {
+      kind: 'chart' as const,
+      resourceKey: 'chart:body:picture',
+      intrinsicSize: { widthPt: 100, heightPt: 60 },
+      model,
+    };
+    const chartRegistry: PaintResourceRegistry = {
+      keys: [chartDescriptor.resourceKey],
+      descriptors: [chartDescriptor],
+      resolve() { return chartDescriptor as never; },
+    };
+    const directPage: LayoutPage = {
+      ...page,
+      layers: {
+        ...page.layers,
+        capabilities: { requiresElementBackedVerticalGlyphPaint: false },
+      },
+    };
+
+    await renderSelectedDocumentPage(
+      { pages: [directPage], diagnostics: [] },
+      directPage,
+      new WorkerCanvas() as unknown as OffscreenCanvas,
+      { dpr: 1, parseError: false, registry: chartRegistry, textRuns: [], fetchImage },
+    );
+
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+    expect(fetchImage).toHaveBeenCalledWith(
+      'word/media/chart-marker-prefetch.png',
+      'image/png',
+    );
+    expect(fetchImage).not.toHaveBeenCalledWith(
+      'word/media/chart-marker-prefetch.svg',
+      expect.anything(),
+    );
+  });
+
   it('paints into an element-backed surface before copying to an OffscreenCanvas target', async () => {
     const created: ElementCanvas[] = [];
     vi.stubGlobal('HTMLCanvasElement', ElementCanvas);

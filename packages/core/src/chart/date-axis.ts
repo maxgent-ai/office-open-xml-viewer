@@ -1,4 +1,5 @@
 import { excelSerialToUtcDate, utcDateToExcelSerial } from '../excel-date.js';
+import { MAX_AXIS_TICKS } from './axis-scale.js';
 
 export type ChartDateTimeUnit = 'days' | 'months' | 'years';
 
@@ -22,8 +23,6 @@ export interface DateCategoryAxisOptions {
   crossBetween?: boolean;
   reversed?: boolean;
 }
-
-const MAX_DATE_AXIS_TICKS = 10_000;
 
 function timeUnit(value: string | null | undefined): ChartDateTimeUnit | null {
   return value === 'days' || value === 'months' || value === 'years' ? value : null;
@@ -80,12 +79,22 @@ export function planDateCategoryAxis(
     unit: ChartDateTimeUnit,
   ): number | null => {
     if (value == null || !(value > 0) || !Number.isFinite(value)) return null;
-    // ST_AxisUnit permits positive fractional values, but OOXML does not state
-    // how a fraction of a variable-length month/year maps onto the calendar.
-    // Preserve calendar coordinates but leave that valid-yet-unsupported
-    // authored interval unresolved until an Office boundary establishes it.
-    if (unit !== 'days' && !Number.isInteger(value)) return null;
-    return value;
+    if (unit === 'days') return value;
+    // ST_AxisUnit permits positive doubles, but MS-OE376 requires Office date
+    // axes to use values >= 1 and does not define fractional calendar
+    // arithmetic. Excel's retained vector boundary is discontinuous: integral
+    // n.0 advances by n units, while non-integral n.f advances by floor(n)^2
+    // units (observed at 1.01/1.5/1.9, 2.1/2.5, and 3.1 for both months and
+    // years). Apply that compatibility rule only inside its observed
+    // 1 <= value < 4 boundary; larger non-integral values remain unsupported.
+    // Keep this separate from omitted, application-defined automatic interval
+    // selection.
+    if (value < 1) return null;
+    if (Number.isInteger(value)) return value;
+    if (value >= 4) return null;
+    const calendarPart = Math.floor(value);
+    const calendarStep = calendarPart * calendarPart;
+    return Number.isFinite(calendarStep) ? calendarStep : null;
   };
   const majorStep = authoredStep(options.majorUnit, majorUnit);
   const minorStep = authoredStep(options.minorUnit, minorUnit);
@@ -153,7 +162,7 @@ export function planDateCategoryAxis(
     if (step == null) return [];
     let tickDate = floorToUnit(excelSerialToUtcDate(tickMinSerial, date1904), unit);
     let tickSerial = utcDateToExcelSerial(tickDate, date1904);
-    for (let count = 0; tickSerial < tickMinSerial && count < MAX_DATE_AXIS_TICKS; count++) {
+    for (let count = 0; tickSerial < tickMinSerial && count < MAX_AXIS_TICKS; count++) {
       const nextDate = addUnits(tickDate, step, unit);
       const nextSerial = utcDateToExcelSerial(nextDate, date1904);
       if (!(nextSerial > tickSerial)) return [];
@@ -162,7 +171,11 @@ export function planDateCategoryAxis(
     }
     if (tickSerial < tickMinSerial) return [];
     const ticks: DateCategoryAxisPlan['majorTicks'] = [];
-    for (let count = 0; tickSerial <= tickMaxSerial && count < MAX_DATE_AXIS_TICKS; count++) {
+    while (tickSerial <= tickMaxSerial) {
+      // An authored interval remains authored: when it exceeds the shared
+      // tick-layer ceiling, omit the whole layer instead of painting a prefix
+      // or inventing a coarser interval.
+      if (ticks.length === MAX_AXIS_TICKS) return [];
       ticks.push({ serial: tickSerial, fraction: axisFraction(tickSerial) });
       const nextDate = addUnits(tickDate, step, unit);
       const nextSerial = utcDateToExcelSerial(nextDate, date1904);

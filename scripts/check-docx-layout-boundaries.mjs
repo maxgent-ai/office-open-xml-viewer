@@ -92,6 +92,11 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['autoContrastColor', 'value'],
     ['canvasFontString', 'value'],
     ['clampCanvasSize', 'value'],
+    // Chart picture-marker discovery and lookup warm the document-owned image
+    // cache before measurement-free chart paint. They expose no layout API.
+    ['chartImageFillKey', 'value'],
+    ['collectChartMarkerImageFills', 'value'],
+    ['collectChartMarkerImageFillsForCharts', 'value'],
     // DrawingML silhouette clipping is shared paint behavior used by
     // resource-backed shape fills; it does not expose layout acquisition.
     ['clipDrawingMLShape', 'value'],
@@ -108,6 +113,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['getCachedBitmapByPath', 'value'],
     ['getCachedDerivedBitmap', 'value'],
     ['getCachedSvgImageByPath', 'value'],
+    ['isOoxmlDecodedImageLimitError', 'value'],
     ['HyperlinkTarget', 'type'],
     ['imageNaturalSize', 'value'],
     ['isHTMLCanvas', 'value'],
@@ -132,6 +138,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     // layout acquisition or permit a renderer back-edge.
     ['ChartThreeDRenderer', 'type'],
     ['ChartRegionMapRenderer', 'type'],
+    ['ChartImageLookup', 'type'],
     ['Duotone', 'type'],
     ['MathRenderer', 'type'],
   ])],

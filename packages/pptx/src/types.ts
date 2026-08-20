@@ -1,7 +1,7 @@
 // ===== Shared types re-exported from @silurus/ooxml-core =====
 export type {
   PathCmd,
-  Fill, SolidFill, NoFill, GradientFill, GradientStop, ImageFill, FillRect, TileInfo,
+  Fill, SolidFill, NoFill, GradientFill, GradientStop, ImageFill, FillRect, SrcRect, TileInfo,
   Shadow,
   Glow,
   SoftEdge,

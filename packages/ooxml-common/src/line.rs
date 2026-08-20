@@ -114,25 +114,8 @@ fn parse_end(node: Node<'_, '_>) -> LineEnd {
 /// Normalize both to the historical 100000-per-100% scale used by the shared
 /// line model.
 fn parse_positive_percentage(value: &str) -> Option<f64> {
-    if let Some(percent) = value.strip_suffix('%') {
-        let mut parts = percent.split('.');
-        let whole = parts.next()?;
-        let fraction = parts.next();
-        if whole.is_empty()
-            || !whole.bytes().all(|byte| byte.is_ascii_digit())
-            || fraction.is_some_and(|digits| {
-                digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
-            })
-            || parts.next().is_some()
-        {
-            return None;
-        }
-        let parsed = percent.parse::<f64>().ok()? * 1000.0;
-        parsed.is_finite().then_some(parsed)
-    } else {
-        let parsed = value.parse::<i32>().ok()?;
-        (parsed >= 0).then_some(f64::from(parsed))
-    }
+    let thousandths = crate::units::drawingml_percentage_to_thousandths(value)?;
+    (thousandths >= 0.0).then_some(thousandths)
 }
 
 /// Parse only the paint choice of one DrawingML `<a:ln>`. Chart Style palette

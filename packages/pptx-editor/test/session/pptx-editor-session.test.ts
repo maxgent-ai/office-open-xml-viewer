@@ -5,6 +5,7 @@ import type { ShapeElement } from '@maxgent/ooxml/pptx';
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
 import type { ElementRef } from '../../src/domain/mutation';
+import { RemoveElementMutation } from '../../src/mutations/remove-element';
 import { UpdateTextMutation } from '../../src/mutations/update-text';
 import { EDITOR_SESSION_CHANGE_REASONS } from '../../src/session/constants';
 import { PptxEditorSessionError } from '../../src/session/errors';
@@ -41,8 +42,8 @@ describe('PptxEditorSession', () => {
     expect(session.getSnapshot()).toMatchObject({
       pendingCommandIds: ['edit-1'],
       isSubmitting: true,
-      undoDepth: 0,
-      canUndo: false,
+      undoDepth: 1,
+      canUndo: true,
     });
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -102,6 +103,43 @@ describe('PptxEditorSession', () => {
       'undo-1',
       'redo-2',
     ]);
+  });
+
+  it('publishes rejected commands with already-reconciled history', async () => {
+    const target = plainShape('7', 'before');
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+    const gate = deferred<OfficeCliBatchSendResult>();
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockImplementationOnce(() => gate.promise)
+      .mockResolvedValue(confirmedSendResult());
+    const session = createSession(presentation, sendBatch);
+    let rejectedSnapshot: ReturnType<PptxEditorSession['getSnapshot']> | undefined;
+    let undoFromListener: ReturnType<PptxEditorSession['undo']> | undefined;
+    session.subscribe((change) => {
+      if (change.reason !== EDITOR_SESSION_CHANGE_REASONS.COMMAND_REJECTED) return;
+      rejectedSnapshot = change.snapshot;
+      if (change.snapshot.canUndo) undoFromListener = session.undo();
+    });
+
+    const remove = session.submit({
+      id: 'remove-1',
+      mutations: [new RemoveElementMutation({ target: ref })],
+    });
+    gate.resolve({
+      status: OFFICECLI_BATCH_SEND_STATUSES.REJECTED,
+      cause: new Error('backend rejected removal'),
+    });
+    await remove.settled;
+    if (undoFromListener) await undoFromListener.settled;
+
+    expect(rejectedSnapshot).toMatchObject({
+      pendingCommandIds: [],
+      undoDepth: 0,
+      canUndo: false,
+    });
+    expect(session.getSnapshot().presentation.slides[0].elements).toHaveLength(1);
+    expect(sendBatch).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces halted sync state and clears it after authoritative resync', async () => {

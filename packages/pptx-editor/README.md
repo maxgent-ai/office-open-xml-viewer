@@ -236,6 +236,8 @@ Built-in mutations:
 | --- | --- | --- |
 | `UpdateTextMutation` | Replace shape plain text, whole-shape styles, or incremental paragraph/span edits (`text` and/or `style`) | `set` path + `{ text, bold, … }` and/or `range=` |
 | `UpdateShapeMutation` | Patch shape position, size, rotation, flips, fill, or outline | `set` path + changed shape props |
+| `InsertSlideMutation` | Insert an empty slide at a 0-based index | `add` under `/` with `type: 'slide'` and `index` |
+| `RemoveSlideMutation` | Remove a slide; direct removal is not undoable | `remove` at the current slide path |
 | `AddElementMutation` | Insert a slide element at indexes | `add` under slide path |
 | `RemoveElementMutation` | Remove a slide element | `remove` path |
 
@@ -502,9 +504,9 @@ Document these in product code rather than papering over them:
 
 1. **Main-thread presentation only.** The internal slide replacement hook throws
    in `mode: 'worker'`. Load `PptxPresentation` with `{ mode: 'main' }`.
-2. **Fixed slide count.** Binding and viewer reject presentations whose
-   `slides.length` differs from the loaded package. Adding/removing slides needs
-   a full viewer reload, not a patch.
+2. **Fixed viewer slide count.** `InsertSlideMutation` and `RemoveSlideMutation`
+   update the editor model and OfficeCLI file. The current binding and viewer
+   still require a full reload after the slide count changes.
 3. **Slide content only.** The host installs slide models; presentation theme /
    size fields on the session snapshot are not pushed into the viewer.
 4. **Slide-origin shapes only.** Master/layout elements are not editable.

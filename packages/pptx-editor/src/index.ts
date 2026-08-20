@@ -5,9 +5,17 @@ export type { ElementOrigin } from './domain/element-origin';
 
 export { Mutation } from './domain/mutation';
 export type {
+  ElementMutation,
   ElementRef,
   MutationCommandContext,
+  MutationTarget,
+  SlideRef,
 } from './domain/mutation';
+
+export { InsertSlideMutation } from './mutations/insert-slide';
+export type { InsertSlideMutationParams } from './mutations/insert-slide';
+export { RemoveSlideMutation } from './mutations/remove-slide';
+export type { RemoveSlideMutationParams } from './mutations/remove-slide';
 
 export { AddElementMutation } from './mutations/add-element';
 export type {
@@ -93,6 +101,8 @@ export type {
 export { toOfficeCliBatch } from './transport/officecli/officecli-translator';
 export type {
   OfficeCliAddCommand,
+  OfficeCliAddShapeCommand,
+  OfficeCliAddSlideCommand,
   OfficeCliBatch,
   OfficeCliCommand,
   OfficeCliCommandType,

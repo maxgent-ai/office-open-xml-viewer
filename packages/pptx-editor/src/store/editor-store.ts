@@ -2,6 +2,7 @@ import type { Presentation } from '@maxgent/ooxml/pptx';
 
 import { getSlideMutationId } from '../adapters/pptx-json-adapter';
 import type { Command } from '../domain/command';
+import { isElementRef } from '../domain/mutation';
 import { applyCommand } from '../engine/mutation-engine';
 import { EditorStoreError } from './errors';
 import { collectCommandInvalidations } from './editor-store-utils';
@@ -94,7 +95,19 @@ export class PptxEditorStore {
     this.#assertReady();
     this.#requireHeadCommand(commandId);
     const rejectedCommands = this.#pendingCommands;
-    const invalidations = collectCommandInvalidations(rejectedCommands);
+    const collectedInvalidations = collectCommandInvalidations(rejectedCommands);
+    const changesSlideList = rejectedCommands.some((command) => (
+      command.mutations.some((mutation) => !isElementRef(mutation.target))
+    ));
+    const invalidations = changesSlideList
+      ? {
+          ...collectedInvalidations,
+          changedSlideIds: [...new Set([
+            ...this.#presentation.slides.map(getSlideMutationId),
+            ...this.#basePresentation.slides.map(getSlideMutationId),
+          ])],
+        }
+      : collectedInvalidations;
     const invalidatedCommandIds = rejectedCommands.slice(1).map((command) => command.id);
     this.#setState(this.#basePresentation, this.#basePresentation, []);
 

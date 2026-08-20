@@ -11,12 +11,21 @@ export type OfficeCliCommandType =
 
 export type OfficeCliProps = Readonly<Record<string, string>>;
 
-export interface OfficeCliAddCommand {
+export interface OfficeCliAddShapeCommand {
   readonly command: typeof OFFICECLI_COMMAND_TYPES.ADD;
   readonly parent: string;
   readonly type: typeof OFFICECLI_ELEMENT_TYPES.SHAPE;
   readonly props: OfficeCliProps;
 }
+
+export interface OfficeCliAddSlideCommand {
+  readonly command: typeof OFFICECLI_COMMAND_TYPES.ADD;
+  readonly parent: '/';
+  readonly type: typeof OFFICECLI_ELEMENT_TYPES.SLIDE;
+  readonly index: number;
+}
+
+export type OfficeCliAddCommand = OfficeCliAddShapeCommand | OfficeCliAddSlideCommand;
 
 export interface OfficeCliSetCommand {
   readonly command: typeof OFFICECLI_COMMAND_TYPES.SET;

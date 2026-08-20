@@ -7,7 +7,14 @@ import {
   type ResolvedElementRef,
 } from '../adapters/pptx-json-adapter';
 import { ELEMENT_ORIGINS } from '../domain/element-origin';
-import type { Mutation, MutationCommandContext } from '../domain/mutation';
+import type {
+  ElementMutation,
+  ElementRef,
+  Mutation,
+  MutationCommandContext,
+  MutationTarget,
+  SlideRef,
+} from '../domain/mutation';
 import { MutationExecutionError } from '../engine/errors';
 import { OfficeCliTranslatorError } from '../transport/officecli/errors';
 import type { OfficeCliProps } from '../transport/officecli/types';
@@ -16,7 +23,7 @@ export type ResolvedMutationTarget = ResolvedElementRef;
 
 export function resolveMutationTarget(
   presentation: Presentation,
-  mutation: Mutation,
+  mutation: ElementMutation,
 ): ResolvedMutationTarget {
   const slide = presentation.slides.find(
     (candidate) => getSlideMutationId(candidate) === mutation.target.slideId,
@@ -63,7 +70,7 @@ export function resolveMutationTarget(
 
 export function resolveStableShapePath(
   presentation: Presentation,
-  mutation: Mutation,
+  mutation: ElementMutation,
   context: MutationCommandContext,
 ): string {
   const slide = presentation.slides.find(
@@ -135,7 +142,7 @@ export function resolveStableShapePath(
 /** 0-based paragraphIndex → OfficeCLI 1-based `/p[N]` under the stable shape path. */
 export function resolveStableParagraphPath(
   presentation: Presentation,
-  mutation: Mutation,
+  mutation: ElementMutation,
   context: MutationCommandContext,
   paragraphIndex: number,
   /**
@@ -172,7 +179,7 @@ export function resolveStableParagraphPath(
 
 export function resolveStableSlidePath(
   presentation: Presentation,
-  mutation: Mutation,
+  mutation: ElementMutation,
   context: MutationCommandContext,
 ): string {
   const slideIndex = presentation.slides.findIndex(
@@ -216,7 +223,9 @@ export function freezeProps(props: Record<string, string>): OfficeCliProps {
   return Object.freeze(props);
 }
 
-export function freezeTarget(target: Mutation['target']): Mutation['target'] {
+export function freezeTarget(target: ElementRef): ElementRef;
+export function freezeTarget(target: SlideRef): SlideRef;
+export function freezeTarget(target: MutationTarget): MutationTarget {
   return Object.freeze({ ...target });
 }
 

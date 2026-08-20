@@ -1,5 +1,5 @@
 import type { Command } from '../domain/command';
-import type { ElementRef } from '../domain/mutation';
+import { isElementRef, type ElementRef } from '../domain/mutation';
 
 export interface CommandInvalidations {
   readonly changedSlideIds: readonly string[];
@@ -15,7 +15,9 @@ export function collectCommandInvalidations(
   for (const command of commands) {
     for (const mutation of command.mutations) {
       slideIds.add(mutation.target.slideId);
-      elements.set(elementRefKey(mutation.target), mutation.target);
+      if (isElementRef(mutation.target)) {
+        elements.set(elementRefKey(mutation.target), mutation.target);
+      }
     }
   }
 

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import { UpdateTransformMutation } from '../../src/mutations/update-transform';
+import { UpdateShapeMutation } from '../../src/mutations/update-shape';
 import { toOfficeCliBatch } from '../../src/transport/officecli/officecli-translator';
 import {
   addShape,
@@ -22,7 +22,7 @@ import {
   runBatch,
 } from './harness';
 
-describe('UpdateTransformMutation × OfficeCLI 真实执行', () => {
+describe('UpdateShapeMutation transform × OfficeCLI 真实执行', () => {
   let dir: string;
   let pptxPath: string;
   let presentation: Presentation;
@@ -31,7 +31,7 @@ describe('UpdateTransformMutation × OfficeCLI 真实执行', () => {
 
   beforeAll(() => {
     assertLiveOfficeCli();
-    dir = createLiveWorkspace('update-transform');
+    dir = createLiveWorkspace('update-shape-transform');
     pptxPath = join(dir, 'deck.pptx');
     createDeck(pptxPath);
     addSlide(pptxPath);
@@ -55,7 +55,7 @@ describe('UpdateTransformMutation × OfficeCLI 真实执行', () => {
 
   afterAll(() => destroyLiveWorkspace(dir, [pptxPath]));
 
-  it('UpdateTransform 生成的 set 命令能真实更新位置与尺寸并以精确 EMU 回读', () => {
+  it('UpdateShape 生成的 set 命令能真实更新位置与尺寸并以精确 EMU 回读', () => {
     const ref = refForElementId(presentation, elementIdOfPath(positionShapePath));
     // Deliberately awkward EMU values: OfficeCLI normalizes readback to
     // "nice" units (914400emu -> "2.54cm"), so exact odd EMUs prove the
@@ -71,8 +71,8 @@ describe('UpdateTransformMutation × OfficeCLI 真实执行', () => {
     };
 
     runBatch(pptxPath, toOfficeCliBatch(presentation, {
-      id: 'live-transform-1',
-      mutations: [new UpdateTransformMutation({ target: ref, value })],
+      id: 'live-shape-transform-1',
+      mutations: [new UpdateShapeMutation({ target: ref, value })],
     }));
 
     const format = normalizeShapeFormat(getNode(pptxPath, positionShapePath).format);
@@ -92,8 +92,8 @@ describe('UpdateTransformMutation × OfficeCLI 真实执行', () => {
     };
 
     runBatch(pptxPath, toOfficeCliBatch(presentation, {
-      id: 'live-transform-2',
-      mutations: [new UpdateTransformMutation({ target: ref, value })],
+      id: 'live-shape-transform-2',
+      mutations: [new UpdateShapeMutation({ target: ref, value })],
     }));
 
     const format = normalizeShapeFormat(getNode(pptxPath, rotationShapePath).format);

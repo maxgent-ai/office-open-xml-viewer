@@ -6,7 +6,6 @@ export type { ElementOrigin } from './domain/element-origin';
 export { Mutation } from './domain/mutation';
 export type {
   ElementRef,
-  ElementTransform,
   MutationCommandContext,
 } from './domain/mutation';
 
@@ -31,10 +30,6 @@ export type {
   TextStylePatch,
   UpdateTextMutationParams,
 } from './mutations/update-text';
-export { UpdateTransformMutation } from './mutations/update-transform';
-export type {
-  UpdateTransformMutationParams,
-} from './mutations/update-transform';
 export { UpdateShapeMutation } from './mutations/update-shape';
 export type {
   ShapePatch,

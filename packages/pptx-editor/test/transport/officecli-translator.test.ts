@@ -8,8 +8,8 @@ import { applyCommand } from '../../src/engine/mutation-engine';
 import { createUndoRedoEntry } from '../../src/history/command-inverter';
 import { AddElementMutation } from '../../src/mutations/add-element';
 import { RemoveElementMutation } from '../../src/mutations/remove-element';
+import { UpdateShapeMutation } from '../../src/mutations/update-shape';
 import { UpdateTextMutation } from '../../src/mutations/update-text';
-import { UpdateTransformMutation } from '../../src/mutations/update-transform';
 import {
   OFFICECLI_BATCH_SCHEMA_VERSION,
   OFFICECLI_VERSION,
@@ -26,7 +26,7 @@ describe('toOfficeCliBatch', () => {
 
     const batch = toOfficeCliBatch(presentation, {
       id: 'transform-1',
-      mutations: [new UpdateTransformMutation({
+      mutations: [new UpdateShapeMutation({
         target: ref,
         value: {
           x: 914400,
@@ -735,7 +735,7 @@ describe('toOfficeCliBatch', () => {
 
     expect(() => toOfficeCliBatch(presentation, {
       id: 'transform-1',
-      mutations: [new UpdateTransformMutation({
+      mutations: [new UpdateShapeMutation({
         target: ref,
         value: {
           x: 0.5,

@@ -1,21 +1,8 @@
-import type { Presentation, SlideElement } from '@maxgent/ooxml/pptx';
+import type { Presentation } from '@maxgent/ooxml/pptx';
 
-import type { ElementRef, ElementTransform, Mutation } from '../domain/mutation';
+import type { ElementRef, Mutation } from '../domain/mutation';
 import { MutationExecutionError } from './errors';
 import type { MutationExecutionResult } from './types';
-
-export function hasSameTransform(
-  element: SlideElement,
-  transform: ElementTransform,
-): boolean {
-  return element.x === transform.x
-    && element.y === transform.y
-    && element.width === transform.width
-    && element.height === transform.height
-    && element.rotation === transform.rotation
-    && element.flipH === transform.flipH
-    && element.flipV === transform.flipV;
-}
 
 export function createUnchangedResult(presentation: Presentation): MutationExecutionResult {
   return {

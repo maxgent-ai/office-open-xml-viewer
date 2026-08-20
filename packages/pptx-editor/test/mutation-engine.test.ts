@@ -10,18 +10,18 @@ import {
   CommandExecutionError,
 } from '../src/engine/mutation-engine';
 import { RemoveElementMutation } from '../src/mutations/remove-element';
+import { UpdateShapeMutation } from '../src/mutations/update-shape';
 import { UpdateTextMutation } from '../src/mutations/update-text';
-import { UpdateTransformMutation } from '../src/mutations/update-transform';
 import { deck, shape } from './fixtures/presentation';
 
 describe('mutation engine', () => {
-  it('updates a transform with structural sharing', () => {
+  it('updates a shape transform with structural sharing', () => {
     const target = shape('7', 'before');
     const untouched = shape('8', 'untouched');
     const presentation = deck([target, untouched]);
     const ref = createElementRef(presentation.slides[0], target, 0);
 
-    const result = applyMutation(presentation, new UpdateTransformMutation({
+    const result = applyMutation(presentation, new UpdateShapeMutation({
       target: ref,
       value: {
         x: 100,

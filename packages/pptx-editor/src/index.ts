@@ -12,12 +12,10 @@ export type {
 
 export { AddElementMutation } from './mutations/add-element';
 export type {
-  AddElementMutationJson,
   AddElementMutationParams,
 } from './mutations/add-element';
 export { RemoveElementMutation } from './mutations/remove-element';
 export type {
-  RemoveElementMutationJson,
   RemoveElementMutationParams,
 } from './mutations/remove-element';
 export {
@@ -31,16 +29,17 @@ export type {
   TextSpan,
   TextStyleEdit,
   TextStylePatch,
-  UpdateTextMutationJson,
   UpdateTextMutationParams,
 } from './mutations/update-text';
 export { UpdateTransformMutation } from './mutations/update-transform';
 export type {
-  UpdateTransformMutationJson,
   UpdateTransformMutationParams,
 } from './mutations/update-transform';
-export { mutationFromJson } from './mutations/mutation-from-json';
-export type { MutationJson } from './mutations/mutation-from-json';
+export { UpdateShapeMutation } from './mutations/update-shape';
+export type {
+  ShapePatch,
+  UpdateShapeMutationParams,
+} from './mutations/update-shape';
 
 export type { Command, NonEmptyReadonlyArray } from './domain/command';
 

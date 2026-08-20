@@ -31,6 +31,11 @@ import {
   resolveStableSlidePath,
 } from '../mutation-utils';
 import { RemoveElementMutation } from '../remove-element';
+import {
+  applyShapeFillProps,
+  applyShapeStrokeProps,
+  formatFraction,
+} from '../shape-officecli';
 
 export interface AddElementMutationParams {
   readonly target: ElementRef;
@@ -204,8 +209,9 @@ export class AddElementMutation extends Mutation {
     };
     if (this.element.name) props.name = this.element.name;
     if (text !== undefined) props.text = text;
-    this.#applyFillProps(props, context);
-    this.#applyStrokeProps(props, context);
+    const shape = this.element as ShapeElement;
+    if (shape.fill) applyShapeFillProps(props, shape.fill, context, this);
+    if (shape.stroke) applyShapeStrokeProps(props, shape.stroke, context, this);
     this.#applyShadowProps(props, context);
 
     return Object.freeze({
@@ -214,105 +220,6 @@ export class AddElementMutation extends Mutation {
       type: OFFICECLI_ELEMENT_TYPES.SHAPE,
       props: freezeProps(props),
     });
-  }
-
-  #applyFillProps(props: Record<string, string>, context: MutationCommandContext): void {
-    const fill = (this.element as ShapeElement).fill;
-    if (fill == null) return;
-    switch (fill.fillType) {
-      case 'none':
-        props.fill = 'none';
-        return;
-      case 'solid': {
-        const color = splitColorAlpha(fill.color);
-        if (!color) {
-          throw this.#fidelityError(context, `Fill color ${fill.color} is not a plain hex color`);
-        }
-        props.fill = color.hex;
-        if (color.alpha !== undefined) props.opacity = formatFraction(color.alpha);
-        return;
-      }
-      case 'pattern': {
-        if (!HEX6_PATTERN.test(fill.fg) || !HEX6_PATTERN.test(fill.bg)) {
-          throw this.#fidelityError(
-            context,
-            'Pattern fill colors with alpha cannot be expressed through the officecli pattern grammar',
-          );
-        }
-        props.pattern = `${fill.preset}:${fill.fg}:${fill.bg}`;
-        return;
-      }
-      case 'gradient': {
-        // The officecli gradient grammar covers a two-stop linear ramp with
-        // an integer angle; other authored gradients (radial/path focus,
-        // extra stops, alpha stops) would round-trip lossily.
-        const [start, end] = fill.stops;
-        if (
-          fill.gradType !== 'linear'
-          || fill.stops.length !== 2
-          || start.position !== 0
-          || end.position !== 1
-          || !HEX6_PATTERN.test(start.color)
-          || !HEX6_PATTERN.test(end.color)
-          || !Number.isInteger(fill.angle)
-        ) {
-          throw this.#fidelityError(
-            context,
-            'Only two-stop linear gradients with an integer angle can be restored through officecli',
-          );
-        }
-        props.gradient = `LINEAR;${start.color};${end.color};${fill.angle}`;
-        return;
-      }
-      default:
-        throw this.#fidelityError(
-          context,
-          'Image fills cannot be restored: the translator has no access to the embedded media bytes',
-        );
-    }
-  }
-
-  #applyStrokeProps(props: Record<string, string>, context: MutationCommandContext): void {
-    const stroke = (this.element as ShapeElement).stroke;
-    if (stroke == null) return;
-    if (stroke.fill) {
-      throw this.#fidelityError(
-        context,
-        'Gradient/pattern outline paint cannot be restored through the officecli line grammar yet',
-      );
-    }
-    const color = splitColorAlpha(stroke.color);
-    if (!color) {
-      throw this.#fidelityError(context, `Outline color ${stroke.color} is not a plain hex color`);
-    }
-    props.line = `${color.hex}:${emuToPoints(stroke.width)}`;
-    if (color.alpha !== undefined) props.lineOpacity = formatFraction(color.alpha);
-    if (stroke.dashStyle) props.lineDash = stroke.dashStyle;
-    if (stroke.lineCap) {
-      // The model normalizes DrawingML @cap="flat" to the Canvas token "butt".
-      props.lineCap = stroke.lineCap === 'butt' ? 'flat' : stroke.lineCap;
-    }
-    if (stroke.cmpd && stroke.cmpd !== 'sng') props.cmpd = stroke.cmpd;
-    this.#applyArrowEnd(props, 'headEnd', stroke.headEnd, context);
-    this.#applyArrowEnd(props, 'tailEnd', stroke.tailEnd, context);
-  }
-
-  #applyArrowEnd(
-    props: Record<string, string>,
-    key: 'headEnd' | 'tailEnd',
-    arrow: { type: string; w: string; len: string } | undefined,
-    context: MutationCommandContext,
-  ): void {
-    if (!arrow || arrow.type === 'none') return;
-    // officecli only takes the arrowhead type; "med" is the OOXML default
-    // for both size multipliers, so anything else would restore lossily.
-    if (arrow.w !== 'med' || arrow.len !== 'med') {
-      throw this.#fidelityError(
-        context,
-        `Arrowhead ${key} uses non-default size multipliers that officecli cannot express`,
-      );
-    }
-    props[key] = arrow.type;
   }
 
   #applyShadowProps(props: Record<string, string>, context: MutationCommandContext): void {
@@ -376,22 +283,7 @@ function dropUnrestorableGeometry(element: SlideElement): SlideElement {
 }
 
 const HEX6_PATTERN = /^[0-9A-Fa-f]{6}$/;
-const HEX8_PATTERN = /^[0-9A-Fa-f]{8}$/;
-
-/** Splits an RRGGBB / RRGGBBAA model color into hex + fractional alpha. */
-function splitColorAlpha(color: string): { hex: string; alpha?: number } | undefined {
-  if (HEX6_PATTERN.test(color)) return { hex: color };
-  if (HEX8_PATTERN.test(color)) {
-    return { hex: color.slice(0, 6), alpha: Number.parseInt(color.slice(6), 16) / 255 };
-  }
-  return undefined;
-}
 
 function emuToPoints(value: number): string {
   return formatFraction(value / 12_700);
-}
-
-/** Formats fractional prop values without float-noise tails (0.50196..., 1.5). */
-function formatFraction(value: number): string {
-  return String(Number(value.toFixed(6)));
 }

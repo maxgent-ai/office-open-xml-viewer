@@ -236,21 +236,10 @@ Built-in mutations:
 | Class | Effect | OfficeCLI |
 | --- | --- | --- |
 | `UpdateTextMutation` | Replace shape plain text, whole-shape styles, or multi-span style edits | `set` path + `{ text, bold, … }` and/or `range=` |
+| `UpdateShapeMutation` | Patch shape position, size, rotation, flips, fill, or outline | `set` path + changed shape props |
 | `UpdateTransformMutation` | Position / size / rotation / flips (EMU + degrees) | `set` path + transform props |
 | `AddElementMutation` | Insert a slide element at indexes | `add` under slide path |
 | `RemoveElementMutation` | Remove a slide element | `remove` path |
-
-Hydrate from JSON with `mutationFromJson`:
-
-```ts
-import { mutationFromJson, MUTATION_TYPES } from '@maxgent/ooxml-pptx-editor';
-
-const mutation = mutationFromJson({
-  type: MUTATION_TYPES.UPDATE_TEXT,
-  target,
-  value: 'Hello',
-});
-```
 
 Low-level apply without a session:
 
@@ -508,7 +497,6 @@ custom pipelines:
 | `UndoRedoStack` | Invert commands and drive undo/redo submissions |
 | `SerialOfficeCliSubmitter` | Serial queue over `sendBatch` |
 | `applyCommand` / `applyMutation` | Pure local apply |
-| `mutationFromJson` | Deserialize mutation JSON |
 
 ## Current limitations
 

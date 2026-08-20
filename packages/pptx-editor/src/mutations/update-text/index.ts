@@ -1,4 +1,3 @@
-export type { UpdateTextMutationJson } from './interface';
 export {
   formatOfficeCliRange,
   paragraphRunPlainText,

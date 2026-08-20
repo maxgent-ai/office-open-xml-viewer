@@ -1,4 +1,3 @@
-export type { UpdateTransformMutationJson } from './interface';
 export {
   UpdateTransformMutation,
   type UpdateTransformMutationParams,

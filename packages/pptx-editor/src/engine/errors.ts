@@ -7,6 +7,7 @@ export type MutationExecutionErrorCode =
   | 'element.metadataUnavailable'
   | 'element.notDirectSlide'
   | 'element.notFound'
+  | 'element.unsupportedElement'
   | 'element.unsupportedOrigin'
   | 'element.textNotEditable';
 

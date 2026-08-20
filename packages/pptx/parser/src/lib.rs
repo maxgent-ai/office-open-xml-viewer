@@ -4587,11 +4587,11 @@ mod tests {
             } => {
                 assert!(fill_rect.is_none(), "tile fill must not carry fillRect");
                 let t = tile.expect("tile should be present");
-                assert_eq!(t.tx, 457_200);
-                assert_eq!(t.ty, -228_600);
-                assert!((t.sx - 0.5).abs() < 1e-9, "sx={}", t.sx);
-                assert!((t.sy - 0.75).abs() < 1e-9, "sy={}", t.sy);
-                assert_eq!(t.flip, "xy");
+                assert_eq!(t.tx, Some(457_200));
+                assert_eq!(t.ty, Some(-228_600));
+                assert!(t.sx.is_some_and(|value| (value - 0.5).abs() < 1e-9));
+                assert!(t.sy.is_some_and(|value| (value - 0.75).abs() < 1e-9));
+                assert_eq!(t.flip.as_deref(), Some("xy"));
                 assert_eq!(t.algn.as_deref(), Some("ctr"));
             }
             other => panic!("expected Fill::Image, got {other:?}"),
@@ -4617,11 +4617,11 @@ mod tests {
         match fill {
             Fill::Image { tile, .. } => {
                 let t = tile.expect("tile should be present");
-                assert_eq!(t.tx, 0);
-                assert_eq!(t.ty, 0);
-                assert!((t.sx - 1.0).abs() < 1e-9);
-                assert!((t.sy - 1.0).abs() < 1e-9);
-                assert_eq!(t.flip, "none");
+                assert_eq!(t.tx, None);
+                assert_eq!(t.ty, None);
+                assert_eq!(t.sx, None);
+                assert_eq!(t.sy, None);
+                assert_eq!(t.flip.as_deref(), Some("none"));
                 assert_eq!(t.algn, None);
             }
             other => panic!("expected Fill::Image, got {other:?}"),

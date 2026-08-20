@@ -817,18 +817,28 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
 
     // Theme is referenced by a relationship with Type ending in "/theme" — resolve
     // to word/<target> and parse the clrScheme.
-    let mut theme = find_rel_target(&rels_xml, "theme")
-        .map(|t| {
-            let p = if t.starts_with('/') {
-                t.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", t)
-            };
-            read_zip_string(zip, &p)
-                .map(|s| ThemeColors::parse(&s))
-                .unwrap_or_default()
-        })
+    let theme_path = find_rel_target(&rels_xml, "theme").map(|target| {
+        if target.starts_with('/') {
+            target.trim_start_matches('/').to_string()
+        } else {
+            format!("word/{target}")
+        }
+    });
+    let mut theme = theme_path
+        .as_deref()
+        .and_then(|path| read_zip_string(zip, path).ok())
+        .map(|xml| ThemeColors::parse(&xml))
         .unwrap_or_default();
+    if let Some(theme_path) = theme_path.as_deref() {
+        let rels_path = ooxml_common::rels::relationship_part_path(theme_path);
+        if let Ok(theme_rels_xml) = read_zip_string(zip, &rels_path) {
+            theme.chart_images.insert_part_relationships(
+                ooxml_common::chart::ChartImageSource::Theme,
+                theme_path,
+                &theme_rels_xml,
+            );
+        }
+    }
 
     // §17.15.1.88 w:themeFontLang — when the theme leaves a cs typeface empty,
     // the settings' bidi language decides the actual complex-script face.
@@ -1784,6 +1794,9 @@ pub struct ThemeColors {
     /// each omitted local line property can inherit independently (ECMA-376
     /// §20.1.4.1.30 and §20.1.2.2.24).
     format_scheme: ooxml_common::theme::ThemeFormatScheme,
+    /// Image relationships owned by the theme part. Chart Style `fillRef`
+    /// recipes resolve `blipFill` rIds in this OPC scope.
+    chart_images: ooxml_common::chart::ChartImageRelationships,
     /// ECMA-376 §17.7.2 `docDefaults`/`rPrDefault` (folded with the default
     /// paragraph style) — the document's default run fonts, kept as RAW refs
     /// (may be `@theme:…`, resolved via [`resolve_font_ref`]). Threaded onto the
@@ -4001,12 +4014,18 @@ fn load_chart_map(
         // legacy `<c:>` charts ignore it (their title size is inline).
         let style_xml = load_chart_style_xml(zip, &path);
         let color_style_xml = load_chart_color_style_xml(zip, &path);
+        let image_relationships = load_chart_image_relationships(zip, &path);
+        let image_resolver = ooxml_common::chart::ChartImageResolverChain::new(
+            &image_relationships,
+            &theme.chart_images,
+        );
         let user_shapes_xml = load_chart_user_shapes_xml(zip, &path, &xml);
-        if let Some(mut chart) = parse_docx_chart_with_style_parts(
+        if let Some(mut chart) = parse_docx_chart_with_style_parts_and_images(
             &xml,
             style_xml.as_deref(),
             color_style_xml.as_deref(),
             theme,
+            &image_resolver,
         ) {
             if let (Some(user_shapes_xml), Ok(chart_doc)) =
                 (user_shapes_xml.as_deref(), parse_guarded(&xml))
@@ -4049,6 +4068,37 @@ fn load_chart_color_style_xml(zip: &mut Zip, chart_path: &str) -> Option<String>
         chart_path,
         ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX,
     )
+}
+
+fn load_chart_image_relationships(
+    zip: &mut Zip,
+    chart_path: &str,
+) -> ooxml_common::chart::ChartImageRelationships {
+    let mut images = ooxml_common::chart::ChartImageRelationships::default();
+    let rels_path = ooxml_common::rels::relationship_part_path(chart_path);
+    let Ok(rels_xml) = read_zip_string(zip, &rels_path) else {
+        return images;
+    };
+    images.insert_part_relationships(
+        ooxml_common::chart::ChartImageSource::Chart,
+        chart_path,
+        &rels_xml,
+    );
+    let base_dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    if let Some(target) =
+        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)
+    {
+        let style_path = ooxml_common::rels::resolve_target(base_dir, &target);
+        let style_rels_path = ooxml_common::rels::relationship_part_path(&style_path);
+        if let Ok(style_rels_xml) = read_zip_string(zip, &style_rels_path) {
+            images.insert_part_relationships(
+                ooxml_common::chart::ChartImageSource::Style,
+                &style_path,
+                &style_rels_xml,
+            );
+        }
+    }
+    images
 }
 
 fn load_chart_sidecar_xml(
@@ -11757,11 +11807,29 @@ fn parse_docx_chart(
     parse_docx_chart_with_style_parts(chart_xml, style_xml, None, theme)
 }
 
+#[cfg(test)]
 fn parse_docx_chart_with_style_parts(
     chart_xml: &str,
     style_xml: Option<&str>,
     color_style_xml: Option<&str>,
     theme: &ThemeColors,
+) -> Option<ooxml_common::chart::ChartModel> {
+    let images = ooxml_common::chart::ChartImageRelationships::default();
+    parse_docx_chart_with_style_parts_and_images(
+        chart_xml,
+        style_xml,
+        color_style_xml,
+        theme,
+        &images,
+    )
+}
+
+fn parse_docx_chart_with_style_parts_and_images(
+    chart_xml: &str,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+    theme: &ThemeColors,
+    image_resolver: &dyn ooxml_common::chart::ChartImageResolver,
 ) -> Option<ooxml_common::chart::ChartModel> {
     let doc = parse_guarded(chart_xml).ok()?;
     let root = doc.root_element();
@@ -11773,18 +11841,20 @@ fn parse_docx_chart_with_style_parts(
     if is_chartex {
         // chartEx (waterfall/boxWhisker/…) reads its title font size from the
         // associated chartStyle part when the `<cx:title>` itself carries none.
-        ooxml_common::chart::parse_chartex_part_with_style_parts(
+        ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
             root,
             &resolver,
             style_xml,
             color_style_xml,
+            image_resolver,
         )
     } else {
-        ooxml_common::chart::parse_chart_part_with_style_parts(
+        ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
             root,
             &resolver,
             style_xml,
             color_style_xml,
+            image_resolver,
         )
     }
 }
@@ -19422,11 +19492,12 @@ mod anchor_image_relative_from_tests {
         use zip::write::SimpleFileOptions;
 
         let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="4000000" cy="3000000"/><wp:docPr id="1" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
-        let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="charts/chartEx1.xml"/></Relationships>"#;
+        let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="charts/chartEx1.xml"/><Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#;
         let chart_xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chartData><cx:data id="0"><cx:strDim type="cat"><cx:lvl ptCount="1"><cx:pt idx="0">A</cx:pt></cx:lvl></cx:strDim><cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim></cx:data></cx:chartData><cx:chart><cx:plotArea><cx:plotAreaRegion><cx:series layoutId="boxWhisker"/></cx:plotAreaRegion></cx:plotArea></cx:chart></cx:chartSpace>"#;
         let chart_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#;
-        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint></cs:chartStyle>"#;
+        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint><cs:dataPointMarker><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef></cs:dataPointMarker><cs:dataLabelCallout><cs:defRPr><a:noFill/></cs:defRPr><cs:bodyPr/></cs:dataLabelCallout><cs:trendlineLabel><cs:defRPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></cs:defRPr></cs:trendlineLabel></cs:chartStyle>"#;
         let colors_xml = r#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#;
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Theme"><a:themeElements><a:fmtScheme name="Theme"><a:fillStyleLst><a:blipFill><a:blip r:embed="rIdThemeMarker"/><a:stretch/></a:blipFill></a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#;
 
         let mut bytes = Vec::new();
         {
@@ -19438,7 +19509,18 @@ mod anchor_image_relative_from_tests {
                 ("word/charts/chartEx1.xml", chart_xml),
                 ("word/charts/_rels/chartEx1.xml.rels", chart_rels),
                 ("word/charts/style1.xml", style_xml),
+                (
+                    "word/charts/_rels/style1.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/style-marker.png"/></Relationships>"#,
+                ),
                 ("word/charts/colors1.xml", colors_xml),
+                ("word/theme/theme1.xml", theme_xml),
+                (
+                    "word/theme/_rels/theme1.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdThemeMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/theme-marker.png"/></Relationships>"#,
+                ),
+                ("word/media/theme-marker.png", "png"),
+                ("word/media/style-marker.png", "png"),
             ] {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(xml.as_bytes()).unwrap();
@@ -19473,6 +19555,22 @@ mod anchor_image_relative_from_tests {
                 .and_then(Option::as_ref),
             Some(ooxml_common::chart::ChartStyleFill::Pattern { fg, bg, preset })
                 if fg == "336699" && bg == "FFFFFF" && preset == "diagCross"
+        ));
+        let roles = chart.chart_style_roles.as_ref().expect("linked role table");
+        assert_eq!(roles["dataLabelCallout"].font_hidden, Some(true));
+        assert_eq!(roles["dataLabelCallout"].text_body_authored, Some(true));
+        assert_eq!(
+            roles["trendlineLabel"].font_color.as_deref(),
+            Some("112233")
+        );
+        assert!(matches!(
+            roles["dataPointMarker"]
+                .fill_paints
+                .as_ref()
+                .and_then(|paints| paints.first())
+                .and_then(Option::as_ref),
+            Some(ooxml_common::chart::ChartStyleFill::Image { image_path, .. })
+                if image_path == "word/media/theme-marker.png"
         ));
     }
 
@@ -19531,6 +19629,55 @@ mod anchor_image_relative_from_tests {
                 .and_then(Option::as_deref),
             Some("336699"),
         );
+    }
+
+    #[test]
+    fn docx_package_resolves_picture_marker_relationships() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="4000000" cy="3000000"/><wp:docPr id="1" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#;
+        let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/></Relationships>"#;
+        let chart_xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:chart><c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/><c:marker><c:symbol val="picture"/><c:spPr><a:blipFill><a:blip r:embed="rIdMarker"/><a:stretch/></a:blipFill></c:spPr></c:marker><c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let chart_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/marker.png"/></Relationships>"#;
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            for (path, content) in [
+                ("word/document.xml", document_xml.as_bytes()),
+                ("word/_rels/document.xml.rels", document_rels.as_bytes()),
+                ("word/charts/chart1.xml", chart_xml.as_bytes()),
+                ("word/charts/_rels/chart1.xml.rels", chart_rels.as_bytes()),
+                ("word/media/marker.png", b"png".as_slice()),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(content).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let document = parse_from_bytes(&bytes).expect("DOCX package parses");
+        let chart = document
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.runs.iter().find_map(|run| {
+                    if let DocRun::Chart(chart) = run {
+                        Some(&chart.chart)
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .expect("classic chart run");
+        assert!(matches!(
+            chart.series[0].marker_fill_paint.as_ref(),
+            Some(ooxml_common::chart::ChartStyleFill::Image { image_path, mime_type, .. })
+                if image_path == "word/media/marker.png" && mime_type == "image/png"
+        ));
     }
 
     /// CH14 — the inline-drawing chart gate accepts the chartex

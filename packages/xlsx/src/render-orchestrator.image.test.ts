@@ -6,6 +6,7 @@ import {
   dropDuotoneBitmapCache,
   dropSvgImageCache,
   getCachedBitmapByPath,
+  chartImageFillKey,
   type OffscreenFactory,
 } from '@silurus/ooxml-core';
 
@@ -175,6 +176,43 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(fetchImage).toHaveBeenCalledTimes(2);
     expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.png', 'image/png');
     expect(fetchImage).toHaveBeenCalledWith('xl/media/image2.png', 'image/png');
+  });
+
+  it('prefetchImages warms picture-marker blips once for synchronous chart paint', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }),
+    );
+    const ws = worksheetWithImages();
+    ws.images = [];
+    ws.shapeGroups = [];
+    ws.charts = [{
+      fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+      toCol: 4, toColOff: 0, toRow: 8, toRowOff: 0,
+      chart: {
+        chartType: 'line', categories: ['A'], showDataLabels: false,
+        title: null, valMin: null, valMax: null, catAxisTitle: null, valAxisTitle: null,
+        catAxisHidden: false, valAxisHidden: false, catAxisLineHidden: false,
+        valAxisLineHidden: false, plotAreaBg: null, chartBg: null, showLegend: false,
+        legendPos: null, catAxisCrossBetween: 'between', valAxisMajorTickMark: 'out',
+        catAxisMajorTickMark: 'out', titleFontSizeHpt: null, titleFontColor: null,
+        titleFontFace: null, catAxisFontSizeHpt: null, valAxisFontSizeHpt: null,
+        dataLabelFontSizeHpt: null, subtotalIndices: [],
+        series: [{
+          name: 'Series', color: null, values: [1], showMarker: true,
+          markerSymbol: 'picture', markerFillPaint: {
+            fillType: 'image', stretch: true, imagePath: 'xl/media/chart-marker.png', mimeType: 'image/png',
+          },
+        }],
+      },
+    } as Worksheet['charts'][number]];
+    const cache = new Map<string, CanvasImageSource | null>();
+    await prefetchImages(ws, cache, fetchImage);
+    expect(fetchImage).toHaveBeenCalledOnce();
+    expect(fetchImage).toHaveBeenCalledWith('xl/media/chart-marker.png', 'image/png');
+    expect(cache.has(chartImageFillKey({
+      fillType: 'image', stretch: true, imagePath: 'xl/media/chart-marker.png', mimeType: 'image/png',
+    }))).toBe(true);
   });
 
   it('prefetchImages skips anchors wholly outside the current viewport', async () => {
@@ -398,6 +436,62 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.png', 'image/png');
     // The SVG part is never fetched when a crop forces the raster path.
     expect(fetchImage).not.toHaveBeenCalledWith('xl/media/image1.svg', expect.anything());
+  });
+
+  it('falls back from an SVG original to its raster twin when SVG decode fails', async () => {
+    const bitmap = new FakeBitmap('image/png');
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => {
+      if (blob.type === 'image/svg+xml') throw new Error('SVG decode failed');
+      return bitmap;
+    }));
+    const fetchImage = vi.fn(async (_path: string, mime: string) => new Blob(['X'], { type: mime }));
+
+    const source = await decodeImageSource(
+      'xl/media/image1.png', 'image/png', 'xl/media/image1.svg', fetchImage,
+    );
+
+    expect(source).toBe(bitmap);
+    expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.svg', 'image/svg+xml');
+    expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.png', 'image/png');
+  });
+
+  it('uses the raster twin for duotone and fails closed for SVG-only duotone', async () => {
+    const bitmap = new FakeBitmap('image/png');
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
+    const fetchImage = vi.fn(async (_path: string, mime: string) => new Blob(['X'], { type: mime }));
+    const duo = { clr1: '000000', clr2: 'FFFFFF' };
+
+    await decodeImageSource(
+      'xl/media/image1.png', 'image/png', 'xl/media/image1.svg', fetchImage,
+      0, 0, null, duo, recordingFactory({}),
+    );
+    expect(fetchImage).not.toHaveBeenCalledWith('xl/media/image1.svg', expect.anything());
+    expect(fetchImage).toHaveBeenCalledWith('xl/media/image1.png', 'image/png');
+
+    fetchImage.mockClear();
+    await expect(decodeImageSource(
+      'xl/media/image-only.svg', 'image/svg+xml', undefined, fetchImage,
+      0, 0, null, duo,
+    )).resolves.toBeNull();
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a chart duotone when pixel readback is unavailable', async () => {
+    const bitmap = new FakeBitmap('image/png');
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob(['X'], { type: mime }));
+    const duo = { clr1: '000000', clr2: 'FFFFFF' };
+
+    await expect(decodeImageSource(
+      'xl/media/image1.png', 'image/png', undefined, fetchImage,
+      0, 0, null, duo, () => null, true,
+    )).resolves.toBeNull();
+    // The established non-chart compatibility path still returns the source.
+    await expect(decodeImageSource(
+      'xl/media/image1.png', 'image/png', undefined, fetchImage,
+      0, 0, null, duo, () => null, false,
+    )).resolves.toBe(bitmap);
   });
 
   it('decodeImageSource rasterizes a WMF blip (no throw) instead of vanishing', async () => {

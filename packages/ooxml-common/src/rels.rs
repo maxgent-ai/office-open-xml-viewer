@@ -46,6 +46,9 @@ pub struct RelTarget {
     /// The `Target` attribute verbatim (e.g. `../media/image1.png`,
     /// `/word/media/image1.png`, or `https://example.com/`).
     pub target: String,
+    /// OPC relationship type URI. Retained so consumers such as DrawingML
+    /// blip resolvers can reject an `rId` whose target is not an image part.
+    pub relationship_type: Option<String>,
     /// Internal (package part) vs External (opaque URL).
     pub mode: TargetMode,
 }
@@ -89,6 +92,7 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, RelTarget> {
             id.to_string(),
             RelTarget {
                 target: target.to_string(),
+                relationship_type: rel.attribute("Type").map(str::to_owned),
                 mode,
             },
         );
@@ -182,6 +186,7 @@ mod tests {
             map.get("rId1"),
             Some(&RelTarget {
                 target: "../media/image1.png".to_string(),
+                relationship_type: Some("…/image".to_string()),
                 mode: TargetMode::Internal,
             })
         );
@@ -189,6 +194,7 @@ mod tests {
             map.get("rId2"),
             Some(&RelTarget {
                 target: "https://example.com/".to_string(),
+                relationship_type: Some("…/hyperlink".to_string()),
                 mode: TargetMode::External,
             })
         );
@@ -290,11 +296,13 @@ mod tests {
     fn resolve_via_rel_target_honors_external() {
         let internal = RelTarget {
             target: "../media/image1.png".to_string(),
+            relationship_type: Some("…/image".to_string()),
             mode: TargetMode::Internal,
         };
         assert_eq!(internal.resolve("ppt/slides"), "ppt/media/image1.png");
         let external = RelTarget {
             target: "https://example.com/x".to_string(),
+            relationship_type: Some("…/hyperlink".to_string()),
             mode: TargetMode::External,
         };
         // External targets pass through untouched regardless of base_dir.

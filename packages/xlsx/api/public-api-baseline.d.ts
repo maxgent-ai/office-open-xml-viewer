@@ -178,9 +178,24 @@ export interface ChartDataLabelOverride {
     richRuns?: ChartTextRun[];
     position?: string;
     fontColor?: string;
+    fontPaintAuthored?: boolean;
+    fontHidden?: boolean;
     fontSizeHpt?: number;
     fontFace?: string;
     fontBold?: boolean;
+    fontItalic?: boolean;
+    fontLanguage?: string;
+    fontBaseline?: number;
+    textRotation?: number;
+    textWrap?: string;
+    textVerticalAnchor?: string;
+    textVerticalMode?: string;
+    textLInsEmu?: number;
+    textTInsEmu?: number;
+    textRInsEmu?: number;
+    textBInsEmu?: number;
+    textBodyAuthored?: boolean;
+    textAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string;
     formatCode?: string;
     separator?: string;
     manualLayout?: ChartManualLayout;
@@ -227,6 +242,7 @@ export interface ChartDataTable {
 }
 export interface ChartDecorationLineStyle {
     color?: string | null;
+    paintAuthored?: boolean | null;
     widthEmu?: number | null;
     dash?: string | null;
     cap?: string | null;
@@ -284,14 +300,28 @@ export interface ChartExElementStyle {
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fontColor?: string | null;
+    fontPaintAuthored?: boolean | null;
+    fontHidden?: boolean | null;
     fontFace?: string | null;
-    fillPaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
+    fontLanguage?: string | null;
+    fontBaseline?: number | null;
+    textRotation?: number | null;
+    textWrap?: string | null;
+    textVerticalAnchor?: string | null;
+    textVerticalMode?: string | null;
+    textLInsEmu?: number | null;
+    textTInsEmu?: number | null;
+    textRInsEmu?: number | null;
+    textBInsEmu?: number | null;
+    textBodyAuthored?: boolean | null;
+    fillPaints?: Array<Fill | null> | null;
     fillColors?: Array<string | null> | null;
     fillHidden?: boolean | null;
     fillPaintAuthored?: boolean | null;
     fillNoStyle?: boolean | null;
     lineColors?: Array<string | null> | null;
     linePaints?: Array<SolidFill | GradientFill | PatternFill | null> | null;
+    linePaintAuthored?: boolean | null;
     lineWidthEmu?: number | null;
     lineHidden?: boolean | null;
     lineNoStyle?: boolean | null;
@@ -357,8 +387,20 @@ export interface ChartexValueColorStop {
 }
 export interface ChartLabelBox {
     fill?: string;
+    fillPaint?: SolidFill | GradientFill | PatternFill | null;
+    fillHidden?: boolean | null;
+    fillPaintAuthored?: boolean | null;
     borderColor?: string;
+    borderFill?: SolidFill | GradientFill | PatternFill | null;
     borderWidthEmu?: number;
+    borderHidden?: boolean | null;
+    borderPaintAuthored?: boolean | null;
+    borderDash?: string | null;
+    borderDashAuthored?: boolean | null;
+    borderCustomDash?: ChartLineDashSegment[] | null;
+    borderCap?: string | null;
+    borderJoin?: string | null;
+    borderCompound?: string | null;
 }
 export interface ChartLegendEntryOverride {
     idx: number;
@@ -584,6 +626,12 @@ export interface ChartModel {
     stockHiLowLineColor?: string | null;
     stockUpDownBars?: boolean | null;
     stockUpDownBarStyle?: ChartStockUpDownBarStyle | null;
+    stockAutomaticStyle?: {
+        lineColor: string;
+        lineWidthEmu: number;
+        upFillColor: string;
+        downFillColor: string;
+    } | null;
     surfaceWireframe?: boolean | null;
     surfaceBandFormats?: ChartSurfaceBandFormat[] | null;
     legacyChartStyle?: number | null;
@@ -683,6 +731,7 @@ export interface ChartSeries {
     lineHidden?: boolean | null;
 }
 export interface ChartSeriesDataLabels {
+    deleted?: boolean | null;
     showVal: boolean;
     showCatName: boolean;
     showSerName: boolean;
@@ -691,11 +740,26 @@ export interface ChartSeriesDataLabels {
     showLegendKey?: boolean;
     position?: string;
     fontColor?: string;
+    fontPaintAuthored?: boolean;
+    fontHidden?: boolean;
     formatCode?: string;
     separator?: string;
     fontBold?: boolean;
+    fontItalic?: boolean;
+    fontLanguage?: string;
+    fontBaseline?: number;
     fontSizeHpt?: number;
     fontFace?: string;
+    textRotation?: number;
+    textWrap?: string;
+    textVerticalAnchor?: string;
+    textVerticalMode?: string;
+    textLInsEmu?: number;
+    textTInsEmu?: number;
+    textRInsEmu?: number;
+    textBInsEmu?: number;
+    textBodyAuthored?: boolean;
+    textAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string;
     labelBox?: ChartLabelBox;
     showLeaderLines?: boolean;
     leaderLineColor?: string;
@@ -706,8 +770,10 @@ export interface ChartSeriesDataLabels {
 export interface ChartStockBarPaint {
     fillColor?: string | null;
     fill?: SolidFill | GradientFill | PatternFill | null;
+    fillPaintAuthored?: boolean | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
+    linePaintAuthored?: boolean | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
     lineCap?: string | null;
@@ -751,7 +817,12 @@ export interface ChartTextRun {
     bold?: boolean | null;
     italic?: boolean | null;
     color?: string | null;
+    colorPaintAuthored?: boolean | null;
+    colorHidden?: boolean | null;
     fontFace?: string | null;
+    language?: string | null;
+    baseline?: number | null;
+    paragraphAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
 }
 export interface ChartThreeD {
     rotationX?: number | null;
@@ -817,13 +888,27 @@ export interface ChartTrendline {
     dispEq?: boolean | null;
     labelManualLayout?: ChartManualLayout | null;
     labelText?: string | null;
+    labelRichRuns?: ChartTextRun[] | null;
     labelFormatCode?: string | null;
     labelFormatSourceLinked?: boolean | null;
     labelFontSizeHpt?: number | null;
     labelFontBold?: boolean | null;
     labelFontItalic?: boolean | null;
     labelFontColor?: string | null;
+    labelFontPaintAuthored?: boolean | null;
+    labelFontHidden?: boolean | null;
     labelFontFace?: string | null;
+    labelFontLanguage?: string | null;
+    labelFontBaseline?: number | null;
+    labelTextRotation?: number | null;
+    labelTextWrap?: string | null;
+    labelTextVerticalAnchor?: string | null;
+    labelTextVerticalMode?: string | null;
+    labelTextLInsEmu?: number | null;
+    labelTextTInsEmu?: number | null;
+    labelTextRInsEmu?: number | null;
+    labelTextBInsEmu?: number | null;
+    labelTextBodyAuthored?: boolean | null;
     labelBox?: ChartLabelBox | null;
     labelTextAlign?: string | null;
     lineColor?: string | null;
@@ -962,8 +1047,13 @@ export interface ImageAnchor {
 export interface ImageFill {
     fillType: 'image';
     imagePath: string;
+    svgImagePath?: string;
     mimeType: string;
+    dpi?: number;
+    rotWithShape?: boolean;
+    srcRect?: SrcRect;
     fillRect?: FillRect;
+    stretch?: boolean;
     tile?: TileInfo;
     alpha?: number;
     duotone?: Duotone__emitterCollision1;
@@ -1645,6 +1735,12 @@ export interface SparklineGroup {
     colorLow?: string;
     sparklines: Sparkline[];
 }
+export interface SrcRect {
+    l: number;
+    t: number;
+    r: number;
+    b: number;
+}
 export interface Styles {
     fonts: CellFont[];
     fills: CellFill[];
@@ -1679,11 +1775,11 @@ export interface TableInfo {
     columns: TableColumnInfo[];
 }
 export interface TileInfo {
-    tx: number;
-    ty: number;
-    sx: number;
-    sy: number;
-    flip: string;
+    tx?: number;
+    ty?: number;
+    sx?: number;
+    sy?: number;
+    flip?: string;
     algn?: string;
 }
 export interface ViewerContextMenuEvent<TContext> {

@@ -52,26 +52,39 @@ export async function getCachedDuotoneBitmapByPath(
   mimeType: string,
   duotone: Duotone | null | undefined,
   fetchImage: FetchImage,
-  opts: CachedBitmapOptions & { offscreenFactory?: OffscreenFactory } = {},
+  opts: CachedBitmapOptions & {
+    offscreenFactory?: OffscreenFactory;
+    /** When true, an authored duotone that cannot be applied returns null
+     * instead of silently drawing the original pixels. Chart picture markers
+     * use this fail-closed mode; established shape consumers retain their
+     * legacy fallback unless they opt in. */
+    failClosedOnDuotoneFailure?: boolean;
+  } = {},
 ): Promise<ImageBitmap | null> {
-  const { offscreenFactory, ...bitmapOpts } = opts;
+  const { offscreenFactory, failClosedOnDuotoneFailure = false, ...bitmapOpts } = opts;
   // Base, colour-free bitmap from the shared path-keyed cache.
   const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, bitmapOpts);
   // No duotone → return the base directly (no second-layer entry). A `null`
   // (unsupported metafile) propagates unchanged.
   if (!duotone || !base) return base;
-  const key = duotoneCacheKey(imagePath, duotone);
+  // Strict and compatibility callers must not share a derived cache entry: a
+  // compatibility pass-through must never make a later strict lookup succeed.
+  const key = `${duotoneCacheKey(imagePath, duotone)}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
   return getCachedDerivedBitmap(
     DUOTONE_CACHE_NAMESPACE,
     key,
     fetchImage,
     async () => {
       const { w, h } = imageNaturalSize(base);
-      if (w <= 0 || h <= 0) return { bitmap: base, owned: false };
+      if (w <= 0 || h <= 0) {
+        return { bitmap: failClosedOnDuotoneFailure ? null : base, owned: false };
+      }
       const recoloured = await applyDuotone(base, duotone, { width: w, height: h, offscreenFactory });
       // `applyDuotone` returns a CanvasImageSource; when the pixel pipeline ran
       // it is a fresh ImageBitmap, otherwise it is the (unchanged) base bitmap.
-      const bitmap = recoloured as ImageBitmap;
+      const bitmap = failClosedOnDuotoneFailure && recoloured === base
+        ? null
+        : recoloured as ImageBitmap;
       return { bitmap, owned: bitmap !== base };
     },
   );

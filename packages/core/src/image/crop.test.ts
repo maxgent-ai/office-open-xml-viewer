@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { cropSourceRect, drawImageCropped, imageNaturalSize, metafileRasterSize } from './crop';
+import {
+  cropSourceRect,
+  drawImageCropped,
+  imageNaturalSize,
+  metafileRasterSize,
+  srcRectHasVisibleArea,
+} from './crop';
 
 /**
  * The shared `<a:srcRect>` crop (ECMA-376 §20.1.8.55) used by the docx, pptx and
@@ -47,10 +53,9 @@ describe('cropSourceRect', () => {
     expect(c!.sw).toBeCloseTo((1 - 0.3256 - 0.03829) * 2860, 3);
     expect(c!.sh).toBe(1368);
   });
-  it('clamps overscan/oversized insets to a ≥1px rect', () => {
-    const c = cropSourceRect(fakeImg(100, 100), { l: 0.9, t: -0.2, r: 0.9, b: 1.5 });
-    expect(c!.sw).toBeGreaterThanOrEqual(1);
-    expect(c!.sh).toBeGreaterThanOrEqual(1);
+  it('intersects a normative negative outset with the actual source bitmap', () => {
+    const c = cropSourceRect(fakeImg(100, 100), { l: -0.5, t: 0, r: 0, b: 0 });
+    expect(c).toEqual({ sx: 0, sy: 0, sw: 100, sh: 100 });
   });
 });
 
@@ -84,6 +89,14 @@ describe('drawImageCropped', () => {
     expect(drawImage.mock.calls[0]).toHaveLength(5);
     expect(drawImage.mock.calls[1]).toHaveLength(5);
   });
+  it('maps a negative left outset to transparent destination space', () => {
+    const { ctx, drawImage } = spyCtx();
+    drawImageCropped(ctx, fakeImg(100, 100), { l: -0.5, t: 0, r: 0, b: 0 }, 10, 20, 150, 90);
+    expect(drawImage.mock.calls[0]).toEqual([
+      expect.anything(), 0, 0, 100, 100,
+      60, 20, 100, 90,
+    ]);
+  });
   it('crops a metafile too — its full-frame raster maps to the same fractions', () => {
     const { ctx, drawImage } = spyCtx();
     // A full-frame EMF raster; crop = sample-13 Fig.2 subfigure (a) insets.
@@ -102,8 +115,8 @@ describe('drawImageCropped', () => {
 describe('metafileRasterSize', () => {
   it('scales a cropped metafile up to its full picture frame', () => {
     const s = metafileRasterSize('image/emf', { l: 0.1, t: 0.2, r: 0.1, b: 0.2 }, 80, 50);
-    expect(s.widthPt).toBeCloseTo(100, 6); // 80 / (1 − 0.1 − 0.1)
-    expect(s.heightPt).toBeCloseTo(83.333, 3); // 50 / (1 − 0.2 − 0.2)
+    expect(s?.widthPt).toBeCloseTo(100, 6); // 80 / (1 − 0.1 − 0.1)
+    expect(s?.heightPt).toBeCloseTo(83.333, 3); // 50 / (1 − 0.2 − 0.2)
   });
   it('passes an uncropped metafile through unchanged', () => {
     expect(metafileRasterSize('image/emf', null, 80, 50)).toEqual({ widthPt: 80, heightPt: 50 });
@@ -114,9 +127,11 @@ describe('metafileRasterSize', () => {
       heightPt: 50,
     });
   });
-  it('guards against a degenerate (≥100%) crop fraction', () => {
-    const s = metafileRasterSize('image/wmf', { l: 0.6, t: 0, r: 0.6, b: 0 }, 80, 50);
-    expect(Number.isFinite(s.widthPt)).toBe(true);
-    expect(s.widthPt).toBeCloseTo(80 / 0.01, 6); // floored to a 1% visible band
+  it('fails closed instead of rasterizing a fully cropped metafile', () => {
+    expect(srcRectHasVisibleArea({ l: 0.6, t: 0, r: 0.6, b: 0 })).toBe(false);
+    expect(metafileRasterSize('image/wmf', { l: 0.6, t: 0, r: 0.6, b: 0 }, 80, 50)).toBeNull();
+    const narrow = metafileRasterSize('image/wmf', { l: 0.499, t: 0, r: 0.5, b: 0 }, 80, 50);
+    expect(narrow?.widthPt).toBeCloseTo(80 / 0.001, 6);
+    expect(narrow?.heightPt).toBe(50);
   });
 });

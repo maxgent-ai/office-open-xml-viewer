@@ -2,6 +2,7 @@ import type { ChartModel } from '../types/chart.js';
 import { drawingmlLineDashArray } from '../draw/dash.js';
 import { resolveFill } from '../shape/paint.js';
 import { EMU_PER_PT } from '../units.js';
+import { strokeChartFrameRect } from './compound-frame.js';
 
 /** Paint the effective DrawingML plot-area frame behind chart geometry.
  *
@@ -42,7 +43,6 @@ export function paintPlotAreaFrame(
     return;
   }
   ctx.strokeStyle = stroke;
-  ctx.lineWidth = lineWidth;
   ctx.setLineDash(drawingmlLineDashArray(
     chart.plotAreaLineCustomDash,
     chart.plotAreaLineDash,
@@ -52,11 +52,8 @@ export function paintPlotAreaFrame(
     ? 'round' : chart.plotAreaLineCap === 'sq' ? 'square' : 'butt';
   ctx.lineJoin = chart.plotAreaLineJoin === 'round' || chart.plotAreaLineJoin === 'bevel'
     ? chart.plotAreaLineJoin : 'miter';
-  ctx.strokeRect(
-    x + lineWidth / 2,
-    y + lineWidth / 2,
-    Math.max(0, w - lineWidth),
-    Math.max(0, h - lineWidth),
+  strokeChartFrameRect(
+    ctx, x, y, w, h, lineWidth, chart.plotAreaLineCompound,
   );
   ctx.restore();
 }

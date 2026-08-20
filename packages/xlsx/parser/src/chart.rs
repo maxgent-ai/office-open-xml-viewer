@@ -391,6 +391,39 @@ fn load_chart_color_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) ->
     )
 }
 
+fn load_chart_image_relationships(
+    archive: &mut crate::XlsxZip,
+    chart_path: &str,
+) -> ooxml_common::chart::ChartImageRelationships {
+    let mut images = ooxml_common::chart::ChartImageRelationships::default();
+    let Some((dir, file)) = chart_path.rsplit_once('/') else {
+        return images;
+    };
+    let rels_path = format!("{dir}/_rels/{file}.rels");
+    let Ok(rels_xml) = read_zip_string(archive, &rels_path) else {
+        return images;
+    };
+    images.insert_part_relationships(
+        ooxml_common::chart::ChartImageSource::Chart,
+        chart_path,
+        &rels_xml,
+    );
+    if let Some(target) =
+        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)
+    {
+        let style_path = resolve_zip_path(dir, &target);
+        let style_rels_path = ooxml_common::rels::relationship_part_path(&style_path);
+        if let Ok(style_rels_xml) = read_zip_string(archive, &style_rels_path) {
+            images.insert_part_relationships(
+                ooxml_common::chart::ChartImageSource::Style,
+                &style_path,
+                &style_rels_xml,
+            );
+        }
+    }
+    images
+}
+
 fn load_chart_sidecar_xml(
     archive: &mut crate::XlsxZip,
     chart_path: &str,
@@ -430,13 +463,35 @@ fn load_chart_user_shapes_xml(
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
 /// its drawing(s) for chart anchors (`<xdr:graphicFrame>` elements).
+#[cfg(test)]
 pub(crate) fn load_sheet_charts(
+    archive: &mut crate::XlsxZip,
+    sheet_path: &str,
+    reference_context: Option<ChartReferenceContext<'_, '_, '_>>,
+    theme_colors: &[String],
+    theme_fonts: (Option<&str>, Option<&str>),
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+) -> Vec<ChartAnchor> {
+    let theme_images = ooxml_common::chart::ChartImageRelationships::default();
+    load_sheet_charts_with_theme_images(
+        archive,
+        sheet_path,
+        reference_context,
+        theme_colors,
+        theme_fonts,
+        theme_format_scheme,
+        &theme_images,
+    )
+}
+
+pub(crate) fn load_sheet_charts_with_theme_images(
     archive: &mut crate::XlsxZip,
     sheet_path: &str,
     mut reference_context: Option<ChartReferenceContext<'_, '_, '_>>,
     theme_colors: &[String],
     theme_fonts: (Option<&str>, Option<&str>),
     theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+    theme_images: &ooxml_common::chart::ChartImageRelationships,
 ) -> Vec<ChartAnchor> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
@@ -656,6 +711,11 @@ pub(crate) fn load_sheet_charts(
                 // legacy `<c:>` charts ignore it (their title size is inline).
                 let style_xml = load_chart_style_xml(archive, &chart_path);
                 let color_style_xml = load_chart_color_style_xml(archive, &chart_path);
+                let image_relationships = load_chart_image_relationships(archive, &chart_path);
+                let image_resolver = ooxml_common::chart::ChartImageResolverChain::new(
+                    &image_relationships,
+                    theme_images,
+                );
                 let user_shapes_xml = if is_chartex {
                     None
                 } else {
@@ -695,35 +755,39 @@ pub(crate) fn load_sheet_charts(
                         visibility_cache: HashMap::new(),
                     };
                     if is_chartex {
-                        ooxml_common::chart::parse_chartex_part_with_references_and_style_parts(
+                        ooxml_common::chart::parse_chartex_part_with_references_style_parts_and_images(
                             chart_doc.root_element(),
                             &resolver,
                             style_xml.as_deref(),
                             color_style_xml.as_deref(),
                             &mut references,
+                            &image_resolver,
                         )
                     } else {
-                        ooxml_common::chart::parse_chart_part_with_references_and_style_parts(
+                        ooxml_common::chart::parse_chart_part_with_references_style_parts_and_images(
                             chart_doc.root_element(),
                             &resolver,
                             style_xml.as_deref(),
                             color_style_xml.as_deref(),
                             &mut references,
+                            &image_resolver,
                         )
                     }
                 } else if is_chartex {
-                    ooxml_common::chart::parse_chartex_part_with_style_parts(
+                    ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
                         chart_doc.root_element(),
                         &resolver,
                         style_xml.as_deref(),
                         color_style_xml.as_deref(),
+                        &image_resolver,
                     )
                 } else {
-                    ooxml_common::chart::parse_chart_part_with_style_parts(
+                    ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
                         chart_doc.root_element(),
                         &resolver,
                         style_xml.as_deref(),
                         color_style_xml.as_deref(),
+                        &image_resolver,
                     )
                 };
                 let Some(mut chart) = chart_opt else {
@@ -1089,6 +1153,19 @@ mod hidden_tests {
             .to_string()
     }
 
+    fn picture_marker_chart_xml() -> String {
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart><c:plotArea><c:lineChart><c:ser>
+    <c:idx val="0"/><c:order val="0"/>
+    <c:marker><c:symbol val="picture"/><c:size val="9"/><c:spPr><a:blipFill>
+      <a:blip r:embed="rIdMarker"/><a:srcRect l="10000"/><a:stretch/>
+    </a:blipFill></c:spPr></c:marker>
+    <c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat>
+    <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>
+  </c:ser></c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#.to_owned()
+    }
+
     fn drawing_xml(hidden_attr: &str) -> String {
         format!(
             r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
@@ -1131,6 +1208,30 @@ mod hidden_tests {
             zw.start_file("xl/charts/chart1.xml", o).unwrap();
             zw.write_all(minimal_chart_xml().as_bytes()).unwrap();
 
+            zw.finish().unwrap();
+        }
+        crate::XlsxZip::new(Cursor::new(buf)).unwrap()
+    }
+
+    fn archive_with_picture_marker() -> crate::XlsxZip {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = SimpleFileOptions::default();
+            zw.start_file("xl/worksheets/_rels/sheet1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/drawings/drawing1.xml", o).unwrap();
+            zw.write_all(drawing_xml("").as_bytes()).unwrap();
+            zw.start_file("xl/drawings/_rels/drawing1.xml.rels", o)
+                .unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#).unwrap();
+            zw.start_file("xl/charts/chart1.xml", o).unwrap();
+            zw.write_all(picture_marker_chart_xml().as_bytes()).unwrap();
+            zw.start_file("xl/charts/_rels/chart1.xml.rels", o).unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/marker.png"/></Relationships>"#).unwrap();
+            zw.start_file("xl/media/marker.png", o).unwrap();
+            zw.write_all(b"png").unwrap();
             zw.finish().unwrap();
         }
         crate::XlsxZip::new(Cursor::new(buf)).unwrap()
@@ -1215,6 +1316,32 @@ mod hidden_tests {
             );
             assert_eq!(charts.len(), 1, "visible chart dropped (attr={attr})");
         }
+    }
+
+    #[test]
+    fn picture_marker_relationship_reaches_the_shared_chart_model() {
+        let mut archive = archive_with_picture_marker();
+        let charts = load_sheet_charts(
+            &mut archive,
+            "worksheets/sheet1.xml",
+            None,
+            &theme(),
+            (None, None),
+            None,
+        );
+        let series = &charts[0].chart.series[0];
+        assert_eq!(series.marker_symbol.as_deref(), Some("picture"));
+        assert!(matches!(
+            series.marker_fill_paint.as_ref(),
+            Some(ooxml_common::chart::ChartStyleFill::Image {
+                image_path,
+                mime_type,
+                src_rect: Some(src_rect),
+                ..
+            }) if image_path == "xl/media/marker.png"
+                && mime_type == "image/png"
+                && (src_rect.l - 0.1).abs() < 1e-9
+        ));
     }
 
     /// ECMA-376 §20.5.2.1 `absoluteAnchor` is the chart-sheet placement form:
@@ -1675,7 +1802,11 @@ mod chartex_tests {
             zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#).unwrap();
 
             zw.start_file("xl/charts/style1.xml", o).unwrap();
-            zw.write_all(br#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint></cs:chartStyle>"#).unwrap();
+            zw.write_all(br#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint><cs:dataPointMarker><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef></cs:dataPointMarker><cs:dataLabelCallout><cs:defRPr><a:noFill/></cs:defRPr><cs:bodyPr/></cs:dataLabelCallout><cs:trendlineLabel><cs:defRPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></cs:defRPr></cs:trendlineLabel></cs:chartStyle>"#).unwrap();
+            zw.start_file("xl/charts/_rels/style1.xml.rels", o).unwrap();
+            zw.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/style-marker.png"/></Relationships>"#).unwrap();
+            zw.start_file("xl/media/style-marker.png", o).unwrap();
+            zw.write_all(b"png").unwrap();
 
             zw.start_file("xl/charts/colors1.xml", o).unwrap();
             zw.write_all(br#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#).unwrap();
@@ -1725,13 +1856,22 @@ mod chartex_tests {
     #[test]
     fn chartex_graphicframe_parses_through_parse_chartex_part() {
         let mut archive = archive_with_chartex_chart();
-        let charts = load_sheet_charts(
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:themeElements><a:fmtScheme name="Theme"><a:fillStyleLst><a:blipFill><a:blip r:embed="rIdThemeMarker"/><a:stretch/></a:blipFill></a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#;
+        let theme_scheme = ooxml_common::theme::ThemeFormatScheme::parse(theme_xml);
+        let mut theme_images = ooxml_common::chart::ChartImageRelationships::default();
+        theme_images.insert_part_relationships(
+            ooxml_common::chart::ChartImageSource::Theme,
+            "xl/theme/theme1.xml",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdThemeMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/theme-marker.png"/></Relationships>"#,
+        );
+        let charts = load_sheet_charts_with_theme_images(
             &mut archive,
             "worksheets/sheet1.xml",
             None,
             &theme(),
             (None, None),
-            None,
+            Some(&theme_scheme),
+            &theme_images,
         );
         assert_eq!(
             charts.len(),
@@ -1758,6 +1898,22 @@ mod chartex_tests {
                 .and_then(Option::as_ref),
             Some(ooxml_common::chart::ChartStyleFill::Pattern { fg, bg, preset })
                 if fg == "336699" && bg == "FFFFFF" && preset == "diagCross"
+        ));
+        let roles = chart.chart_style_roles.as_ref().expect("linked role table");
+        assert_eq!(roles["dataLabelCallout"].font_hidden, Some(true));
+        assert_eq!(roles["dataLabelCallout"].text_body_authored, Some(true));
+        assert_eq!(
+            roles["trendlineLabel"].font_color.as_deref(),
+            Some("112233")
+        );
+        assert!(matches!(
+            roles["dataPointMarker"]
+                .fill_paints
+                .as_ref()
+                .and_then(|paints| paints.first())
+                .and_then(Option::as_ref),
+            Some(ooxml_common::chart::ChartStyleFill::Image { image_path, .. })
+                if image_path == "xl/media/theme-marker.png"
         ));
     }
 

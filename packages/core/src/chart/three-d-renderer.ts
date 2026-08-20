@@ -8,6 +8,7 @@ import type {
   ChartSeries,
 } from '../types/chart.js';
 import type { Fill } from '../types/common.js';
+import { paintChartImageFill } from './image-fill.js';
 import {
   effectiveMarkerSymbol,
   hasVisiblePointMarkerOverride,
@@ -15,7 +16,9 @@ import {
   markerFillPaintFor,
   seriesMarkerFillColor,
   seriesMarkerFillPaint,
+  seriesHasMarkerDetail,
 } from './marker-style.js';
+import { dataLabelIsDeleted } from './data-label-style.js';
 
 /** Stable bundle-audit marker. Re-exported only by the opt-in package entry so
  * build verification can prove the mesh/camera implementation is absent from
@@ -43,6 +46,16 @@ import { elideToWidth } from './text-elide.js';
 import { fitDataLabelLines, resolveDataLabelPlacement } from './data-label-layout.js';
 import { paintRichDataLabelBlock, resolveRichDataLabelBlock } from './rich-data-label.js';
 import { effectiveDataLabelText } from './data-label-content.js';
+import { mergeChartLabelBoxes, paintChartLabelBox } from './label-box.js';
+import {
+  anchoredDataLabelPoint,
+  dataLabelCanvasTextAlign,
+  dataLabelInsets,
+  effectiveDataLabelTextStyle,
+  fitStyledDataLabelLines,
+  rotatedDataLabelSize,
+  transformDataLabelText,
+} from './data-label-style.js';
 import {
   fitChartThreeDProjectionToPoints,
   planChartThreeDProjection,
@@ -814,6 +827,7 @@ function paintThreeDMarker(
   lineWidth: number,
   fillPaint: Fill | null | undefined = undefined,
   shapeRotationDeg = 0,
+  ptToPx = PT_TO_PX,
 ): void {
   if (!(size > 0) || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
   const radius = size / 2;
@@ -836,16 +850,7 @@ function paintThreeDMarker(
       ctx.closePath();
       break;
     case 'x':
-    case 'plus':
-    case 'dash': {
-      if (symbol === 'dash') {
-        ctx.moveTo(point.x - radius, point.y);
-        ctx.lineTo(point.x + radius, point.y);
-        ctx.strokeStyle = line;
-        ctx.lineWidth = lineWidth;
-        ctx.stroke();
-        return;
-      }
+    case 'plus': {
       const diagonal = symbol === 'x';
       ctx.moveTo(point.x - radius, point.y + (diagonal ? -radius : 0));
       ctx.lineTo(point.x + radius, point.y + (diagonal ? radius : 0));
@@ -856,6 +861,11 @@ function paintThreeDMarker(
       ctx.stroke();
       return;
     }
+    case 'dash':
+      // ECMA-376 ST_MarkerStyle `dash` is the same filled short rectangle in
+      // the 2-D and optional 3-D paths; unlike x/plus it consumes fill paint.
+      ctx.rect(point.x - radius, point.y - size * 0.1, size, size * 0.2);
+      break;
     case 'star': {
       for (let index = 0; index < 10; index++) {
         const angle = -Math.PI / 2 + index * Math.PI / 5;
@@ -868,17 +878,27 @@ function paintThreeDMarker(
       break;
     }
     case 'dot':
-      ctx.arc(point.x, point.y, Math.max(1, radius * 0.35), 0, Math.PI * 2);
+      // ECMA-376 §21.2.3.27: width=1/2 and height=1/5 of marker size.
+      ctx.ellipse(point.x, point.y, size * 0.25, size * 0.1, 0, 0, Math.PI * 2);
       break;
-    case 'picture':
-      // The chart model has no embedded marker image carrier. Failing closed
-      // is preferable to fabricating a circle with unrelated semantics.
+    case 'picture': {
+      if (fillPaint?.fillType === 'image') {
+        paintChartImageFill(
+          ctx, fillPaint, point.x - radius, point.y - radius, size, size, ptToPx,
+          shapeRotationDeg,
+        );
+      }
+      ctx.strokeStyle = line;
+      ctx.lineWidth = lineWidth;
+      ctx.strokeRect(point.x - radius, point.y - radius, size, size);
       return;
+    }
     default:
       ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
       break;
   }
-  const resolved = fillPaint === undefined
+  const imageFill = fillPaint?.fillType === 'image' ? fillPaint : undefined;
+  const resolved = imageFill ? null : fillPaint === undefined
     ? (fill === 'transparent' ? null : fill)
     : fillPaint == null
       ? null
@@ -888,6 +908,14 @@ function paintThreeDMarker(
   if (resolved != null) {
     ctx.fillStyle = resolved;
     ctx.fill();
+  } else if (imageFill) {
+    ctx.save();
+    ctx.clip();
+    paintChartImageFill(
+      ctx, imageFill, point.x - radius, point.y - radius, size, size, ptToPx,
+      shapeRotationDeg,
+    );
+    ctx.restore();
   }
   ctx.strokeStyle = line;
   ctx.lineWidth = lineWidth;
@@ -913,17 +941,18 @@ function drawThreeDDataLabel(
   valueDisplayUnits?: ChartDisplayUnits | null,
   axisMaximum?: number,
   plottedValueForAxis = value,
+  shapeRotationDeg = 0,
 ): void {
   // Callers resolve indexed overrides through their per-series Map before the
   // paint loop. Falling back to Array.find here would quietly reintroduce
   // quadratic work for a fully-authored maximum-size public model.
   const override = resolvedOverride;
-  if (override?.deleted) return;
+  const defaults = series.seriesDataLabels;
+  if (dataLabelIsDeleted(defaults, override)) return;
   if (chart.showDataLabelsOverMax !== true
     && axisMaximum != null
     && Number.isFinite(axisMaximum)
     && plottedValueForAxis > axisMaximum) return;
-  const defaults = series.seriesDataLabels;
   const showVal = override?.showVal ?? defaults?.showVal ?? chart.showDataLabels;
   const showCat = override?.showCatName ?? defaults?.showCatName ?? false;
   const showSeries = override?.showSerName ?? defaults?.showSerName ?? false;
@@ -954,10 +983,11 @@ function drawThreeDDataLabel(
     ptToPx,
   ) ?? 9 * ptToPx;
   const bold = override?.fontBold ?? defaults?.fontBold ?? chart.dataLabelFontBold ?? false;
+  const textStyle = effectiveDataLabelTextStyle(override, defaults);
   const fallbackFamily = chartFontFamily(
     chart, override?.fontFace ?? defaults?.fontFace ?? chart.dataLabelFontFace,
   );
-  ctx.font = `${bold ? 'bold ' : ''}${fontPx}px ${fallbackFamily}`;
+  ctx.font = `${textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${fontPx}px ${fallbackFamily}`;
   const fallbackColor = `#${override?.fontColor ?? defaults?.fontColor
     ?? series.labelColor ?? chart.dataLabelFontColor ?? '111111'}`;
   const rich = explicitText && override?.richRuns?.length
@@ -966,19 +996,31 @@ function drawThreeDDataLabel(
       ptToPx,
       fontFamily: fallbackFamily,
       fallbackBold: bold,
+      fallbackItalic: textStyle.fontItalic,
+      fallbackBaseline: textStyle.fontBaseline,
+      fallbackColorHidden: textStyle.fontPaintAuthored === true
+        && (textStyle.fontHidden === true || textStyle.fontColor == null),
       fontFamilyForFace: face => chartFontFamily(chart, face),
     }, fontPx, fallbackColor)
     : null;
-  const lines = rich ? [] : fitDataLabelLines(
+  const lines = rich ? [] : fitStyledDataLabelLines(
     text,
     Math.max(fontPx, bounds.w * 0.45),
     Math.max(fontPx * 1.2, bounds.h * 0.35),
     fontPx * 1.2,
     value => ctx.measureText(value).width,
+    textStyle,
   );
   if (!rich && !lines.length) return;
   const textWidth = rich?.width ?? Math.max(...lines.map(line => ctx.measureText(line).width));
   const textHeight = rich?.height ?? lines.length * fontPx * 1.2;
+  const insets = dataLabelInsets(textStyle, ptToPx);
+  const rotated = rotatedDataLabelSize(
+    textWidth + insets.left + insets.right,
+    textHeight + insets.top + insets.bottom,
+    textStyle.textRotation,
+    textStyle.textVerticalMode,
+  );
   const placement = resolveDataLabelPlacement(
     {
       kind: 'point', x: anchor.x, y: anchor.y,
@@ -986,13 +1028,13 @@ function drawThreeDDataLabel(
       markerGap,
     },
     bounds,
-    { w: textWidth, h: textHeight },
+    { w: rotated.w, h: rotated.h },
     fontPx,
     override?.manualLayout,
     bounds,
   );
   if (!placement) return;
-  const labelBox = override?.labelBox ?? defaults?.labelBox;
+  const labelBox = mergeChartLabelBoxes(override?.labelBox, defaults?.labelBox);
   if (defaults?.showLeaderLines && defaults.leaderLineHidden !== true && leaderLineEligible) {
     ctx.beginPath();
     ctx.moveTo(leaderAnchor.x, leaderAnchor.y);
@@ -1007,36 +1049,41 @@ function drawThreeDDataLabel(
     ctx.setLineDash(pptxPresetDashArray(defaults.leaderLineDash ?? 'solid', ctx.lineWidth));
     ctx.stroke();
   }
-  if (labelBox) {
-    if (labelBox.fill) {
-      ctx.fillStyle = `#${labelBox.fill}`;
-      ctx.fillRect(placement.rect.x, placement.rect.y, placement.rect.w, placement.rect.h);
-    }
-    if (labelBox.borderColor) {
-      ctx.strokeStyle = `#${labelBox.borderColor}`;
-      ctx.lineWidth = labelBox.borderWidthEmu != null
-        ? Math.max(0.25, labelBox.borderWidthEmu / EMU_PER_PT * ptToPx)
-        : 0.75 * ptToPx;
-      ctx.strokeRect(placement.rect.x, placement.rect.y, placement.rect.w, placement.rect.h);
-    }
-  }
+  paintChartLabelBox(ctx, labelBox, placement.rect, ptToPx, shapeRotationDeg);
   ctx.save();
   ctx.beginPath();
   ctx.rect(placement.clip.x, placement.clip.y, placement.clip.w, placement.clip.h);
   ctx.clip();
+  const paintAlign = dataLabelCanvasTextAlign(textStyle, placement.textAlign);
+  const anchored = anchoredDataLabelPoint(
+    placement.x, placement.y, placement.rect,
+    textHeight + insets.top + insets.bottom, textStyle, override?.manualLayout != null,
+    paintAlign, placement.textAlign,
+    textWidth + insets.left + insets.right, rotated.radians,
+  );
+  const transformed = transformDataLabelText(
+    ctx, anchored.x, anchored.y, rotated.radians, paintAlign,
+    placement.textBaseline, insets,
+  );
   if (rich) {
     paintRichDataLabelBlock(
-      ctx, rich, placement.x, placement.y, placement.textAlign, placement.textBaseline,
+      ctx, rich, transformed.x, transformed.y, paintAlign, placement.textBaseline,
+      override?.manualLayout
+        ? Math.max(0, placement.rect.w - insets.left - insets.right) : rich.width,
     );
     ctx.restore();
     return;
   }
-  ctx.fillStyle = fallbackColor;
-  ctx.textAlign = placement.textAlign;
-  ctx.textBaseline = 'middle';
-  const lineHeight = fontPx * 1.2;
-  const firstY = placement.y - (lines.length - 1) * lineHeight / 2;
-  lines.forEach((line, index) => ctx.fillText(line, placement.x, firstY + index * lineHeight));
+  if (!(textStyle.fontPaintAuthored === true
+    && (textStyle.fontHidden === true || textStyle.fontColor == null))) {
+    ctx.fillStyle = fallbackColor;
+    ctx.textAlign = paintAlign;
+    ctx.textBaseline = 'middle';
+    const lineHeight = fontPx * 1.2;
+    const baselineShift = (textStyle.fontBaseline ?? 0) * fontPx;
+    const firstY = transformed.y - (lines.length - 1) * lineHeight / 2 - baselineShift;
+    lines.forEach((line, index) => ctx.fillText(line, transformed.x, firstY + index * lineHeight));
+  }
   ctx.restore();
 }
 
@@ -1045,9 +1092,9 @@ function wantsThreeDDataLabel(
   series: ChartSeries,
   override: ChartDataLabelOverride | undefined,
 ): boolean {
-  if (override?.deleted) return false;
-  if (override?.text) return true;
   const defaults = series.seriesDataLabels;
+  if (dataLabelIsDeleted(defaults, override)) return false;
+  if (override?.text) return true;
   return (override?.showVal ?? defaults?.showVal ?? chart.showDataLabels)
     || (override?.showCatName ?? defaults?.showCatName ?? false)
     || (override?.showSerName ?? defaults?.showSerName ?? false)
@@ -1419,6 +1466,7 @@ function paintThreeDLineLegendKey(
     markerLineWidth,
     seriesMarkerFillPaint(series),
     shapeRotationDeg,
+    ptToPx,
   );
 }
 
@@ -2557,6 +2605,7 @@ function renderCartesian(
           ctx, chart, series, item.seriesIndex, item.categoryIndex,
           item.labelValue, anchor, rect, ptToPx, 0, undefined, labelOverride,
           't', anchor, true, chart.valAxisDisplayUnits, axis.max, item.plottedLabelValue,
+          shapeRotationDeg,
         ));
       }
     }
@@ -3011,8 +3060,10 @@ function renderCartesian(
           );
         }
       }
-      const seriesMarkersVisible = series.showMarker === true && series.markerSymbol !== 'none';
-      if (chart.chartType.toLowerCase().includes('line')
+      const seriesMarkersVisible = (areaFamily
+        ? series.showMarker === true || seriesHasMarkerDetail(series)
+        : series.showMarker === true) && series.markerSymbol !== 'none';
+      if ((chart.chartType.toLowerCase().includes('line') || areaFamily)
         && (seriesMarkersVisible || hasVisiblePointMarkerOverride(series))) {
         for (let categoryIndex = 0; categoryIndex < points.length; categoryIndex++) {
           const point = points[categoryIndex];
@@ -3041,7 +3092,7 @@ function renderCartesian(
               ctx, point, symbol, Math.max(2, sizePt) * ptToPx,
               markerFill === '00000000' ? 'transparent' : `#${markerFill}`,
               `#${markerLine}`, markerLineWidth,
-              markerFillPaint, shapeRotationDeg,
+              markerFillPaint, shapeRotationDeg, ptToPx,
             ));
         }
       }
@@ -3064,6 +3115,7 @@ function renderCartesian(
             labelOverride,
             't', point, true, chart.valAxisDisplayUnits, axis.max,
             stacked ? stackedUpper[seriesIndex][categoryIndex] : sourceValue,
+            shapeRotationDeg,
           ));
         }
       }
@@ -3596,6 +3648,7 @@ function renderPie(
         ctx, chart, series, 0, slice.index, slice.value, label, plot, ptToPx,
         0, slice.percentValue, labelOverride, 'ctr', leader,
         labelOutside,
+        undefined, undefined, undefined, shapeRotationDeg,
       ));
     }
   }

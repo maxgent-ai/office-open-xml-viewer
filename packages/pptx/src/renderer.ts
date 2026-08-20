@@ -80,12 +80,15 @@ import {
   getCachedDecodedBitmap,
   getCachedDerivedBitmap,
   getCachedDuotoneBitmapByPath,
+  chartImageFillKey,
+  collectChartMarkerImageFills,
+  collectChartMarkerImageFillsForCharts,
   acquireBitmapCacheLease,
   peekCachedBitmapByPath,
   dropDecodedBitmapCache,
   decodeRasterOrMetafile,
   preferVectorBlip,
-  cropSourceRect,
+  drawImageCropped,
   metafileRasterSize,
   isOoxmlDecodedImageLimitError,
   highlightBox,
@@ -1757,8 +1760,10 @@ function paintTiledBackground(
   scale: number,
 ): void {
   // Native tile size in slide px: image px → EMU @96dpi → × sx/sy → × scale.
-  const tileW = bitmap.width * EMU_PER_PX_96 * tile.sx * scale;
-  const tileH = bitmap.height * EMU_PER_PX_96 * tile.sy * scale;
+  // Established shape compatibility defaults remain local to the PPTX shape
+  // renderer; the shared model preserves absence for spec-first chart paint.
+  const tileW = bitmap.width * EMU_PER_PX_96 * (tile.sx ?? 1) * scale;
+  const tileH = bitmap.height * EMU_PER_PX_96 * (tile.sy ?? 1) * scale;
   if (!(tileW > 0) || !(tileH > 0)) return;
 
   const flipX = tile.flip === 'x' || tile.flip === 'xy';
@@ -1795,8 +1800,8 @@ function paintTiledBackground(
   // itself declares no schema default, so keep this host observation here rather
   // than normalizing it in the shared OOXML parser.
   const { ax, ay } = tileAnchorOffset(tile.algn ?? 'tl', canvasW, canvasH, tileW, tileH);
-  const px = ax + emuToPx(tile.tx, scale);
-  const py = ay + emuToPx(tile.ty, scale);
+  const px = ax + emuToPx(tile.tx ?? 0, scale);
+  const py = ay + emuToPx(tile.ty ?? 0, scale);
   // `setTransform` exists where DOMMatrix is available (browser + skia-canvas).
   // The translate aligns a cell origin with (px, py); `repeat` covers the box.
   if (typeof pattern.setTransform === 'function' && typeof DOMMatrix !== 'undefined') {
@@ -5129,12 +5134,14 @@ async function renderPicture(
     // and uncropped on a slide only the first decode's raster size is kept — that
     // affects raster SHARPNESS only; the crop fraction itself is applied per
     // element from el.srcRect at draw time, so geometry stays correct either way.
-    const { widthPt, heightPt } = metafileRasterSize(
+    const rasterSize = metafileRasterSize(
       el.mimeType,
       el.srcRect,
       el.width / PT_TO_EMU,
       el.height / PT_TO_EMU,
     );
+    if (!rasterSize) return;
+    const { widthPt, heightPt } = rasterSize;
     // `null` is reachable when the raster path resolves to an unsupported
     // metafile (a true EMF, or a WMF with no geometry); guarded below.
     let bitmap: ImageBitmap | HTMLImageElement | null;
@@ -5193,8 +5200,6 @@ async function renderPicture(
     // share identical crop coordinates. Applies to raster blips AND metafiles
     // alike: a cropped metafile was rasterized at its full picture frame above
     // (`metafileRasterSize`), so its bitmap maps to the same fractional source.
-    const crop = cropSourceRect(bitmap, el.srcRect);
-
     // Trace the picture's clip silhouette (roundRect / custGeom / plain rect).
     // Shared by the clip and the border / contour strokes so the outline always
     // hugs the exact silhouette the bitmap is trimmed to. ECMA-376 §20.1.9.8:
@@ -5357,11 +5362,7 @@ async function renderPicture(
     ): void => {
       target.save();
       applyClipAt(target, ox, oy, ow, oh);
-      if (crop) {
-        target.drawImage(bitmap, crop.sx, crop.sy, crop.sw, crop.sh, ox, oy, ow, oh);
-      } else {
-        target.drawImage(bitmap, ox, oy, ow, oh);
-      }
+      drawImageCropped(target, bitmap, el.srcRect, ox, oy, ow, oh);
       target.restore();
     };
 
@@ -6405,6 +6406,7 @@ async function renderSlideLeased(
           p.width / PT_TO_EMU,
           p.height / PT_TO_EMU,
         );
+        if (!warm) continue;
         // Warm through the duotone cache so a §20.1.8.23 recolour picture warms
         // its recoloured variant (keyed by path + colours); no duotone ⇒ this is
         // the plain base-bitmap warm, byte-identical to before.
@@ -6421,7 +6423,9 @@ async function renderSlideLeased(
     }
   }
 
-  // Picture bullets (`<a:buBlip>`, §21.1.2.4.2) are drawn inside the SYNCHRONOUS
+  const chartMarkerImages = new Map<string, CanvasImageSource | null>();
+  // Picture bullets (`<a:buBlip>`, §21.1.2.4.2) and chart picture markers are
+  // drawn inside synchronous layout/paint paths. Decode both before drawing.
   // text-body layout, which can't await a decode. Resolve every bullet image up
   // front (deduped by path via getCachedBitmapByPath) and await them so the draw
   // loop's peekCachedBitmapByPath finds a settled bitmap. Missing/failed decodes resolve to
@@ -6429,6 +6433,15 @@ async function renderSlideLeased(
   if (opts.fetchImage) {
     const fetchImage = opts.fetchImage;
     const bulletPaths = new Set<string>();
+    const chartFillMap = new Map<string, ReturnType<typeof collectChartMarkerImageFills>[number]>();
+    for (const fill of collectChartMarkerImageFillsForCharts(
+      slide.elements
+        .filter((element): element is ChartElement => element.type === 'chart')
+        .map(element => element.chart),
+    )) {
+      const key = chartImageFillKey(fill);
+      if (!chartFillMap.has(key)) chartFillMap.set(key, fill);
+    }
     for (const el of slide.elements) {
       if (el.type !== 'shape' || !el.textBody) continue;
       for (const para of el.textBody.paragraphs) {
@@ -6436,16 +6449,48 @@ async function renderSlideLeased(
         if (b.type === 'blip') bulletPaths.add(`${b.imagePath} ${b.mimeType}`);
       }
     }
-    if (bulletPaths.size > 0) {
-      await Promise.all(
-        [...bulletPaths].map((key) => {
+    if (bulletPaths.size > 0 || chartFillMap.size > 0) {
+      const bulletPromises: Promise<unknown>[] = [...bulletPaths].map((key) => {
           const [path, mime] = key.split(' ');
           return getCachedBitmapByPath(path, mime, fetchImage).catch((error) => {
             if (isOoxmlDecodedImageLimitError(error)) throw error;
             return undefined;
           });
-        }),
-      );
+        });
+      const chartPromises: Promise<unknown>[] = [...chartFillMap].map(async ([key, fill]) => {
+          try {
+            const raster = metafileRasterSize(fill.mimeType, fill.srcRect, 72, 72);
+            if (!raster) {
+              chartMarkerImages.set(key, null);
+              return;
+            }
+            const decodeFallback = () => fill.mimeType === 'image/svg+xml'
+              ? fill.duotone ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage)
+              : getCachedDuotoneBitmapByPath(
+                  fill.imagePath, fill.mimeType, fill.duotone, fetchImage,
+                  {
+                    widthPt: raster.widthPt,
+                    heightPt: raster.heightPt,
+                    failClosedOnDuotoneFailure: true,
+                  },
+                );
+            let bitmap: CanvasImageSource | null;
+            if (!fill.duotone && preferVectorBlip(fill)) {
+              try {
+                bitmap = await getCachedSvgImageByPath(fill.svgImagePath, fetchImage);
+              } catch {
+                bitmap = await decodeFallback();
+              }
+            } else {
+              bitmap = await decodeFallback();
+            }
+            chartMarkerImages.set(key, bitmap);
+          } catch (error) {
+            if (isOoxmlDecodedImageLimitError(error)) throw error;
+            chartMarkerImages.set(key, null);
+          }
+        });
+      await Promise.all([...bulletPromises, ...chartPromises]);
       if (superseded()) return canvas;
     }
   }
@@ -6498,6 +6543,9 @@ async function renderSlideLeased(
         el.rotation,
         opts.threeD,
         opts.regionMap,
+        fill => chartMarkerImages.get(
+          chartImageFillKey(fill),
+        ),
       );
       ctx.restore();
     }

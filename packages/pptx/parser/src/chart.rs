@@ -75,6 +75,7 @@ pub(crate) fn parse_legacy_chart_with_user_shapes(
     parse_legacy_chart_with_style_parts(xml, None, None, user_shapes_xml, theme, None)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_legacy_chart_with_style_parts(
     xml: &str,
     style_xml: Option<&str>,
@@ -82,6 +83,27 @@ pub(crate) fn parse_legacy_chart_with_style_parts(
     user_shapes_xml: Option<&str>,
     theme: &HashMap<String, String>,
     theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+) -> Option<ChartElement> {
+    let images = ooxml_common::chart::ChartImageRelationships::default();
+    parse_legacy_chart_with_style_parts_and_images(
+        xml,
+        style_xml,
+        color_style_xml,
+        user_shapes_xml,
+        theme,
+        theme_format_scheme,
+        &images,
+    )
+}
+
+pub(crate) fn parse_legacy_chart_with_style_parts_and_images(
+    xml: &str,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+    user_shapes_xml: Option<&str>,
+    theme: &HashMap<String, String>,
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+    image_resolver: &dyn ooxml_common::chart::ChartImageResolver,
 ) -> Option<ChartElement> {
     let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
@@ -91,11 +113,12 @@ pub(crate) fn parse_legacy_chart_with_style_parts(
     };
     let style_xml = style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
     let color_style_xml = color_style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
-    let mut chart = ooxml_common::chart::parse_chart_part_with_style_parts(
+    let mut chart = ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
         root,
         &resolver,
         style_xml,
         color_style_xml,
+        image_resolver,
     )?;
     if let Some(user_shapes_xml) = user_shapes_xml {
         if let Ok(user_shapes_doc) = parse_preflighted_pptx_xml(user_shapes_xml) {
@@ -129,12 +152,32 @@ pub(crate) fn parse_legacy_chart_with_style_parts(
 /// wraps the resulting [`ChartModel`] in a pptx [`ChartElement`] graphic frame.
 /// The frame geometry (`x`/`y`/`width`/`height`) is filled in by the caller
 /// from the slide's `<p:graphicFrame><a:xfrm>`; here it defaults to 0.
+#[cfg(test)]
 pub(crate) fn parse_chartex(
     xml: &str,
     style_xml: Option<&str>,
     color_style_xml: Option<&str>,
     theme: &HashMap<String, String>,
     theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+) -> Option<ChartElement> {
+    let images = ooxml_common::chart::ChartImageRelationships::default();
+    parse_chartex_with_images(
+        xml,
+        style_xml,
+        color_style_xml,
+        theme,
+        theme_format_scheme,
+        &images,
+    )
+}
+
+pub(crate) fn parse_chartex_with_images(
+    xml: &str,
+    style_xml: Option<&str>,
+    color_style_xml: Option<&str>,
+    theme: &HashMap<String, String>,
+    theme_format_scheme: Option<&ooxml_common::theme::ThemeFormatScheme>,
+    image_resolver: &dyn ooxml_common::chart::ChartImageResolver,
 ) -> Option<ChartElement> {
     let doc = parse_preflighted_pptx_xml(xml).ok()?;
     let root = doc.root_element();
@@ -149,11 +192,12 @@ pub(crate) fn parse_chartex(
     let color_style_xml = color_style_xml.filter(|style| parse_preflighted_pptx_xml(style).is_ok());
     // chartEx (waterfall/boxWhisker/…) reads its title font size from the
     // associated chartStyle part when the `<cx:title>` itself carries none.
-    let chart = ooxml_common::chart::parse_chartex_part_with_style_parts(
+    let chart = ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
         root,
         &resolver,
         style_xml,
         color_style_xml,
+        image_resolver,
     )?;
     Some(ChartElement {
         x: 0,

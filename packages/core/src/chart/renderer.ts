@@ -3,18 +3,44 @@
 // scatter, waterfall). Ported from the xlsx implementation with pptx
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
-import type { ChartDataLabelOverride, ChartDecorationLineStyle, ChartDisplayUnits, ChartLegendEntryOverride, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartStockUpDownBarStyle, ChartStyleRole, ChartTextBox, ChartTextRun, ChartTrendline, SecondaryValueAxis } from '../types/chart';
+import type { ChartDataLabelOverride, ChartDecorationLineStyle, ChartDisplayUnits, ChartLabelBox, ChartLegendEntryOverride, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartStockUpDownBarStyle, ChartStyleRole, ChartTextBox, ChartTextRun, ChartTrendline, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
 import {
+  chartImageFillPaintWorkUpperBound,
+  paintChartImageFill,
+  type ChartImageLookup,
+  withChartImageLookup,
+} from './image-fill.js';
+import { mergeChartLabelBoxes, paintChartLabelBox } from './label-box.js';
+import { strokeChartFrameRect } from './compound-frame.js';
+import {
+  anchoredDataLabelPoint,
+  dataLabelCanvasTextAlign,
+  dataLabelIsDeleted,
+  dataLabelInsets,
+  effectiveDataLabelTextStyle,
+  fitStyledDataLabelLines,
+  rotatedDataLabelSize,
+  transformDataLabelText,
+  type DataLabelTextStyle,
+} from './data-label-style.js';
+import {
+  classicMarkerPointIsPainted,
+  chartDataTableFamilyIsPainted,
+  dataLabelLegendKeyCount,
+  deletedLegendEntryIndices,
   effectiveMarkerSymbol,
   hasVisiblePointMarkerOverride,
   markersSuppressedByChartStyle,
   markerFillColorFor,
   markerFillPaintFor,
   markerPaintComponents,
+  markerSymbolConsumesFill,
+  pointHasMarkerDetail,
   seriesMarkerFillColor,
   seriesMarkerFillPaint,
   seriesLegendMarkerIsVisible,
+  seriesHasMarkerDetail,
 } from './marker-style.js';
 import {
   AXIS_OUTER_TEXT_MARGIN_PT,
@@ -73,6 +99,12 @@ import {
 import { planParetoLayout } from './pareto-layout.js';
 import { planDateCategoryAxis } from './date-axis.js';
 import {
+  classicCanvasPointCount,
+  classicCanvasPointFamilyIsPainted,
+  MAX_CANVAS_CHART_POINTS,
+  sourceChartStructureCount,
+} from './resource-limits.js';
+import {
   THREE_D_MAX_SHAPE_FACES_PER_DATUM,
   type ChartThreeDRenderer,
 } from './three-d-contract.js';
@@ -90,7 +122,6 @@ import { paintPlotAreaFrame } from './plot-area-frame.js';
 import { applyPlotVisibleOnly } from './source-visibility.js';
 import {
   boundDataLabelText,
-  fitDataLabelLines,
   resolveDataLabelPlacement,
   type DataLabelAnchor,
   type DataLabelRect,
@@ -412,7 +443,7 @@ type ChartDataTableLayout = {
  * Keeping this gate beside the shared layout prevents family renderers from
  * inventing different applicability rules. */
 function chartHasDataTable(chart: ChartModel): boolean {
-  return chart.dataTable != null && chart.chartType !== 'scatter';
+  return chart.dataTable != null && chartDataTableFamilyIsPainted(chart.chartType);
 }
 
 function chartDataTableRows(chart: ChartModel): Array<{ series: ChartSeries; sourceIndex: number }> {
@@ -538,6 +569,10 @@ function drawChartDataTable(
     chart.scatterStyle,
     false,
     chart.categories,
+    [],
+    true,
+    [],
+    chart.radarStyle,
   );
   ctx.beginPath();
   ctx.rect(tableX, tableY, tableWidth, layout.totalHeight);
@@ -694,6 +729,7 @@ function scatterSeriesDrawsLine(
 function legendMarkerFor(
   chartType: string | undefined,
   scatterStyle: string | null | undefined,
+  radarStyle: string | null | undefined,
   series: ChartSeries[],
   entryIndex: number,
 ): LegendMarker | null {
@@ -702,10 +738,10 @@ function legendMarkerFor(
   const family = s.seriesType ?? chartType;
   const isStock = family === 'stock';
   const isLineFamily = family === 'line' || family === 'stackedLine' ||
-    family === 'stackedLinePct' || isStock;
+    family === 'stackedLinePct' || family === 'radar' || isStock;
   const isScatter = family === 'scatter';
   if (!isLineFamily && !isScatter) return null;
-  if (!seriesLegendMarkerIsVisible(chartType, scatterStyle, s)) return null;
+  if (!seriesLegendMarkerIsVisible(chartType, scatterStyle, s, radarStyle)) return null;
   const symbol = s.markerSymbol ?? (isStock ? 'none' : 'circle');
   const base = chartColor(entryIndex, s); // '#RRGGBB'
   const fill = seriesMarkerFillColor(s, base.replace(/^#/, ''));
@@ -747,7 +783,8 @@ function drawLegendSwatch(
     // Excel's legend marker is about 7pt beside a 12pt label; keeping it near
     // 0.58× the row height also leaves the surrounding key visually balanced.
     drawMarker(
-      ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1,
+      ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58 / ptToPx,
+      marker.fill, marker.line, ptToPx,
       marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
       marker.fillPaint, shapeRotationDeg,
     );
@@ -774,7 +811,8 @@ function drawLegendSwatch(
       ctx.lineWidth = previousWidth;
       if (marker) {
         drawMarker(
-          ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1,
+          ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58 / ptToPx,
+          marker.fill, marker.line, ptToPx,
           marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
           marker.fillPaint, shapeRotationDeg,
         );
@@ -798,7 +836,8 @@ function drawLegendSwatch(
     ctx.stroke();
     if (marker) {
       drawMarker(
-        ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58, marker.fill, marker.line, 1,
+        ctx, x + w / 2, y + h / 2, marker.symbol, h * 0.58 / ptToPx,
+        marker.fill, marker.line, ptToPx,
         marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
         marker.fillPaint, shapeRotationDeg,
       );
@@ -889,6 +928,7 @@ function buildLegendEntries(
   fillPaints: ReadonlyArray<Fill | null | undefined> = [],
   pieVaryColors = true,
   entryOverrides: readonly ChartLegendEntryOverride[] = [],
+  radarStyle?: string | null,
 ): LegendEntry[] {
   if (varyByPoint || legendIsCategoryDriven(chartType)) {
     // Category-driven: one entry per data point of the first series, labeled by
@@ -933,7 +973,7 @@ function buildLegendEntries(
     const family = s.seriesType ?? chartType;
     const lineVisible = s.lineHidden !== true;
     const lineColor = lineVisible ? (s.lineColor ?? null) : null;
-    const marker = legendMarkerFor(chartType, scatterStyle, series, i);
+    const marker = legendMarkerFor(chartType, scatterStyle, radarStyle, series, i);
     const swatchStyle: LegendSwatchStyle = family === 'stock' && !lineVisible && !marker
       ? 'none'
       : legendSwatchStyle(family);
@@ -978,6 +1018,8 @@ function createDataLabelLegendKeyResolver(
     chart.categories,
     [],
     chart.varyColors !== false,
+    [],
+    chart.radarStyle,
   );
   return (seriesIndex, pointIndex) => {
     const entry = entries[categoryDriven ? pointIndex : seriesIndex];
@@ -1122,6 +1164,7 @@ function measuredLegendReserve(
     [],
     chart.varyColors !== false,
     chart.legendEntries ?? [],
+    chart.radarStyle,
   );
   const entryStyles = entries.map(entry =>
     legendEntryTextStyle(chart, style, entry.textOverride, ptToPx)
@@ -1182,6 +1225,7 @@ function drawLegend(
     fillPaints,
     pieVaryColors,
     chartForEntryStyles?.legendEntries ?? [],
+    chartForEntryStyles?.radarStyle,
   );
   const canReuseMeasure = measured != null
     && measured.measuredLabels.length === entries.length
@@ -1892,6 +1936,7 @@ interface TrendlineLabelContext {
   plotRect: ChartRect;
   clipLineToPlot?: boolean;
   automaticAnchor?: { x: number; y: number };
+  shapeRotationDeg?: number;
 }
 
 function compactTrendlineNumber(value: number, formatCode?: string | null): string {
@@ -1942,12 +1987,53 @@ function drawTrendlineLabel(
   const italic = tl.labelFontItalic ?? false;
   ctx.font = chartFontCss(fontPx, face, bold, italic);
   const lineHeight = fontPx * 1.2;
-  const naturalWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+  const color = tl.labelFontColor ?? chart.dataLabelFontColor;
+  const rich = tl.labelRichRuns?.length
+      ? resolveRichDataLabelBlock(ctx, {
+        runs: tl.labelRichRuns,
+        ptToPx,
+        fontFamily: face,
+        fallbackBold: bold,
+        fallbackItalic: italic,
+        fallbackBaseline: tl.labelFontBaseline ?? undefined,
+        fallbackColorHidden: tl.labelFontPaintAuthored === true
+          && (tl.labelFontHidden === true || tl.labelFontColor == null),
+        fontFamilyForFace: runFace => chartFontFamily(chart, runFace, 'minor'),
+      }, fontPx, color ? `#${color}` : '#595959')
+    : null;
+  const naturalTextWidth = rich?.width
+    ?? Math.max(...lines.map(line => ctx.measureText(line).width));
+  const textStyle: DataLabelTextStyle = {
+    fontColor: tl.labelFontColor ?? undefined,
+    fontItalic: italic,
+    fontPaintAuthored: tl.labelFontPaintAuthored ?? undefined,
+    fontHidden: tl.labelFontHidden ?? undefined,
+    fontLanguage: tl.labelFontLanguage ?? undefined,
+    fontBaseline: tl.labelFontBaseline ?? undefined,
+    textRotation: tl.labelTextRotation ?? undefined,
+    textWrap: tl.labelTextWrap ?? undefined,
+    textVerticalAnchor: tl.labelTextVerticalAnchor ?? undefined,
+    textVerticalMode: tl.labelTextVerticalMode ?? undefined,
+    textLInsEmu: tl.labelTextLInsEmu ?? undefined,
+    textTInsEmu: tl.labelTextTInsEmu ?? undefined,
+    textRInsEmu: tl.labelTextRInsEmu ?? undefined,
+    textBInsEmu: tl.labelTextBInsEmu ?? undefined,
+    textBodyAuthored: tl.labelTextBodyAuthored ?? undefined,
+  };
+  const insets = dataLabelInsets(textStyle, ptToPx);
+  const naturalWidth = naturalTextWidth + insets.left + insets.right;
+  const naturalHeight = (rich?.height ?? lines.length * lineHeight)
+    + insets.top + insets.bottom;
+  const rotated = rotatedDataLabelSize(
+    naturalWidth, naturalHeight,
+    tl.labelTextRotation ?? undefined,
+    tl.labelTextVerticalMode ?? undefined,
+  );
   const placement = placeTrendlineLabel(
     chartRect,
     plotRect,
-    naturalWidth,
-    lines.length * lineHeight,
+    rotated.w,
+    rotated.h,
     fontPx,
     tl.labelManualLayout,
     labelContext.automaticAnchor,
@@ -1960,32 +2046,100 @@ function drawTrendlineLabel(
     ctx.rect(plotRect.x, plotRect.y, plotRect.w, plotRect.h);
     ctx.clip();
   }
-  if (tl.labelBox?.fill) {
-    ctx.fillStyle = `#${tl.labelBox.fill}`;
-    ctx.fillRect(placement.x, placement.y, placement.w, placement.h);
-  }
-  if (tl.labelBox?.borderColor) {
-    ctx.strokeStyle = `#${tl.labelBox.borderColor}`;
-    ctx.lineWidth = tl.labelBox.borderWidthEmu
-      ? Math.max(0.5, tl.labelBox.borderWidthEmu / EMU_PER_PT * ptToPx)
-      : 1;
-    ctx.strokeRect(placement.x, placement.y, placement.w, placement.h);
-  }
+  const centerX = placement.x + placement.w / 2;
+  const centerY = placement.y + placement.h / 2;
+  const hasTextBody = tl.labelTextBodyAuthored === true
+    || tl.labelTextRotation != null
+    || tl.labelTextWrap != null
+    || tl.labelTextVerticalAnchor != null
+    || tl.labelTextVerticalMode != null
+    || tl.labelTextLInsEmu != null
+    || tl.labelTextTInsEmu != null
+    || tl.labelTextRInsEmu != null
+    || tl.labelTextBInsEmu != null;
+  // `manualLayout` sizes the authored label shape. Automatic labels are sized
+  // from measured text. `bodyPr@rot` rotates text inside that shape, not the
+  // shape paint itself (ECMA-376 §20.1.10.83/§21.2.2.216).
+  const boxRect = placement.automatic
+    ? {
+        x: centerX - naturalWidth / 2,
+        y: centerY - naturalHeight / 2,
+        w: naturalWidth,
+        h: naturalHeight,
+      }
+    : { x: placement.x, y: placement.y, w: placement.w, h: placement.h };
+  const labelBox = effectiveLinkedLabelBox(
+    chart,
+    tl.labelBox,
+    chart.chartStyleRoles?.trendlineLabel,
+    true,
+  );
+  paintChartLabelBox(
+    ctx,
+    labelBox,
+    boxRect,
+    ptToPx,
+    labelContext.shapeRotationDeg ?? 0,
+  );
   const alignment = tl.labelTextAlign;
   ctx.textAlign = alignment === 'r' ? 'right' : alignment === 'ctr' ? 'center' : 'left';
   ctx.textBaseline = 'top';
-  const color = tl.labelFontColor ?? chart.dataLabelFontColor;
   ctx.fillStyle = color ? `#${color}` : '#595959';
-  const textX = ctx.textAlign === 'right'
-    ? placement.x + placement.w
+  const maxTextWidth = Math.max(0, boxRect.w - insets.left - insets.right);
+  const maxTextHeight = Math.max(0, boxRect.h - insets.top - insets.bottom);
+  const displayLines = rich ? [] : hasTextBody
+    ? fitStyledDataLabelLines(
+        lines.join('\n'), maxTextWidth, maxTextHeight, lineHeight,
+        value => ctx.measureText(value).width, textStyle,
+      )
+    : lines;
+  if (!rich && displayLines.length === 0) {
+    ctx.restore();
+    return;
+  }
+  const textX = !hasTextBody
+    ? (ctx.textAlign === 'right'
+      ? placement.x + placement.w
+      : ctx.textAlign === 'center' ? placement.x + placement.w / 2 : placement.x)
+    : ctx.textAlign === 'right'
+    ? boxRect.x + boxRect.w - insets.right
     : ctx.textAlign === 'center'
-      ? placement.x + placement.w / 2
-      : placement.x;
+      ? boxRect.x + (boxRect.w + insets.left - insets.right) / 2
+      : boxRect.x + insets.left;
+  const baselineShift = (tl.labelFontBaseline ?? 0) * fontPx;
+  const textTop = !hasTextBody
+    ? placement.y
+    : tl.labelTextVerticalAnchor === 'b'
+    ? boxRect.y + boxRect.h - insets.bottom - (rich?.height ?? displayLines.length * lineHeight)
+    : tl.labelTextVerticalAnchor === 'ctr'
+      ? boxRect.y
+        + (boxRect.h - (rich?.height ?? displayLines.length * lineHeight)
+          + insets.top - insets.bottom) / 2
+      : boxRect.y + insets.top;
   const completeLines = placement.automatic
-    ? lines.length
-    : Math.min(lines.length, Math.floor(placement.h / lineHeight));
-  for (let index = 0; index < completeLines; index++) {
-    ctx.fillText(elideToWidth(ctx, lines[index], placement.w), textX, placement.y + index * lineHeight);
+    ? displayLines.length
+    : Math.min(displayLines.length, Math.floor(maxTextHeight / lineHeight));
+  if (rotated.radians !== 0) {
+    ctx.translate(centerX, centerY);
+    ctx.rotate(rotated.radians);
+    ctx.translate(-centerX, -centerY);
+  }
+  if (rich) {
+    paintRichDataLabelBlock(
+      ctx, rich, textX, textTop, ctx.textAlign, 'top',
+      Math.max(rich.width, maxTextWidth),
+    );
+  } else if (!(tl.labelFontPaintAuthored === true
+    && (tl.labelFontHidden === true || tl.labelFontColor == null))) {
+    for (let index = 0; index < completeLines; index++) {
+      ctx.fillText(
+        hasTextBody && textStyle.textWrap === 'none'
+          ? displayLines[index]
+          : elideToWidth(ctx, displayLines[index], Math.max(0, maxTextWidth || naturalTextWidth)),
+        textX,
+        textTop + index * lineHeight - baselineShift,
+      );
+    }
   }
   ctx.restore();
 }
@@ -2872,6 +3026,10 @@ function drawBarDataLabel(
   negative = false,
   rich?: RichDataLabelOptions,
   legendKey?: DataLabelLegendKey,
+  textStyle?: DataLabelTextStyle,
+  ptToPx = 1,
+  labelBox?: ChartLabelBox,
+  shapeRotationDeg = 0,
 ): void {
   const rect = orient === 'vertical'
     ? { x: bx, y: by, w: barW, h: barL }
@@ -2887,6 +3045,10 @@ function drawBarDataLabel(
     layoutReferenceRect,
     rich,
     legendKey,
+    textStyle,
+    ptToPx,
+    labelBox,
+    shapeRotationDeg,
   );
 }
 
@@ -3953,7 +4115,7 @@ function renderBarChart(
         if (symbol === 'none') continue;
         const markerX = categoryCenterX(ci);
         const markerY = yOf(value);
-        if (seriesHasMarkerDetail(series)) {
+        if (seriesHasMarkerDetail(series) || pointHasMarkerDetail(point)) {
           const lineWidthEmu = point?.markerLineWidthEmu ?? series.markerLineWidthEmu;
           drawMarker(
             ctx, markerX, markerY, symbol,
@@ -4164,7 +4326,7 @@ function renderBarChart(
           const labelFont = chartFontFamily(
             chart, label.fontFace ?? chart.dataLabelFontFace, 'minor',
           );
-          ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${labelFont}`;
+          ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${lsz}px ${labelFont}`;
           // drawBarDataLabel takes (bx, by, barL=length, barW=thickness). For
           // a vertical column bar, "length" is the bar's height and
           // "thickness" is its horizontal width — pass them in that order.
@@ -4189,10 +4351,15 @@ function renderBarChart(
               ptToPx,
               labelFont,
               bold,
+              label.textStyle,
             ),
             label.showLegendKey
               ? dataLabelLegendKey(sourceSeriesIndices.get(s) ?? si, ci)
               : undefined,
+            label.textStyle,
+            ptToPx,
+            mergeChartLabelBoxes(authoredLabel?.labelBox, seriesLabels?.labelBox),
+            shapeRotationDeg,
           );
         }
       } else {
@@ -4256,7 +4423,7 @@ function renderBarChart(
           const labelFont = chartFontFamily(
             chart, label.fontFace ?? chart.dataLabelFontFace, 'minor',
           );
-          ctx.font = `${bold ? 'bold ' : ''}${lsz}px ${labelFont}`;
+          ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${lsz}px ${labelFont}`;
           drawBarDataLabel(
             ctx, label.text,
             bx, by, barL, barW,
@@ -4274,10 +4441,15 @@ function renderBarChart(
               ptToPx,
               labelFont,
               bold,
+              label.textStyle,
             ),
             label.showLegendKey
               ? dataLabelLegendKey(sourceSeriesIndices.get(s) ?? si, ci)
               : undefined,
+            label.textStyle,
+            ptToPx,
+            mergeChartLabelBoxes(authoredLabel?.labelBox, seriesLabels?.labelBox),
+            shapeRotationDeg,
           );
         }
       }
@@ -4406,7 +4578,10 @@ function renderBarChart(
       isH ? horizontalValueAt : valueAt,
       ptToPx,
       series.values.map((_value, index) => index + 1),
-      { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+      {
+        chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph },
+        shapeRotationDeg,
+      },
       (index, value) => isH
         ? ({
           x: horizontalValueAt(value),
@@ -4685,7 +4860,7 @@ function renderBarChart(
           const point = pointOverrides.get(ci);
           const symbol = effectiveMarkerSymbol(s, point, 'circle', seriesMarkersVisible);
           if (symbol === 'none') continue;
-          if (hasMarkerDetail) {
+          if (hasMarkerDetail || pointHasMarkerDetail(point)) {
             const lineWidthEmu = point?.markerLineWidthEmu ?? s.markerLineWidthEmu;
             drawMarker(
               ctx, lx, ly, symbol,
@@ -4708,7 +4883,10 @@ function renderBarChart(
         ctx, s, color,
         (i) => categoryCenterX(i),
         yOf, ptToPx, undefined,
-        { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+        {
+          chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph },
+          shapeRotationDeg,
+        },
       );
     }
     if (dateAxisPlan) ctx.restore();
@@ -4853,7 +5031,7 @@ function applyDecorationLineStyle(
   style: ChartDecorationLineStyle,
   ptToPx: number,
 ): boolean {
-  if (style.hidden === true) return false;
+  if (style.hidden === true || (style.paintAuthored === true && style.color == null)) return false;
   ctx.strokeStyle = `#${style.color ?? '000000'}`;
   ctx.lineWidth = style.widthEmu != null
     ? axisLineWidthPx(style.widthEmu, ptToPx)
@@ -4871,15 +5049,25 @@ function chartStyleRoleLine(
 ): ChartDecorationLineStyle {
   const linked = chart.chartStyleRoles?.[role];
   const linkedApplies = linked != null && linked.lineNoStyle !== true;
+  const directPaintAuthored = direct.paintAuthored === true
+    || direct.color != null || direct.hidden === true;
+  const linkedPaintAuthored = linkedApplies && (linked.linePaintAuthored === true
+    || linked.lineHidden === true
+    || linked.lineColors?.some(color => color != null) === true
+    || linked.linePaints?.some(paint => paint != null) === true);
   return {
     color: direct.color
-      ?? (linkedApplies ? chartExStyleColor(chart, linked, 'line', 0, 1) : null),
+      ?? (!directPaintAuthored && linkedApplies
+        ? chartExStyleColor(chart, linked, 'line', 0, 1) : null),
+    paintAuthored: directPaintAuthored
+      ? direct.paintAuthored
+      : linkedPaintAuthored ? true : undefined,
     widthEmu: direct.widthEmu ?? (linkedApplies ? linked.lineWidthEmu : null),
     dash: direct.dash ?? (linkedApplies ? linked.lineDash : null),
     cap: direct.cap ?? (linkedApplies ? linked.lineCap : null),
     join: direct.join ?? (linkedApplies ? linked.lineJoin : null),
     hidden: direct.hidden
-      ?? (direct.color == null && linkedApplies && linked.lineHidden === true ? true : null),
+      ?? (!directPaintAuthored && linkedApplies && linked.lineHidden === true ? true : null),
   };
 }
 
@@ -4891,23 +5079,45 @@ function chartStyleRoleBarPaint(
   const linked = chart.chartStyleRoles?.[role];
   const fillApplies = linked != null && linked.fillNoStyle !== true;
   const lineApplies = linked != null && linked.lineNoStyle !== true;
+  const linkedFill = linked?.fillPaints?.[0];
+  const directFillAuthored = direct.fillPaintAuthored === true
+    || direct.fillColor != null || direct.fill != null || direct.fillHidden === true;
+  const directLineAuthored = direct.linePaintAuthored === true
+    || direct.lineColor != null || direct.lineHidden === true;
+  const linkedFillAuthored = fillApplies && (linked.fillPaintAuthored === true
+    || linked.fillHidden === true || linkedFill != null
+    || linked.fillColors?.some(color => color != null) === true);
+  const linkedLineAuthored = lineApplies && (linked.linePaintAuthored === true
+    || linked.lineHidden === true
+    || linked.lineColors?.some(color => color != null) === true
+    || linked.linePaints?.some(paint => paint != null) === true);
   return {
     fillColor: direct.fillColor
-      ?? (fillApplies ? chartExStyleColor(chart, linked, 'fill', 0, 1) : null),
+      ?? (!directFillAuthored && fillApplies
+        ? chartExStyleColor(chart, linked, 'fill', 0, 1) : null),
     fill: direct.fill ?? (
-      direct.fillColor == null && direct.fillHidden !== true && fillApplies
-        ? linked?.fillPaints?.[0] : null
+      !directFillAuthored && fillApplies
+        && linkedFill != null
+        && linkedFill.fillType !== 'image'
+        && linkedFill.fillType !== 'none' ? linkedFill : null
     ),
+    fillPaintAuthored: directFillAuthored
+      ? direct.fillPaintAuthored
+      : linkedFillAuthored ? true : undefined,
     fillHidden: direct.fillHidden
-      ?? (fillApplies && linked.fillHidden === true ? true : null),
+      ?? (!directFillAuthored && fillApplies && linked.fillHidden === true ? true : null),
     lineColor: direct.lineColor
-      ?? (lineApplies ? chartExStyleColor(chart, linked, 'line', 0, 1) : null),
+      ?? (!directLineAuthored && lineApplies
+        ? chartExStyleColor(chart, linked, 'line', 0, 1) : null),
+    linePaintAuthored: directLineAuthored
+      ? direct.linePaintAuthored
+      : linkedLineAuthored ? true : undefined,
     lineWidthEmu: direct.lineWidthEmu ?? (lineApplies ? linked.lineWidthEmu : null),
     lineDash: direct.lineDash ?? (lineApplies ? linked.lineDash : null),
     lineCap: direct.lineCap ?? (lineApplies ? linked.lineCap : null),
     lineJoin: direct.lineJoin ?? (lineApplies ? linked.lineJoin : null),
     lineHidden: direct.lineHidden
-      ?? (lineApplies && linked.lineHidden === true ? true : null),
+      ?? (!directLineAuthored && lineApplies && linked.lineHidden === true ? true : null),
   };
 }
 
@@ -5216,7 +5426,9 @@ function chartStyleRoleMarker(
     : undefined;
   const markerFillPaint = direct.markerFillPaint !== undefined
     ? direct.markerFillPaint
-    : linkedFillPaint?.fillType === 'gradient' || linkedFillPaint?.fillType === 'pattern'
+    : linkedFillPaint?.fillType === 'gradient'
+        || linkedFillPaint?.fillType === 'pattern'
+        || linkedFillPaint?.fillType === 'image'
       ? linkedFillPaint
       : undefined;
   const markerFillPaintAuthored = directFillAuthored
@@ -5305,6 +5517,197 @@ function effectiveFrameLineStyle(
     cap: direct.cap ?? linked.lineCap,
     join: direct.join ?? linked.lineJoin,
     compound: direct.compound ?? linked.lineCompound,
+  };
+}
+
+function effectiveLinkedLabelBox(
+  chart: ChartModel,
+  direct: ChartLabelBox | null | undefined,
+  linked: ChartExStyle | null | undefined,
+  createFromLinked: boolean,
+): ChartLabelBox | undefined {
+  if (!linked || (!direct && !createFromLinked)) return direct ?? undefined;
+  const source = direct ?? {};
+  let fill = source.fill;
+  let fillPaint = source.fillPaint;
+  let fillHidden = source.fillHidden;
+  const directFill = source.fillPaintAuthored === true
+      || fill != null || fillPaint != null || fillHidden === true;
+  if (!directFill && linked.fillNoStyle !== true) {
+    fillHidden = linked.fillHidden;
+    fillPaint = linked.fillHidden === true
+      ? undefined
+      : chartExStyleFillPaint(linked, 0) as ChartLabelBox['fillPaint'];
+    fill = fillPaint == null && linked.fillHidden !== true
+      ? chartExStyleColor(chart, linked, 'fill', 0, 1) ?? undefined
+      : undefined;
+  }
+  const line = effectiveFrameLineStyle(chart, {
+    color: source.borderColor,
+    fill: source.borderFill,
+    widthEmu: source.borderWidthEmu,
+    dash: source.borderDash,
+    dashAuthored: source.borderDashAuthored,
+    customDash: source.borderCustomDash,
+    cap: source.borderCap,
+    join: source.borderJoin,
+    compound: source.borderCompound,
+    hidden: source.borderHidden,
+    paintAuthored: source.borderPaintAuthored,
+  }, linked);
+  return {
+    ...source,
+    fill,
+    fillPaint,
+    fillHidden,
+    borderColor: line.color ?? undefined,
+    borderFill: (line.fill as ChartLabelBox['borderFill']) ?? undefined,
+    borderWidthEmu: line.widthEmu ?? undefined,
+    borderDash: line.dash ?? undefined,
+    borderDashAuthored: line.dashAuthored ?? undefined,
+    borderCustomDash: line.customDash ?? undefined,
+    borderCap: line.cap ?? undefined,
+    borderJoin: line.join ?? undefined,
+    borderCompound: line.compound ?? undefined,
+    borderHidden: line.hidden ?? undefined,
+  };
+}
+
+/** Merge two directly-authored label shapes property-by-property. The higher
+ * precedence shape owns an authored paint/noFill choice even when that choice
+ * cannot be resolved to a Canvas paint; omitted geometry continues to inherit
+ * from the lower-precedence series/linked shape. */
+
+function chartStyleRoleDataLabels(
+  chart: ChartModel,
+  direct: ChartSeriesDataLabels,
+): ChartSeriesDataLabels {
+  const linked = direct.labelBox
+    ? chart.chartStyleRoles?.dataLabelCallout ?? chart.chartStyleRoles?.dataLabel
+    : chart.chartStyleRoles?.dataLabel;
+  if (!linked) return direct;
+  const labelBox = effectiveLinkedLabelBox(chart, direct.labelBox, linked, false);
+  const directFontPaint = direct.fontPaintAuthored === true
+    || direct.fontColor != null || direct.fontHidden === true;
+  return {
+    ...direct,
+    fontSizeHpt: direct.fontSizeHpt ?? linked.fontSizeHpt ?? undefined,
+    fontBold: direct.fontBold ?? linked.fontBold ?? undefined,
+    fontItalic: direct.fontItalic ?? linked.fontItalic ?? undefined,
+    fontColor: directFontPaint ? direct.fontColor : linked.fontColor ?? undefined,
+    fontPaintAuthored: directFontPaint || linked.fontPaintAuthored === true || undefined,
+    fontHidden: directFontPaint ? direct.fontHidden : linked.fontHidden ?? undefined,
+    fontFace: direct.fontFace ?? linked.fontFace ?? undefined,
+    fontLanguage: direct.fontLanguage ?? linked.fontLanguage ?? undefined,
+    fontBaseline: direct.fontBaseline ?? linked.fontBaseline ?? undefined,
+    textRotation: direct.textRotation ?? linked.textRotation ?? undefined,
+    textWrap: direct.textWrap ?? linked.textWrap ?? undefined,
+    textVerticalAnchor: direct.textVerticalAnchor ?? linked.textVerticalAnchor ?? undefined,
+    textVerticalMode: direct.textVerticalMode ?? linked.textVerticalMode ?? undefined,
+    textLInsEmu: direct.textLInsEmu ?? linked.textLInsEmu ?? undefined,
+    textTInsEmu: direct.textTInsEmu ?? linked.textTInsEmu ?? undefined,
+    textRInsEmu: direct.textRInsEmu ?? linked.textRInsEmu ?? undefined,
+    textBInsEmu: direct.textBInsEmu ?? linked.textBInsEmu ?? undefined,
+    textBodyAuthored: direct.textBodyAuthored === true
+      || linked.textBodyAuthored === true || undefined,
+    labelBox,
+  };
+}
+
+function chartStyleRoleTrendlineLabel(
+  chart: ChartModel,
+  direct: ChartTrendline,
+): ChartTrendline {
+  const linked = chart.chartStyleRoles?.trendlineLabel;
+  if (!linked) return direct;
+  const directFontPaint = direct.labelFontPaintAuthored === true
+    || direct.labelFontColor != null || direct.labelFontHidden === true;
+  return {
+    ...direct,
+    // Unlike `dataLabelCallout`, the `trendlineLabel` role styles the generated
+    // equation/R² label shape even when the chart does not carry a local spPr.
+    // Materialize it before the chart-wide paint preflight so linked gradient
+    // work is charged before any family starts painting.
+    labelBox: effectiveLinkedLabelBox(chart, direct.labelBox, linked, true),
+    labelFontSizeHpt: direct.labelFontSizeHpt ?? linked.fontSizeHpt ?? undefined,
+    labelFontBold: direct.labelFontBold ?? linked.fontBold ?? undefined,
+    labelFontItalic: direct.labelFontItalic ?? linked.fontItalic ?? undefined,
+    labelFontColor: directFontPaint ? direct.labelFontColor : linked.fontColor ?? undefined,
+    labelFontPaintAuthored: directFontPaint || linked.fontPaintAuthored === true || undefined,
+    labelFontHidden: directFontPaint ? direct.labelFontHidden : linked.fontHidden ?? undefined,
+    labelFontFace: direct.labelFontFace ?? linked.fontFace ?? undefined,
+    labelFontLanguage: direct.labelFontLanguage ?? linked.fontLanguage ?? undefined,
+    labelFontBaseline: direct.labelFontBaseline ?? linked.fontBaseline ?? undefined,
+    labelTextRotation: direct.labelTextRotation ?? linked.textRotation ?? undefined,
+    labelTextWrap: direct.labelTextWrap ?? linked.textWrap ?? undefined,
+    labelTextVerticalAnchor: direct.labelTextVerticalAnchor
+      ?? linked.textVerticalAnchor ?? undefined,
+    labelTextVerticalMode: direct.labelTextVerticalMode ?? linked.textVerticalMode ?? undefined,
+    labelTextLInsEmu: direct.labelTextLInsEmu ?? linked.textLInsEmu ?? undefined,
+    labelTextTInsEmu: direct.labelTextTInsEmu ?? linked.textTInsEmu ?? undefined,
+    labelTextRInsEmu: direct.labelTextRInsEmu ?? linked.textRInsEmu ?? undefined,
+    labelTextBInsEmu: direct.labelTextBInsEmu ?? linked.textBInsEmu ?? undefined,
+    labelTextBodyAuthored: direct.labelTextBodyAuthored === true
+      || linked.textBodyAuthored === true || undefined,
+  };
+}
+
+function chartStyleRoleDataLabelOverride(
+  chart: ChartModel,
+  direct: ChartDataLabelOverride,
+  seriesDirect: ChartSeriesDataLabels | null | undefined,
+): ChartDataLabelOverride {
+  // `dataLabelCallout` is the style for a label that authors shape properties;
+  // an indexed `<dLbl>`/`<cx:dataLabel>` alone is still an ordinary data label.
+  // Applying the callout recipe merely because an indexed override exists
+  // invents a white box around every ordinary point label in Office styles.
+  const hasCalloutShape = direct.labelBox != null || seriesDirect?.labelBox != null;
+  const linked = hasCalloutShape
+    ? chart.chartStyleRoles?.dataLabelCallout ?? chart.chartStyleRoles?.dataLabel
+    : chart.chartStyleRoles?.dataLabel;
+  const seriesAndLinkedBox = linked
+    ? effectiveLinkedLabelBox(chart, seriesDirect?.labelBox, linked, true)
+    : seriesDirect?.labelBox;
+  const pointFontPaint = direct.fontPaintAuthored === true
+    || direct.fontColor != null || direct.fontHidden === true;
+  const seriesFontPaint = seriesDirect?.fontPaintAuthored === true
+    || seriesDirect?.fontColor != null || seriesDirect?.fontHidden === true;
+  const fontSource = pointFontPaint ? direct : seriesFontPaint ? seriesDirect : linked;
+  return {
+    ...direct,
+    fontSizeHpt: direct.fontSizeHpt ?? seriesDirect?.fontSizeHpt
+      ?? linked?.fontSizeHpt ?? undefined,
+    fontBold: direct.fontBold ?? seriesDirect?.fontBold ?? linked?.fontBold ?? undefined,
+    fontItalic: direct.fontItalic ?? seriesDirect?.fontItalic ?? linked?.fontItalic ?? undefined,
+    fontColor: fontSource?.fontColor ?? undefined,
+    fontPaintAuthored: pointFontPaint || seriesFontPaint
+      || linked?.fontPaintAuthored === true || undefined,
+    fontHidden: fontSource?.fontHidden ?? undefined,
+    fontFace: direct.fontFace ?? seriesDirect?.fontFace ?? linked?.fontFace ?? undefined,
+    fontLanguage: direct.fontLanguage ?? seriesDirect?.fontLanguage
+      ?? linked?.fontLanguage ?? undefined,
+    fontBaseline: direct.fontBaseline ?? seriesDirect?.fontBaseline
+      ?? linked?.fontBaseline ?? undefined,
+    textRotation: direct.textRotation ?? seriesDirect?.textRotation
+      ?? linked?.textRotation ?? undefined,
+    textWrap: direct.textWrap ?? seriesDirect?.textWrap ?? linked?.textWrap ?? undefined,
+    textVerticalAnchor: direct.textVerticalAnchor ?? seriesDirect?.textVerticalAnchor
+      ?? linked?.textVerticalAnchor ?? undefined,
+    textVerticalMode: direct.textVerticalMode ?? seriesDirect?.textVerticalMode
+      ?? linked?.textVerticalMode ?? undefined,
+    textLInsEmu: direct.textLInsEmu ?? seriesDirect?.textLInsEmu
+      ?? linked?.textLInsEmu ?? undefined,
+    textTInsEmu: direct.textTInsEmu ?? seriesDirect?.textTInsEmu
+      ?? linked?.textTInsEmu ?? undefined,
+    textRInsEmu: direct.textRInsEmu ?? seriesDirect?.textRInsEmu
+      ?? linked?.textRInsEmu ?? undefined,
+    textBInsEmu: direct.textBInsEmu ?? seriesDirect?.textBInsEmu
+      ?? linked?.textBInsEmu ?? undefined,
+    textBodyAuthored: direct.textBodyAuthored === true
+      || seriesDirect?.textBodyAuthored === true
+      || linked?.textBodyAuthored === true || undefined,
+    textAlign: direct.textAlign ?? seriesDirect?.textAlign,
+    labelBox: mergeChartLabelBoxes(direct.labelBox, seriesAndLinkedBox),
   };
 }
 
@@ -5508,6 +5911,9 @@ function applyLinkedChartStyleRoles(chart: ChartModel): ChartModel {
   if (!chart.chartStyleRoles?.errorBar
     && !chart.chartStyleRoles?.leaderLine
     && !chart.chartStyleRoles?.trendline
+    && !chart.chartStyleRoles?.trendlineLabel
+    && !chart.chartStyleRoles?.dataLabel
+    && !chart.chartStyleRoles?.dataLabelCallout
     && !chart.chartStyleRoles?.dataTable
     && !chart.chartStyleRoles?.gridlineMajor
     && !chart.chartStyleRoles?.gridlineMinor
@@ -5535,6 +5941,24 @@ function applyLinkedChartStyleRoles(chart: ChartModel): ChartModel {
       return effective;
     }) : item.errBars;
     let seriesDataLabels = item.seriesDataLabels;
+    if (seriesDataLabels
+      && (chart.chartStyleRoles?.dataLabel || chart.chartStyleRoles?.dataLabelCallout)) {
+      const effective = chartStyleRoleDataLabels(chart, seriesDataLabels);
+      changed ||= effective !== seriesDataLabels;
+      seriesDataLabels = effective;
+    }
+    const dataLabelOverrides = (chart.chartStyleRoles?.dataLabelCallout
+      || chart.chartStyleRoles?.dataLabel)
+      ? item.dataLabelOverrides?.map(override => {
+          const effective = chartStyleRoleDataLabelOverride(
+            chart,
+            override,
+            sourceItem.seriesDataLabels,
+          );
+          changed ||= effective !== override;
+          return effective;
+        })
+      : item.dataLabelOverrides;
     if (seriesDataLabels && chart.chartStyleRoles?.leaderLine) {
       const effective = chartStyleRoleLeaderLine(chart, seriesDataLabels);
       const merged = {
@@ -5550,18 +5974,26 @@ function applyLinkedChartStyleRoles(chart: ChartModel): ChartModel {
         || merged.leaderLineHidden !== seriesDataLabels.leaderLineHidden;
       seriesDataLabels = merged;
     }
-    const trendLines = chart.chartStyleRoles?.trendline ? item.trendLines?.map(trendline => {
-      const effective = chartStyleRoleTrendline(chart, trendline);
+    const trendLines = (chart.chartStyleRoles?.trendline || chart.chartStyleRoles?.trendlineLabel)
+      ? item.trendLines?.map(trendline => {
+      let effective = chart.chartStyleRoles?.trendline
+        ? chartStyleRoleTrendline(chart, trendline)
+        : trendline;
+      if (chart.chartStyleRoles?.trendlineLabel) {
+        effective = chartStyleRoleTrendlineLabel(chart, effective);
+      }
       changed ||= effective.lineColor !== trendline.lineColor
         || effective.lineWidthEmu !== trendline.lineWidthEmu
         || effective.lineDash !== trendline.lineDash
-        || effective.lineHidden !== trendline.lineHidden;
+        || effective.lineHidden !== trendline.lineHidden
+        || effective !== trendline;
       return effective;
     }) : item.trendLines;
     if (errBars === item.errBars
       && seriesDataLabels === item.seriesDataLabels
+      && dataLabelOverrides === item.dataLabelOverrides
       && trendLines === item.trendLines) return item;
-    return { ...item, errBars, seriesDataLabels, trendLines };
+    return { ...item, errBars, seriesDataLabels, dataLabelOverrides, trendLines };
   });
   let dataTable = chart.dataTable;
   if (dataTable && chart.chartStyleRoles?.dataTable) {
@@ -5715,7 +6147,12 @@ function drawUpDownBars(
   slotWidth: number,
   style: ChartStockUpDownBarStyle,
   ptToPx: number,
-  useLegacyDefaultPaint: boolean,
+  automaticPaint?: {
+    lineColor: string;
+    lineWidthEmu: number;
+    upFillColor: string;
+    downFillColor: string;
+  },
   shapeRotationDeg = 0,
 ): void {
   const gapPercent = Number.isFinite(style.gapWidthPercent) && style.gapWidthPercent >= 0
@@ -5731,25 +6168,40 @@ function drawUpDownBars(
     const barHeight = Math.abs(endY - startY);
     if (!(barWidth > 0) || !(barHeight > 0) || !Number.isFinite(barHeight)) continue;
     const paint = end >= start ? style.up : style.down;
-    const defaultFill = end >= start ? 'FFFFFF' : '000000';
+    const fillOwned = paint.fillPaintAuthored === true
+      || paint.fill != null || paint.fillColor != null || paint.fillHidden === true;
+    const automaticFill = fillOwned
+      ? undefined
+      : end >= start ? automaticPaint?.upFillColor : automaticPaint?.downFillColor;
+    const fillColor = paint.fillColor ?? automaticFill;
     const barX = toX(index) - barWidth / 2;
     const barY = Math.min(startY, endY);
-    if (!paint.fillHidden && (paint.fill != null || paint.fillColor != null || useLegacyDefaultPaint)) {
-      ctx.fillStyle = paint.fill
-        ? (resolveFill(paint.fill, ctx, barX, barY, barWidth, barHeight, shapeRotationDeg)
-          ?? `#${paint.fillColor ?? defaultFill}`)
-        : `#${paint.fillColor ?? defaultFill}`;
-      ctx.fillRect(barX, barY, barWidth, barHeight);
+    if (!paint.fillHidden && (paint.fill != null || fillColor != null)) {
+      const resolvedFill = paint.fill
+        ? resolveFill(paint.fill, ctx, barX, barY, barWidth, barHeight, shapeRotationDeg)
+        : `#${fillColor}`;
+      // An authored/linked structured fill owns this component even when it
+      // cannot be resolved. Do not replace it with application-default paint.
+      if (resolvedFill != null) {
+        ctx.fillStyle = resolvedFill;
+        ctx.fillRect(barX, barY, barWidth, barHeight);
+      }
     }
-    if (!paint.lineHidden && (
-      paint.lineColor != null || paint.lineWidthEmu != null || useLegacyDefaultPaint
+    const lineOwned = paint.linePaintAuthored === true
+      || paint.lineColor != null || paint.lineHidden === true;
+    const lineColor = paint.lineColor ?? (lineOwned ? undefined : automaticPaint?.lineColor);
+    const lineWidthEmu = paint.lineWidthEmu
+      ?? (lineOwned ? undefined : automaticPaint?.lineWidthEmu);
+    if (!paint.lineHidden
+      && (paint.linePaintAuthored !== true || lineColor != null) && (
+      lineColor != null || lineWidthEmu != null
     )) {
       const previousDash = ctx.getLineDash();
       const previousCap = ctx.lineCap;
       const previousJoin = ctx.lineJoin;
-      ctx.strokeStyle = `#${paint.lineColor ?? '000000'}`;
-      ctx.lineWidth = paint.lineWidthEmu != null
-        ? axisLineWidthPx(paint.lineWidthEmu, ptToPx)
+      ctx.strokeStyle = `#${lineColor ?? '000000'}`;
+      ctx.lineWidth = lineWidthEmu != null
+        ? axisLineWidthPx(lineWidthEmu, ptToPx)
         : Math.max(1, 0.75 * ptToPx);
       ctx.setLineDash(dashPatternForPreset(paint.lineDash ?? undefined, ctx.lineWidth));
       ctx.lineCap = paint.lineCap === 'rnd'
@@ -5800,7 +6252,10 @@ function drawLineGroupDecorations(
         // Empty upBars/downBars paint is application-defined. The retained
         // Office observation is limited to classic Style 2; other styles keep
         // the geometry/model but do not receive a guessed white/black paint.
-        chart.legacyChartStyle === 2,
+        chart.legacyChartStyle === 2 ? {
+          lineColor: '000000', lineWidthEmu: 9525,
+          upFillColor: 'FFFFFF', downFillColor: '000000',
+        } : undefined,
         shapeRotationDeg,
       );
     }
@@ -6387,8 +6842,8 @@ function renderLineChart(
             : undefined,
           ci => {
             if (!drawMarkers) return 0;
-            if (!hasMarkerDetail) return markerR;
             const dpt = pointOverrides.get(ci);
+            if (!hasMarkerDetail && !pointHasMarkerDetail(dpt)) return markerR;
             const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
             if (symbol === 'none') return 0;
             return ((dpt?.markerSize ?? s.markerSize ?? 5) / 2) * ptToPx;
@@ -6400,6 +6855,7 @@ function renderLineChart(
             chart, value,
             isSecondarySeries(s) && secScale ? secScale.max : plan.max,
           ),
+          shapeRotationDeg,
         );
       });
     }
@@ -6409,8 +6865,8 @@ function renderLineChart(
       if (!stacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
       const pv = plotted(si, ci);
       if (drawMarkers) {
-        if (hasMarkerDetail) {
-          const dpt = pointOverrides.get(ci);
+        const dpt = pointOverrides.get(ci);
+        if (hasMarkerDetail || pointHasMarkerDetail(dpt)) {
           const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
           if (symbol !== 'none') {
             const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
@@ -6463,7 +6919,10 @@ function renderLineChart(
     // trendline declares its own `<a:ln>`.
     drawSeriesTrendlines(
       ctx, s, color, toX, yOf, ptToPx, undefined,
-      { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+      {
+        chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph },
+        shapeRotationDeg,
+      },
     );
   }
 
@@ -6596,6 +7055,7 @@ function renderStockChart(
   const cats = chartCategories(chart);
   const n = cats.length;
   if (n === 0) return;
+  const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
 
   // Fixed spec series roles by position. With 4 series the first is Open; the
   // last three are always High, Low, Close. Fewer than 3 series can't form a
@@ -6612,6 +7072,11 @@ function renderStockChart(
   const openS = openIdx >= 0 ? series[openIdx] : undefined;
   const upDownStartS = series[0] as ChartSeries | undefined;
   const upDownEndS = series.at(-1) as ChartSeries | undefined;
+  const sec = chart.secondaryValAxis && series.some(stockSeries =>
+    stockSeries.useSecondaryAxis === true
+  ) ? chart.secondaryValAxis : null;
+  const isSecondarySeries = (stockSeries: ChartSeries): boolean =>
+    sec != null && stockSeries.useSecondaryAxis === true;
 
   // ── Shared Cartesian frame (mirrors renderLineChart's band computation) ──
   const titleBand = measuredCartesianTitleBand(ctx, chart, w, h, ptToPx);
@@ -6639,9 +7104,35 @@ function renderStockChart(
     : catAxisLabelBandH(catAxFontPx, chart.catAxisLabelOffsetPercent))
     + catTitleH + legBottomH;
 
+  const phEst = h - padT - padB;
+  const secScale = computeSecondaryAxis(sec, series, phEst / ptToPx);
+  const secTickFontPx = Math.max(8, Math.min(11, h / 20));
+  const secFontPx = chartTextFontSizePx(sec?.fontSizeHpt, ptToPx) ?? secTickFontPx;
+  let secLabelBandW = 0;
+  if (sec && secScale && !sec.hidden) {
+    const previousFont = ctx.font;
+    ctx.font = chartFontCss(
+      secFontPx,
+      chartFontFamily(chart, sec.fontFace, 'minor'),
+      sec.fontBold ?? false,
+      sec.fontItalic ?? false,
+    );
+    let maxLabelWidth = 0;
+    for (const value of secScale.majorLines) {
+      maxLabelWidth = Math.max(maxLabelWidth, ctx.measureText(formatAxisTickWithUnits(
+        value, sec.formatCode ?? null, chart.date1904, sec.displayUnits,
+      )).width);
+    }
+    secLabelBandW = maxLabelWidth + 18;
+    ctx.font = previousFont;
+  }
+  const secTitleBandW = sec?.title
+    ? axisTitleFontPx(sec.titleFontSizeHpt, ptToPx) + 8
+    : 0;
+
   const pad = {
     t: padT,
-    r: legRightW + w * 0.05,
+    r: legRightW + w * 0.05 + secLabelBandW + secTitleBandW,
     b: padB,
     l: legLeftW + Math.max(valAxFontPx * 2.2 + 10 + valTitleW, dataTableHeaderW),
   };
@@ -6674,6 +7165,7 @@ function renderStockChart(
   let dataMin = Infinity;
   let dataMax = -Infinity;
   for (const s of series) {
+    if (isSecondarySeries(s)) continue;
     for (let ci = 0; ci < n; ci++) {
       const v = s.values[ci];
       if (v == null) continue;
@@ -6682,6 +7174,7 @@ function renderStockChart(
     }
   }
   for (const stockSeries of series) {
+    if (isSecondarySeries(stockSeries)) continue;
     forEachErrorBarEndpoint(
       stockSeries,
       'y',
@@ -6699,6 +7192,9 @@ function renderStockChart(
   const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx);
   if (plan.max - plan.min === 0) return;
   const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
+  const toYSecondary = secScale?.makeToY(py0, ph) ?? toY;
+  const toYFor = (stockSeries: ChartSeries): ((value: number) => number) =>
+    isSecondarySeries(stockSeries) ? toYSecondary : toY;
 
   // Category X mapping — stock charts use crossBetween="between" by default so
   // the first/last hi-lo line isn't flush against the axes (matches Excel).
@@ -6744,6 +7240,10 @@ function renderStockChart(
     }
   }
 
+  if (sec && secScale) {
+    drawSecondaryValueGridlines(ctx, sec, secScale, toYSecondary, px0, pw, ptToPx);
+  }
+
   // Axis rules (bottom = category, left = value).
   const stockCatLine = resolveAxisLine(chart.catAxisLineColor, chart.catAxisLineWidthEmu, ptToPx);
   const stockValLine = resolveAxisLine(chart.valAxisLineColor, chart.valAxisLineWidthEmu, ptToPx);
@@ -6764,14 +7264,22 @@ function renderStockChart(
   // and area charts. A stock drop line connects the category axis to the
   // envelope of every finite stock value at that category.
   if (chart.stockDropLines) {
-    const dropLineStyle = chartStyleRoleLine(chart, chart.stockDropLines, 'dropLine');
-    if (applyDecorationLineStyle(ctx, dropLineStyle, ptToPx)) {
+    const linked = chartStyleRoleLine(chart, chart.stockDropLines, 'dropLine');
+    const dropLineStyle = {
+      ...linked,
+      color: linked.color ?? (linked.paintAuthored === true
+        ? null : chart.stockAutomaticStyle?.lineColor),
+      widthEmu: linked.widthEmu ?? chart.stockAutomaticStyle?.lineWidthEmu,
+    };
+    if ((dropLineStyle.paintAuthored !== true || dropLineStyle.color != null)
+      && (dropLineStyle.color != null || dropLineStyle.widthEmu != null
+      || dropLineStyle.dash != null) && applyDecorationLineStyle(ctx, dropLineStyle, ptToPx)) {
       drawDropLineEnvelopes(
         ctx,
         series,
         n,
         toX,
-        () => toY,
+        stockSeries => toYFor(stockSeries),
         () => py0 + ph,
         (stockSeries, index) => stockSeries.values[index] ?? null,
       );
@@ -6781,10 +7289,15 @@ function renderStockChart(
   // ── First/last-series up-down bars (§21.2.2.218/227). Shared with ordinary
   // line-chart up/down bars so gap geometry and direct paint cannot drift.
   if (chart.stockUpDownBars && upDownStartS && upDownEndS) {
-    const style = chart.stockUpDownBarStyle ?? {
+    const directStyle = chart.stockUpDownBarStyle ?? {
       gapWidthPercent: 150,
       up: {},
       down: {},
+    };
+    const style = {
+      ...directStyle,
+      up: chartStyleRoleBarPaint(chart, directStyle.up, 'upBar'),
+      down: chartStyleRoleBarPaint(chart, directStyle.down, 'downBar'),
     };
     const slotWidth = dateAxisPlan
       ? (dateAxisPlan.categoryBandFractions[0] ?? 0) * pw
@@ -6793,36 +7306,39 @@ function renderStockChart(
       ctx,
       index => upDownStartS.values[index] ?? null,
       index => upDownEndS.values[index] ?? null,
-      n, toX, toY, toY,
-      slotWidth, style, ptToPx, true, shapeRotationDeg,
+      n, toX, toYFor(upDownStartS), toYFor(upDownEndS),
+      slotWidth, style, ptToPx, chart.stockAutomaticStyle ?? undefined, shapeRotationDeg,
     );
   }
 
-  // ── Hi-lo lines: vertical Low↔High per category. Drawn when the file declares
-  // `<c:hiLowLines>` (the normal case) OR whenever both High and Low series are
-  // present — a stock chart without them is degenerate. Color from the resolved
-  // `<c:hiLowLines>` line fill, else a neutral gray. ──
-  const drawHiLo = (chart.stockHiLowLines ?? true) && highS != null && lowS != null;
+  // ── Hi-lo lines: vertical Low↔High per category. CT_StockChart makes
+  // `<c:hiLowLines>` optional, so absence must remain absence; only a present
+  // element receives linked or bounded automatic paint. ──
+  const drawHiLo = chart.stockHiLowLines === true && highS != null && lowS != null;
   if (drawHiLo && highS && lowS) {
     const directStyle = chart.stockHiLowLineStyle ?? {
       color: chart.stockHiLowLineColor ?? null,
     };
     const linkedStyle = chartStyleRoleLine(chart, directStyle, 'hiLoLine');
-    const lineStyle = linkedStyle.color == null
-      && linkedStyle.widthEmu == null
-      && linkedStyle.dash == null
-      && linkedStyle.hidden == null
-      ? { ...linkedStyle, color: '595959' }
-      : linkedStyle;
-    if (applyDecorationLineStyle(ctx, lineStyle, ptToPx)) {
+    const lineStyle = {
+      ...linkedStyle,
+      color: linkedStyle.color ?? (linkedStyle.paintAuthored === true
+        ? null : chart.stockAutomaticStyle?.lineColor),
+      widthEmu: linkedStyle.widthEmu ?? chart.stockAutomaticStyle?.lineWidthEmu,
+    };
+    if ((lineStyle.paintAuthored !== true || lineStyle.color != null)
+      && (lineStyle.color != null || lineStyle.widthEmu != null || lineStyle.dash != null)
+      && applyDecorationLineStyle(ctx, lineStyle, ptToPx)) {
       for (let ci = 0; ci < n; ci++) {
         const hi = highS.values[ci];
         const lo = lowS.values[ci];
         if (hi == null || lo == null) continue;
         const cx = toX(ci);
+        const highToY = toYFor(highS);
+        const lowToY = toYFor(lowS);
         ctx.beginPath();
-        ctx.moveTo(cx, toY(hi));
-        ctx.lineTo(cx, toY(lo));
+        ctx.moveTo(cx, highToY(hi));
+        ctx.lineTo(cx, lowToY(lo));
         ctx.stroke();
       }
     }
@@ -6846,7 +7362,7 @@ function renderStockChart(
       const v = s.values[ci];
       if (v == null) continue;
       const cx = toX(ci);
-      const cy = toY(v);
+      const cy = toYFor(s)(v);
       const point = pointOverrides.get(ci);
       if (point?.markerSymbol === 'none' || (point?.markerSymbol == null && s.markerSymbol === 'none')) {
         continue;
@@ -6884,8 +7400,12 @@ function renderStockChart(
     }
   };
   drawStockTick(openS, openIdx, 'left');
-  if (highS?.markerSymbol != null) drawStockTick(highS, highIdx, 'both');
-  if (lowS?.markerSymbol != null) drawStockTick(lowS, lowIdx, 'both');
+  if (highS?.markerSymbol != null || (highS && hasVisiblePointMarkerOverride(highS))) {
+    drawStockTick(highS, highIdx, 'both');
+  }
+  if (lowS?.markerSymbol != null || (lowS && hasVisiblePointMarkerOverride(lowS))) {
+    drawStockTick(lowS, lowIdx, 'both');
+  }
   drawStockTick(closeS, closeIdx, 'right');
 
   // CT_LineSer error bars remain attached to their authored stock series.
@@ -6901,7 +7421,7 @@ function renderStockChart(
         chartStyleRoleErrorBar(chart, errorBars),
         n,
         toX,
-        toY,
+        toYFor(stockSeries),
         index => stockSeries.values[index] ?? 0,
         color,
       );
@@ -6914,6 +7434,36 @@ function renderStockChart(
     for (let si = 0; si < series.length; si++) {
       drawStockTick(series[si], si, 'both');
     }
+  }
+
+  // CT_StockChart owns CT_LineSer children, so the same series/default and
+  // per-point dLbl contracts used by ordinary category-line charts apply here
+  // as well. Paint labels after stock glyphs/error bars so their callout boxes
+  // and text remain on top of the plot geometry.
+  for (let seriesIndex = 0; seriesIndex < series.length; seriesIndex++) {
+    const stockSeries = series[seriesIndex];
+    drawSeriesDataLabels(
+      ctx,
+      stockSeries,
+      cats,
+      true,
+      toX,
+      toYFor(stockSeries),
+      ph,
+      ptToPx,
+      chart.date1904,
+      chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
+      chart.dataLabelPosition ?? 'r',
+      { x: px0, y: py0, w: pw, h: ph },
+      r,
+      face => chartFontFamily(chart, face, 'minor'),
+      isSecondarySeries(stockSeries) ? sec?.displayUnits : chart.valAxisDisplayUnits,
+      pointIndex => dataLabelLegendKey(seriesIndex, pointIndex),
+      value => dataLabelWithinAxisMaximum(
+        chart, value, isSecondarySeries(stockSeries) ? secScale?.max ?? plan.max : plan.max,
+      ),
+      shapeRotationDeg,
+    );
   }
 
   // ── Category (date) axis labels — same path as the line renderer. ──
@@ -6980,6 +7530,15 @@ function renderStockChart(
         );
       }
     }
+  }
+
+  if (sec && secScale) {
+    const primaryLabelColor = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#555';
+    drawSecondaryValueAxis(
+      ctx, chart, sec, secScale, toYSecondary, r,
+      px0, py0, pw, ph, ptToPx,
+      secFontPx, secLabelBandW, primaryLabelColor, chart.date1904,
+    );
   }
 
   if (dataTableLayout) {
@@ -8089,7 +8648,7 @@ function renderAreaChart(
           const symbol = effectiveMarkerSymbol(s, dpt, 'circle', seriesMarkersVisible);
           if (symbol === 'none') continue;
           const px = toX(ci); const py = yOf(plottedOf(ci));
-          if (seriesHasMarkerDetail(s)) {
+          if (seriesHasMarkerDetail(s) || pointHasMarkerDetail(dpt)) {
             const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
             const fill = markerFillColorFor(s, dpt, ci, color);
             const line = dpt?.markerLine ?? s.markerLine ?? null;
@@ -8130,6 +8689,7 @@ function renderAreaChart(
           chart, value,
           isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
         ),
+        shapeRotationDeg,
       );
     }
   }
@@ -8206,10 +8766,14 @@ function renderAreaChart(
         chart, value,
         isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
       ),
+      shapeRotationDeg,
     );
     drawSeriesTrendlines(
       ctx, s, stroke, toX, yOf, ptToPx, undefined,
-      { chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph } },
+      {
+        chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph },
+        shapeRotationDeg,
+      },
     );
   }
 
@@ -8748,6 +9312,7 @@ function renderPieChart(
       cx2, cy2, outerR, outerRingInnerR, startAngle, dLblFont, ptToPx,
       plotLeft, plotTop, pw, ph,
       x, y, w, h,
+      shapeRotationDeg,
     );
   }
 
@@ -8794,6 +9359,7 @@ function drawPieRichLabels(
   ptToPx: number,
   plotX: number, plotY: number, plotW: number, plotH: number,
   chartX: number, chartY: number, chartW: number, chartH: number,
+  shapeRotationDeg: number,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -8804,6 +9370,7 @@ function drawPieRichLabels(
   const calloutIndices = new Set<number>();
   for (let index = 0; index < vals.length; index++) {
     const override = overridesByIndex.get(index);
+    if (dataLabelIsDeleted(def, override)) continue;
     if (override?.labelBox || def.labelBox) calloutIndices.add(index);
   }
   // Boxed labels have their own paint/collision pass, but only those points are
@@ -8813,7 +9380,7 @@ function drawPieRichLabels(
     drawPieCalloutLabels(
       ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle,
       font, ptToPx, plotX, plotW, plotY, plotH, chartX, chartY, chartW, chartH,
-      calloutIndices, overridesByIndex,
+      calloutIndices, overridesByIndex, shapeRotationDeg,
     );
   }
 
@@ -8836,7 +9403,7 @@ function drawPieRichLabels(
     // A style/flag-only `<c:dLbl>` (no `<c:tx>`) is NOT a delete. Such slices
     // can carry `text: ""` with white/percent-only flag overrides, so we
     // key off the explicit `deleted` flag, never the empty text.
-    if (ov?.deleted) continue;
+    if (dataLabelIsDeleted(def, ov)) continue;
     const showCatName = ov?.showCatName ?? def.showCatName;
     const showSerName = ov?.showSerName ?? def.showSerName;
     const showVal     = ov?.showVal ?? def.showVal;
@@ -8872,12 +9439,15 @@ function drawPieRichLabels(
     const labelFont = (ov?.fontFace ?? def.fontFace)
       ? chartFontFamily(chart, ov?.fontFace ?? def.fontFace, 'minor')
       : font;
-    const rich = customRichDataLabelOptions(chart, ov, ptToPx, labelFont, bold ?? false);
+    const textStyle = effectiveDataLabelTextStyle(ov, def);
+    const rich = customRichDataLabelOptions(
+      chart, ov, ptToPx, labelFont, bold ?? false, textStyle,
+    );
     const automaticLabelR = innerR > 0.01
       ? (innerR + outerR) / 2
       : outerR * PIE_CTR_LABEL_RADIUS_FRAC;
     if (ov?.manualLayout) {
-      ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${labelFont}`;
+      ctx.font = `${textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${sizePx}px ${labelFont}`;
       drawBoundedDataLabelText(
         ctx,
         text,
@@ -8894,18 +9464,22 @@ function drawPieRichLabels(
         { x: chartX, y: chartY, w: chartW, h: chartH },
         rich,
         legendKey,
+        textStyle,
+        ptToPx,
+        mergeChartLabelBoxes(ov?.labelBox, def.labelBox),
+        shapeRotationDeg,
       );
       continue;
     }
     if (outside) {
-      ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${labelFont}`;
+      ctx.font = `${textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${sizePx}px ${labelFont}`;
       const richBlock = rich
         ? resolveRichDataLabelBlock(ctx, rich, sizePx, fontColor ? `#${fontColor}` : '#333')
         : null;
       const lineHeight = sizePx * 1.15;
-      const fittedLines = richBlock ? [] : fitDataLabelLines(
+      const fittedLines = richBlock ? [] : fitStyledDataLabelLines(
         text, Math.max(0, chartW - sizePx), Math.max(0, chartH - sizePx),
-        lineHeight, value => ctx.measureText(value).width,
+        lineHeight, value => ctx.measureText(value).width, textStyle,
       );
       if (rich && !richBlock) continue;
       if (!richBlock && fittedLines.length === 0 && !legendKey) continue;
@@ -8927,6 +9501,8 @@ function drawPieRichLabels(
         labelFont,
         richBlock ?? undefined,
         legendKey,
+        textStyle,
+        ptToPx,
       ));
       continue;
     }
@@ -8949,7 +9525,7 @@ function drawPieRichLabels(
     const labelR = automaticLabelR;
     const lx2 = cx2 + Math.cos(midAngle) * labelR;
     const ly2 = cy2 + Math.sin(midAngle) * labelR;
-    ctx.font = `${bold ? 'bold ' : ''}${sizePx}px ${labelFont}`;
+    ctx.font = `${textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${sizePx}px ${labelFont}`;
     const tangentialCapacity = 2 * labelR * Math.sin(Math.min(Math.PI, Math.abs(slice)) / 2)
       - sizePx;
     const radialCapacity = innerR > 0.01
@@ -8977,6 +9553,10 @@ function drawPieRichLabels(
       { x: chartX, y: chartY, w: chartW, h: chartH },
       rich,
       legendKey,
+      textStyle,
+      ptToPx,
+      mergeChartLabelBoxes(ov?.labelBox, def.labelBox),
+      shapeRotationDeg,
     );
   }
 
@@ -8998,6 +9578,10 @@ interface PieOutsideLabel {
   rimY: number;
   boxW: number;
   boxH: number;
+  unrotatedW: number;
+  unrotatedH: number;
+  textStyle: DataLabelTextStyle;
+  ptToPx: number;
   lineHeight: number;
   fontPx: number;
   bold: boolean;
@@ -9059,7 +9643,17 @@ function createPieOutsideLabel(
   font: string,
   rich?: RichDataLabelBlock,
   legendKey?: DataLabelLegendKey,
+  textStyle: DataLabelTextStyle = {},
+  ptToPx = 1,
 ): PieOutsideLabel {
+  const insets = dataLabelInsets(textStyle, ptToPx);
+  const unrotatedW = boxW + insets.left + insets.right;
+  const unrotatedH = boxH + insets.top + insets.bottom;
+  const rotated = rotatedDataLabelSize(
+    unrotatedW, unrotatedH, textStyle.textRotation, textStyle.textVerticalMode,
+  );
+  boxW = rotated.w;
+  boxH = rotated.h;
   const clearance = fontPx * 0.5;
   const distance = outsideLabelRadialDistance(
     midAngle, outerR, boxW / 2, boxH / 2, clearance,
@@ -9070,7 +9664,8 @@ function createPieOutsideLabel(
     lines, rich, legendKey,
     rimX: pieCx + Math.cos(midAngle) * outerR,
     rimY: pieCy + Math.sin(midAngle) * outerR,
-    boxW, boxH, lineHeight, fontPx, bold, fontColor, font,
+    boxW, boxH, unrotatedW, unrotatedH, textStyle, ptToPx,
+    lineHeight, fontPx, bold, fontColor, font,
     cxBox, cyBox, initialCx: cxBox, initialCy: cyBox,
     leftSide: Math.cos(midAngle) < 0,
   };
@@ -9164,22 +9759,50 @@ function drawPieOutsideLabels(
   }
 
   for (const label of labels) {
+    const insets = dataLabelInsets(label.textStyle, label.ptToPx);
+    const rotated = rotatedDataLabelSize(
+      label.unrotatedW, label.unrotatedH,
+      label.textStyle.textRotation, label.textStyle.textVerticalMode,
+    );
+    const textCx = label.cxBox + (insets.left - insets.right) / 2;
+    const textCy = label.cyBox + (insets.top - insets.bottom) / 2;
+    const innerWidth = Math.max(0, label.unrotatedW - insets.left - insets.right);
+    const paintAlign = dataLabelCanvasTextAlign(label.textStyle, 'center');
+    const textAnchorX = paintAlign === 'left'
+      ? label.cxBox - label.unrotatedW / 2 + insets.left
+      : paintAlign === 'right'
+        ? label.cxBox + label.unrotatedW / 2 - insets.right
+        : textCx;
+    ctx.save();
+    if (rotated.radians !== 0) {
+      ctx.translate(label.cxBox, label.cyBox);
+      ctx.rotate(rotated.radians);
+      ctx.translate(-label.cxBox, -label.cyBox);
+    }
     if (!label.legendKey) {
       if (label.rich) {
-        paintRichDataLabelBlock(ctx, label.rich, label.cxBox, label.cyBox);
+        paintRichDataLabelBlock(
+          ctx, label.rich, textAnchorX, textCy, paintAlign, 'middle', innerWidth,
+        );
+        ctx.restore();
         continue;
       }
-      ctx.font = `${label.bold ? 'bold ' : ''}${label.fontPx}px ${label.font}`;
+      ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${label.bold ? 'bold ' : ''}${label.fontPx}px ${label.font}`;
       ctx.fillStyle = label.fontColor;
-      ctx.textAlign = 'center';
+      ctx.textAlign = paintAlign;
       ctx.textBaseline = 'middle';
-      const firstY = label.cyBox - ((label.lines.length - 1) * label.lineHeight) / 2;
-      for (let i = 0; i < label.lines.length; i++) {
-        ctx.fillText(label.lines[i], label.cxBox, firstY + i * label.lineHeight);
+      const baselineShift = (label.textStyle.fontBaseline ?? 0) * label.fontPx;
+      const firstY = textCy - ((label.lines.length - 1) * label.lineHeight) / 2 - baselineShift;
+      if (!(label.textStyle.fontPaintAuthored === true
+        && (label.textStyle.fontHidden === true || label.textStyle.fontColor == null))) {
+        for (let i = 0; i < label.lines.length; i++) {
+          ctx.fillText(label.lines[i], textAnchorX, firstY + i * label.lineHeight);
+        }
       }
+      ctx.restore();
       continue;
     }
-    ctx.font = `${label.bold ? 'bold ' : ''}${label.fontPx}px ${label.font}`;
+    ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${label.bold ? 'bold ' : ''}${label.fontPx}px ${label.font}`;
     const keyWidth = label.legendKey
       ? (legendSwatchWidths([label.legendKey.entry], label.fontPx, label.legendKey.ptToPx)[0] ?? 0)
       : 0;
@@ -9193,14 +9816,14 @@ function drawPieOutsideLabels(
       ? LEGEND_SWATCH_TEXT_GAP
       : 0;
     const contentWidth = keyWidth + gap + textWidth;
-    const contentLeft = label.cxBox - contentWidth / 2;
+    const contentLeft = textCx - contentWidth / 2;
     if (label.legendKey) {
       drawLegendSwatch(
         ctx,
         label.legendKey.entry.swatchStyle,
         label.legendKey.entry.color,
         contentLeft,
-        label.cyBox - keyHeight / 2,
+        textCy - keyHeight / 2,
         keyWidth,
         keyHeight,
         label.legendKey.entry.marker,
@@ -9216,17 +9839,23 @@ function drawPieOutsideLabels(
     }
     if (label.rich) {
       paintRichDataLabelBlock(
-        ctx, label.rich, contentLeft + keyWidth + gap, label.cyBox, 'left', 'middle',
+        ctx, label.rich, contentLeft + keyWidth + gap, textCy, 'left', 'middle',
       );
+      ctx.restore();
       continue;
     }
     ctx.fillStyle = label.fontColor;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    const firstY = label.cyBox - ((label.lines.length - 1) * label.lineHeight) / 2;
-    for (let i = 0; i < label.lines.length; i++) {
-      ctx.fillText(label.lines[i], contentLeft + keyWidth + gap, firstY + i * label.lineHeight);
+    const baselineShift = (label.textStyle.fontBaseline ?? 0) * label.fontPx;
+    const firstY = textCy - ((label.lines.length - 1) * label.lineHeight) / 2 - baselineShift;
+    if (!(label.textStyle.fontPaintAuthored === true
+      && (label.textStyle.fontHidden === true || label.textStyle.fontColor == null))) {
+      for (let i = 0; i < label.lines.length; i++) {
+        ctx.fillText(label.lines[i], contentLeft + keyWidth + gap, firstY + i * label.lineHeight);
+      }
     }
+    ctx.restore();
   }
   ctx.restore();
 }
@@ -9246,18 +9875,20 @@ interface PieCalloutLabel {
   /** Half-height of the text block (px) — box grows symmetrically around cy. */
   boxW: number;
   boxH: number;
+  unrotatedW: number;
+  unrotatedH: number;
   /** Box centre (mutated by the collision pass). */
   cxBox: number;
   cyBox: number;
   /** true when the label sits on the left half (box hangs to the left). */
   leftSide: boolean;
   fontColor: string;
-  boxFill: string | null;
-  boxBorder: string | null;
-  boxBorderPx: number;
+  box?: ChartLabelBox;
   fontPx: number;
   bold: boolean;
   font: string;
+  textStyle: DataLabelTextStyle;
+  ptToPx: number;
   /** An authored inside position keeps the box at its slice anchor. */
   inside: boolean;
   /** Explicit per-point manual layout is never moved by the auto collision pass. */
@@ -9289,6 +9920,7 @@ function drawPieCalloutLabels(
   chartX: number, chartY: number, chartW: number, chartH: number,
   indices: ReadonlySet<number>,
   overridesByIndex: ReadonlyMap<number, ChartDataLabelOverride>,
+  shapeRotationDeg: number,
 ): void {
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
   const findOverride = (i: number): ChartDataLabelOverride | undefined =>
@@ -9314,7 +9946,7 @@ function drawPieCalloutLabels(
     // A genuine `<c:delete val="1"/>` (§21.2.2.43) skips the label; a per-point
     // *styling / flag* override is NOT a delete even though
     // it also has `text === ""` — key off the explicit `deleted` flag.
-    if (ov?.deleted) continue;
+    if (dataLabelIsDeleted(def, ov)) continue;
 
     // §21.2.2.35 composition, with per-point `<c:dLbl>` show-flags (§21.2.2.47)
     // overriding the series defaults for this slice. Word stacks category name
@@ -9332,12 +9964,7 @@ function drawPieCalloutLabels(
       ? chartFontFamily(chart, ov?.fontFace ?? def.fontFace, 'minor')
       : font;
     const fontColor = ov?.fontColor ? `#${ov.fontColor}` : (def.fontColor ? `#${def.fontColor}` : '#000');
-    const box = ov?.labelBox ?? seriesBox;
-    const boxFill = box?.fill ? `#${box.fill}` : null;
-    const boxBorder = box?.borderColor ? `#${box.borderColor}` : null;
-    const boxBorderPx = box?.borderWidthEmu
-      ? Math.max(0.75, (box.borderWidthEmu / EMU_PER_PT) * ptToPx)
-      : 1;
+    const box = mergeChartLabelBoxes(ov?.labelBox, seriesBox);
     const position = ov?.position ?? def.position ?? 'bestFit';
 
     const text = effectiveDataLabelText({
@@ -9358,23 +9985,33 @@ function drawPieCalloutLabels(
     });
     const legendKey = showLegendKey ? dataLabelLegendKey(0, i) : undefined;
     if (!text && !legendKey) continue;
-    const richOptions = customRichDataLabelOptions(chart, ov, ptToPx, labelFont, bold);
+    const textStyle = effectiveDataLabelTextStyle(ov, def);
+    const richOptions = customRichDataLabelOptions(
+      chart, ov, ptToPx, labelFont, bold, textStyle,
+    );
 
-    const padX = Math.max(4, fontPx * 0.45);
-    const padY = Math.max(2, fontPx * 0.28);
+    const authoredInsets = textStyle.textBodyAuthored === true
+      || textStyle.textLInsEmu != null || textStyle.textTInsEmu != null
+      || textStyle.textRInsEmu != null || textStyle.textBInsEmu != null;
+    const bodyInsets = dataLabelInsets(textStyle, ptToPx);
+    const padLeft = authoredInsets ? bodyInsets.left : Math.max(4, fontPx * 0.45);
+    const padRight = authoredInsets ? bodyInsets.right : Math.max(4, fontPx * 0.45);
+    const padTop = authoredInsets ? bodyInsets.top : Math.max(2, fontPx * 0.28);
+    const padBottom = authoredInsets ? bodyInsets.bottom : Math.max(2, fontPx * 0.28);
     const lineGap = fontPx * 0.22;
     const lineH = fontPx + lineGap;
-    ctx.font = `${bold ? 'bold ' : ''}${fontPx}px ${labelFont}`;
+    ctx.font = `${textStyle.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${fontPx}px ${labelFont}`;
     const rich = richOptions
       ? resolveRichDataLabelBlock(ctx, richOptions, fontPx, fontColor)
       : null;
     if (richOptions && !rich) continue;
-    let lines = rich ? [] : fitDataLabelLines(
+    let lines = rich ? [] : fitStyledDataLabelLines(
       text,
-      Math.max(0, boundsW - padX * 2),
-      Math.max(0, boundsH - padY * 2),
+      Math.max(0, boundsW - padLeft - padRight),
+      Math.max(0, boundsH - padTop - padBottom),
       lineH,
       value => ctx.measureText(value).width,
+      textStyle,
     );
     if (!rich && lines.length === 0 && !legendKey) continue;
     let textW = rich?.width ?? 0;
@@ -9384,9 +10021,16 @@ function drawPieCalloutLabels(
       : 0;
     const keyH = legendKey ? legendSwatchHeight(legendKey.entry, fontPx, ptToPx) : 0;
     const keyGap = legendKey && text ? LEGEND_SWATCH_TEXT_GAP : 0;
-    let boxW = Math.min(keyW + keyGap + textW + padX * 2, boundsW);
+    let unrotatedW = keyW + keyGap + textW + padLeft + padRight;
+    let unrotatedH = Math.max(
+      keyH, rich?.height ?? (lines.length > 0 ? lines.length * lineH - lineGap : 0),
+    ) + padTop + padBottom;
+    let rotated = rotatedDataLabelSize(
+      unrotatedW, unrotatedH, textStyle.textRotation, textStyle.textVerticalMode,
+    );
+    let boxW = Math.min(rotated.w, boundsW);
     let boxH = Math.max(keyH, rich?.height ?? (lines.length > 0 ? lines.length * lineH - lineGap : 0));
-    boxH = Math.min(boxH + padY * 2, boundsH);
+    boxH = Math.min(rotated.h, boundsH);
 
     const rimX = cx2 + Math.cos(midAngle) * outerR;
     const rimY = cy2 + Math.sin(midAngle) * outerR;
@@ -9411,13 +10055,16 @@ function drawPieCalloutLabels(
       if (!manual) continue;
       boxW = manual.rect.w;
       boxH = manual.rect.h;
+      unrotatedW = boxW;
+      unrotatedH = boxH;
       if (!rich) {
-        lines = fitDataLabelLines(
+        lines = fitStyledDataLabelLines(
           text,
-          Math.max(0, boxW - padX * 2 - keyW - keyGap),
-          Math.max(0, boxH - padY * 2),
+          Math.max(0, boxW - padLeft - padRight - keyW - keyGap),
+          Math.max(0, boxH - padTop - padBottom),
           lineH,
           value => ctx.measureText(value).width,
+          textStyle,
         );
         if (lines.length === 0 && !legendKey) continue;
       }
@@ -9447,17 +10094,24 @@ function drawPieCalloutLabels(
       );
       if (!sliceBounds) continue;
       if (!rich) {
-        lines = fitDataLabelLines(
+        lines = fitStyledDataLabelLines(
           text,
-          Math.max(0, sliceBounds.w - padX * 2 - keyW - keyGap),
-          Math.max(0, sliceBounds.h - padY * 2),
+          Math.max(0, sliceBounds.w - padLeft - padRight - keyW - keyGap),
+          Math.max(0, sliceBounds.h - padTop - padBottom),
           lineH,
           value => ctx.measureText(value).width,
+          textStyle,
         );
         if (lines.length === 0 && !legendKey) continue;
         textW = lines.reduce((width, line) => Math.max(width, ctx.measureText(line).width), 0);
-        boxW = keyW + keyGap + textW + padX * 2;
-        boxH = Math.max(keyH, lines.length > 0 ? lines.length * lineH - lineGap : 0) + padY * 2;
+        unrotatedW = keyW + keyGap + textW + padLeft + padRight;
+        unrotatedH = Math.max(keyH, lines.length > 0 ? lines.length * lineH - lineGap : 0)
+          + padTop + padBottom;
+        rotated = rotatedDataLabelSize(
+          unrotatedW, unrotatedH, textStyle.textRotation, textStyle.textVerticalMode,
+        );
+        boxW = rotated.w;
+        boxH = rotated.h;
       } else {
         boxW = Math.min(boxW, sliceBounds.w);
         boxH = Math.min(boxH, sliceBounds.h);
@@ -9488,8 +10142,10 @@ function drawPieCalloutLabels(
     }
 
     labels.push({
-      lines, rich: rich ?? undefined, legendKey, lineHeight: lineH, midAngle, rimX, rimY, boxW, boxH, cxBox, cyBox,
-      leftSide, fontColor, boxFill, boxBorder, boxBorderPx, fontPx, bold, font: labelFont, inside, manualClip,
+      lines, rich: rich ?? undefined, legendKey, lineHeight: lineH, midAngle, rimX, rimY,
+      boxW, boxH, unrotatedW, unrotatedH, cxBox, cyBox,
+      leftSide, fontColor, box, fontPx, bold, font: labelFont, textStyle, ptToPx,
+      inside, manualClip,
     });
   }
 
@@ -9630,35 +10286,80 @@ function drawPieCalloutLabels(
     const by = l.cyBox - l.boxH / 2;
     // Box fill + border (§21.2.2.197 spPr). Fill may carry an 8-digit RGBA hex
     // (e.g. a 90%-opacity white) — valid canvas fillStyle.
-    if (l.boxFill) { ctx.fillStyle = l.boxFill; ctx.fillRect(bx, by, l.boxW, l.boxH); }
-    if (l.boxBorder) {
-      ctx.strokeStyle = l.boxBorder;
-      ctx.lineWidth = l.boxBorderPx;
-      ctx.strokeRect(bx, by, l.boxW, l.boxH);
+    paintChartLabelBox(
+      ctx, l.box, { x: bx, y: by, w: l.boxW, h: l.boxH }, ptToPx,
+      shapeRotationDeg,
+    );
+    const authoredInsets = l.textStyle.textBodyAuthored === true
+      || l.textStyle.textLInsEmu != null || l.textStyle.textTInsEmu != null
+      || l.textStyle.textRInsEmu != null || l.textStyle.textBInsEmu != null;
+    const bodyInsets = dataLabelInsets(l.textStyle, l.ptToPx);
+    const padLeft = authoredInsets ? bodyInsets.left : Math.max(4, l.fontPx * 0.45);
+    const padRight = authoredInsets ? bodyInsets.right : Math.max(4, l.fontPx * 0.45);
+    const padTop = authoredInsets ? bodyInsets.top : Math.max(2, l.fontPx * 0.28);
+    const padBottom = authoredInsets ? bodyInsets.bottom : Math.max(2, l.fontPx * 0.28);
+    const rotated = rotatedDataLabelSize(
+      l.unrotatedW, l.unrotatedH,
+      l.textStyle.textRotation, l.textStyle.textVerticalMode,
+    );
+    const contentCx = l.cxBox + (padLeft - padRight) / 2;
+    const contentCy = l.cyBox + (padTop - padBottom) / 2;
+    const innerLeft = bx + padLeft;
+    const innerRight = bx + l.boxW - padRight;
+    const innerWidth = Math.max(0, innerRight - innerLeft);
+    const paintAlign = dataLabelCanvasTextAlign(l.textStyle, 'center');
+    const alignedX = paintAlign === 'left' ? innerLeft
+      : paintAlign === 'right' ? innerRight : contentCx;
+    const anchoredCenterY = (contentHeight: number): number =>
+      (l.textStyle.textVerticalAnchor
+        ?? (l.textStyle.textBodyAuthored === true ? 't' : 'ctr')) === 't'
+        ? by + padTop + contentHeight / 2
+        : (l.textStyle.textVerticalAnchor
+          ?? (l.textStyle.textBodyAuthored === true ? 't' : 'ctr')) === 'b'
+          ? by + l.boxH - padBottom - contentHeight / 2
+          : contentCy;
+    const alignedGroupLeft = (contentWidth: number): number =>
+      paintAlign === 'left' ? innerLeft
+        : paintAlign === 'right' ? innerRight - contentWidth
+          : contentCx - contentWidth / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(bx, by, l.boxW, l.boxH);
+    ctx.clip();
+    if (rotated.radians !== 0) {
+      ctx.translate(l.cxBox, l.cyBox);
+      ctx.rotate(rotated.radians);
+      ctx.translate(-l.cxBox, -l.cyBox);
     }
     // Text: centred, stacked lines. A custom rich body uses the same bounded
     // inline block that measured the box, keeping measurement and paint exact.
     if (!l.legendKey) {
+      const textHeight = l.rich?.height
+        ?? Math.max(0, l.lines.length * l.lineHeight - (l.lineHeight - l.fontPx));
+      const textCenterY = anchoredCenterY(textHeight);
       if (l.rich) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(bx, by, l.boxW, l.boxH);
-        ctx.clip();
-        paintRichDataLabelBlock(ctx, l.rich, l.cxBox, l.cyBox);
+        paintRichDataLabelBlock(
+          ctx, l.rich, alignedX, textCenterY, paintAlign, 'middle', innerWidth,
+        );
         ctx.restore();
         if (l.manualClip) ctx.restore();
         continue;
       }
-      ctx.font = `${l.bold ? 'bold ' : ''}${l.fontPx}px ${l.font}`;
+      ctx.font = `${l.textStyle.fontItalic ? 'italic ' : ''}${l.bold ? 'bold ' : ''}${l.fontPx}px ${l.font}`;
       ctx.fillStyle = l.fontColor;
-      ctx.textAlign = 'center';
+      ctx.textAlign = paintAlign;
       ctx.textBaseline = 'middle';
       const lineGap = l.lineHeight - l.fontPx;
-      const blockTop = l.cyBox
-        - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2;
-      for (let li = 0; li < l.lines.length; li++) {
-        ctx.fillText(l.lines[li], l.cxBox, blockTop + li * l.lineHeight);
+      const baselineShift = (l.textStyle.fontBaseline ?? 0) * l.fontPx;
+      const blockTop = textCenterY
+        - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2 - baselineShift;
+      if (!(l.textStyle.fontPaintAuthored === true
+        && (l.textStyle.fontHidden === true || l.textStyle.fontColor == null))) {
+        for (let li = 0; li < l.lines.length; li++) {
+          ctx.fillText(l.lines[li], alignedX, blockTop + li * l.lineHeight);
+        }
       }
+      ctx.restore();
       if (l.manualClip) ctx.restore();
       continue;
     }
@@ -9672,14 +10373,20 @@ function drawPieCalloutLabels(
     const textWidth = l.rich?.width ?? l.lines.reduce(
       (width, line) => Math.max(width, ctx.measureText(line).width), 0,
     );
-    const contentLeft = l.cxBox - (keyWidth + keyGap + textWidth) / 2;
+    const groupWidth = keyWidth + keyGap + textWidth;
+    const groupHeight = Math.max(
+      keyHeight,
+      l.rich?.height ?? Math.max(0, l.lines.length * l.lineHeight - (l.lineHeight - l.fontPx)),
+    );
+    const groupCenterY = anchoredCenterY(groupHeight);
+    const contentLeft = alignedGroupLeft(groupWidth);
     if (l.legendKey) {
       drawLegendSwatch(
         ctx,
         l.legendKey.entry.swatchStyle,
         l.legendKey.entry.color,
         contentLeft,
-        l.cyBox - keyHeight / 2,
+        groupCenterY - keyHeight / 2,
         keyWidth,
         keyHeight,
         l.legendKey.entry.marker,
@@ -9694,24 +10401,29 @@ function drawPieCalloutLabels(
       );
     }
     if (l.rich) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(bx, by, l.boxW, l.boxH);
-      ctx.clip();
-      paintRichDataLabelBlock(ctx, l.rich, contentLeft + keyWidth + keyGap, l.cyBox, 'left', 'middle');
+      paintRichDataLabelBlock(
+        ctx, l.rich, contentLeft + keyWidth + keyGap, groupCenterY, 'left', 'middle',
+        textWidth,
+      );
       ctx.restore();
       if (l.manualClip) ctx.restore();
       continue;
     }
-    ctx.font = `${l.bold ? 'bold ' : ''}${l.fontPx}px ${l.font}`;
+    ctx.font = `${l.textStyle.fontItalic ? 'italic ' : ''}${l.bold ? 'bold ' : ''}${l.fontPx}px ${l.font}`;
     ctx.fillStyle = l.fontColor;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     const lineGap = l.lineHeight - l.fontPx;
-    const blockTop = l.cyBox - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2;
-    for (let li = 0; li < l.lines.length; li++) {
-      ctx.fillText(l.lines[li], contentLeft + keyWidth + keyGap, blockTop + li * l.lineHeight);
+    const baselineShift = (l.textStyle.fontBaseline ?? 0) * l.fontPx;
+    const blockTop = groupCenterY
+      - (l.lines.length * l.lineHeight - lineGap) / 2 + l.fontPx / 2 - baselineShift;
+    if (!(l.textStyle.fontPaintAuthored === true
+      && (l.textStyle.fontHidden === true || l.textStyle.fontColor == null))) {
+      for (let li = 0; li < l.lines.length; li++) {
+        ctx.fillText(l.lines[li], contentLeft + keyWidth + keyGap, blockTop + li * l.lineHeight);
+      }
     }
+    ctx.restore();
     if (l.manualClip) ctx.restore();
   }
   ctx.restore();
@@ -10271,6 +10983,7 @@ function drawScatterSeriesLayer(
       valueDisplayUnits,
       pointIndex => dataLabelLegendKey(seriesIndex, pointIndex),
       value => dataLabelWithinAxisMaximum(chart, value, valueAxisMaximum),
+      shapeRotationDeg,
     );
   }
 
@@ -10283,6 +10996,7 @@ function drawScatterSeriesLayer(
         chartRect,
         plotRect: { x: px0, y: py0, w: pw, h: ph },
         clipLineToPlot: true,
+        shapeRotationDeg,
       },
     );
   }
@@ -10808,8 +11522,8 @@ function renderScatterChart(
  *  is 5). `fill` and `line` are hex strings; a leading `#` is tolerated so
  *  callers that route through `chartColor` (which returns `#RRGGBB`)
  *  don't end up double-prefixing into an invalid `##RRGGBB`. `line` may
- *  be null in which case no outline is drawn. `picture` fails closed because
- *  the chart model does not yet carry the marker image relationship. */
+ *  be null in which case no outline is drawn. `picture` uses the host-warmed
+ *  image lookup and fails closed when its authored relationship is unresolved. */
 function drawMarker(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number,
@@ -10839,9 +11553,28 @@ function drawMarker(
     ctx.strokeStyle = lineCss;
     ctx.lineWidth = lineWidthPx;
   }
+  const imageFill = fillPaint?.fillType === 'image' ? fillPaint : undefined;
+  const fillCurrentPath = () => {
+    if (!imageFill) {
+      if (fillPaint !== null) ctx.fill();
+      return;
+    }
+    ctx.save();
+    ctx.clip();
+    paintChartImageFill(
+      ctx, imageFill, cx - half, cy - half, sizePx, sizePx, ptToPx, shapeRotationDeg,
+    );
+    ctx.restore();
+  };
   switch (symbol) {
     case 'square': {
-      ctx.fillRect(cx - half, cy - half, sizePx, sizePx);
+      if (imageFill) {
+        ctx.beginPath();
+        ctx.rect(cx - half, cy - half, sizePx, sizePx);
+        fillCurrentPath();
+      } else if (fillPaint !== null) {
+        ctx.fillRect(cx - half, cy - half, sizePx, sizePx);
+      }
       if (line) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
       break;
     }
@@ -10852,7 +11585,7 @@ function drawMarker(
       ctx.lineTo(cx, cy + half);
       ctx.lineTo(cx - half, cy);
       ctx.closePath();
-      ctx.fill();
+      fillCurrentPath();
       if (line) ctx.stroke();
       break;
     }
@@ -10862,12 +11595,12 @@ function drawMarker(
       ctx.lineTo(cx + half, cy + half);
       ctx.lineTo(cx - half, cy + half);
       ctx.closePath();
-      ctx.fill();
+      fillCurrentPath();
       if (line) ctx.stroke();
       break;
     }
     case 'x': {
-      ctx.strokeStyle = ctx.fillStyle;
+      ctx.strokeStyle = lineCss ?? ctx.fillStyle;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy - half); ctx.lineTo(cx + half, cy + half);
@@ -10876,7 +11609,7 @@ function drawMarker(
       break;
     }
     case 'plus': {
-      ctx.strokeStyle = ctx.fillStyle;
+      ctx.strokeStyle = lineCss ?? ctx.fillStyle;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
@@ -10895,21 +11628,38 @@ function drawMarker(
         if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
       ctx.closePath();
-      ctx.fill();
+      fillCurrentPath();
       if (line) ctx.stroke();
       break;
     }
     case 'dot': {
-      // Excel's "dot" is a small filled circle ~half the size of "circle".
-      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1, sizePx * 0.25), 0, Math.PI * 2); ctx.fill();
+      // ECMA-376 §21.2.3.27: width=1/2 and height=1/5 of marker size.
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, sizePx * 0.25, sizePx * 0.1, 0, 0, Math.PI * 2);
+      fillCurrentPath();
+      if (line) ctx.stroke();
       break;
     }
     case 'dash': {
-      const dh = Math.max(1, sizePx * 0.25);
-      ctx.fillRect(cx - half, cy - dh / 2, sizePx, dh);
+      // ECMA-376 §21.2.3.27: height=1/5 of marker size.
+      const dh = sizePx * 0.2;
+      if (imageFill) {
+        ctx.beginPath(); ctx.rect(cx - half, cy - dh / 2, sizePx, dh); fillCurrentPath();
+      } else if (fillPaint !== null) {
+        ctx.fillRect(cx - half, cy - dh / 2, sizePx, dh);
+      }
+      if (line) ctx.strokeRect(cx - half, cy - dh / 2, sizePx, dh);
       break;
     }
     case 'picture': {
+      if (imageFill) {
+        paintChartImageFill(
+          ctx, imageFill, cx - half, cy - half, sizePx, sizePx, ptToPx, shapeRotationDeg,
+        );
+      }
+      // Fill and line are independent CT_ShapeProperties components. An
+      // authored noFill/unresolved blip must not suppress the picture outline.
+      if (line) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
       ctx.restore();
       return;
     }
@@ -10917,7 +11667,7 @@ function drawMarker(
     default: {
       ctx.beginPath();
       ctx.arc(cx, cy, half, 0, Math.PI * 2);
-      ctx.fill();
+      fillCurrentPath();
       if (line) ctx.stroke();
       break;
     }
@@ -11022,6 +11772,7 @@ function drawSeriesDataLabels(
   valueDisplayUnits?: ChartDisplayUnits | null,
   legendKeyAt?: (pointIndex: number) => DataLabelLegendKey | undefined,
   isValueVisible?: (value: number) => boolean,
+  shapeRotationDeg = 0,
 ): void {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -11037,7 +11788,7 @@ function drawSeriesDataLabels(
     // `<c:dLbl>` that only carries style / flag overrides (empty `<c:tx>`) is NOT
     // a delete — key off the explicit `deleted` flag, then honor per-point
     // show-flags (§21.2.2.47) over the series defaults.
-    if (ovr?.deleted) continue;
+    if (dataLabelIsDeleted(seriesDef, ovr)) continue;
     const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
     const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
     const showVal     = ovr?.showVal ?? seriesDef?.showVal;
@@ -11045,13 +11796,19 @@ function drawSeriesDataLabels(
     const showLegendKey = ovr?.showLegendKey ?? seriesDef?.showLegendKey ?? false;
     const text = effectiveDataLabelText({
       customText: ovr?.text,
-      showCategory: showCatName && !useIndexX,
+      showCategory: showCatName,
       showSeries: showSerName,
       showValue: showVal,
       showBubbleSize,
-      category: formatChartValWithCode(
-        xv, s.catFormatCodes?.[i] ?? s.catFormatCode ?? null, date1904,
-      ),
+      category: useIndexX
+        ? formatCategoryLabel(
+          (cats[i] ?? String(xv)).toString(),
+          s.catFormatCodes?.[i] ?? s.catFormatCode ?? null,
+          date1904,
+        )
+        : formatChartValWithCode(
+          xv, s.catFormatCodes?.[i] ?? s.catFormatCode ?? null, date1904,
+        ),
       seriesName: s.name,
       sourceValue: yv,
       bubbleSize: s.bubbleSizes?.[i] ?? undefined,
@@ -11080,6 +11837,9 @@ function drawSeriesDataLabels(
       ptToPx,
       richFontFamilyForFace,
       legendKey,
+      effectiveDataLabelTextStyle(ovr, seriesDef),
+      mergeChartLabelBoxes(ovr?.labelBox, seriesDef?.labelBox),
+      shapeRotationDeg,
     );
   }
 }
@@ -11104,9 +11864,12 @@ function drawDataLabelText(
   ptToPx = 1,
   richFontFamilyForFace?: (face: string) => string,
   legendKey?: DataLabelLegendKey,
+  textStyle?: DataLabelTextStyle,
+  labelBox?: ChartLabelBox,
+  shapeRotationDeg = 0,
 ): void {
   ctx.save();
-  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
+  ctx.font = `${textStyle?.fontItalic ? 'italic ' : ''}${bold ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
   drawBoundedDataLabelText(
     ctx,
     text,
@@ -11122,10 +11885,18 @@ function drawDataLabelText(
           ptToPx,
           fontFamily,
           fallbackBold: bold,
+          fallbackItalic: textStyle?.fontItalic,
+          fallbackBaseline: textStyle?.fontBaseline,
+          fallbackColorHidden: textStyle?.fontPaintAuthored === true
+            && (textStyle.fontHidden === true || textStyle.fontColor == null),
           fontFamilyForFace: richFontFamilyForFace,
         }
       : undefined,
     legendKey,
+    textStyle,
+    ptToPx,
+    labelBox,
+    shapeRotationDeg,
   );
   ctx.restore();
 }
@@ -11139,13 +11910,32 @@ function customRichDataLabelOptions(
   ptToPx: number,
   fontFamily: string,
   fallbackBold: boolean,
+  textStyle?: DataLabelTextStyle,
 ): RichDataLabelOptions | undefined {
   if (!override?.text || !override.richRuns || override.richRuns.length === 0) return undefined;
+  return richDataLabelOptions(
+    chart, override.richRuns, ptToPx, fontFamily, fallbackBold, textStyle,
+  );
+}
+
+function richDataLabelOptions(
+  chart: ChartModel,
+  runs: ChartDataLabelOverride['richRuns'],
+  ptToPx: number,
+  fontFamily: string,
+  fallbackBold: boolean,
+  textStyle?: DataLabelTextStyle,
+): RichDataLabelOptions | undefined {
+  if (!runs || runs.length === 0) return undefined;
   return {
-    runs: override.richRuns,
+    runs,
     ptToPx,
     fontFamily,
     fallbackBold,
+    fallbackItalic: textStyle?.fontItalic,
+    fallbackBaseline: textStyle?.fontBaseline,
+    fallbackColorHidden: textStyle?.fontPaintAuthored === true
+      && (textStyle.fontHidden === true || textStyle.fontColor == null),
     fontFamilyForFace: face => chartFontFamily(chart, face, 'minor'),
   };
 }
@@ -11162,20 +11952,33 @@ function drawBoundedDataLabelText(
   layoutReferenceRect: DataLabelRect = bounds,
   rich?: RichDataLabelOptions,
   legendKey?: DataLabelLegendKey,
+  textStyle?: DataLabelTextStyle,
+  textPtToPx = 1,
+  labelBox?: ChartLabelBox,
+  shapeRotationDeg = 0,
 ): void {
   if ((!text && !legendKey) || !Number.isFinite(fontSizePx) || fontSizePx <= 0) return;
   if (legendKey) {
     drawBoundedDataLabelWithLegendKey(
       ctx, text, anchor, bounds, fontSizePx, color, manualLayout,
       layoutReferenceRect, rich, legendKey,
+      textStyle,
+      labelBox,
     );
     return;
   }
   if (rich) {
     const block = resolveRichDataLabelBlock(ctx, rich, fontSizePx, color);
     if (!block) return;
+    const insets = dataLabelInsets(textStyle, textPtToPx);
+    const rotated = rotatedDataLabelSize(
+      block.width + insets.left + insets.right,
+      block.height + insets.top + insets.bottom,
+      textStyle?.textRotation,
+      textStyle?.textVerticalMode,
+    );
     const placement = resolveDataLabelPlacement(
-      anchor, bounds, { w: block.width, h: block.height }, fontSizePx, manualLayout,
+      anchor, bounds, { w: rotated.w, h: rotated.h }, fontSizePx, manualLayout,
       layoutReferenceRect,
     );
     if (!placement) return;
@@ -11184,8 +11987,21 @@ function drawBoundedDataLabelText(
     ctx.beginPath();
     ctx.rect(placement.clip.x, placement.clip.y, placement.clip.w, placement.clip.h);
     ctx.clip();
+    paintChartLabelBox(ctx, labelBox, placement.rect, textPtToPx, shapeRotationDeg);
+    const paintAlign = dataLabelCanvasTextAlign(textStyle, placement.textAlign);
+    const anchored = anchoredDataLabelPoint(
+      placement.x, placement.y, placement.rect,
+      block.height + insets.top + insets.bottom, textStyle, manualLayout != null,
+      paintAlign, placement.textAlign,
+      block.width + insets.left + insets.right, rotated.radians,
+    );
+    const transformed = transformDataLabelText(
+      ctx, anchored.x, anchored.y, rotated.radians, paintAlign,
+      placement.textBaseline, insets,
+    );
     paintRichDataLabelBlock(
-      ctx, block, placement.x, placement.y, placement.textAlign, placement.textBaseline,
+      ctx, block, transformed.x, transformed.y, paintAlign, placement.textBaseline,
+      manualLayout ? Math.max(0, placement.rect.w - insets.left - insets.right) : block.width,
     );
     ctx.restore();
     return;
@@ -11194,20 +12010,33 @@ function drawBoundedDataLabelText(
   const sourceLines = boundDataLabelText(text).value.split(/\r?\n/);
   const measuredW = sourceLines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
   const measuredH = Math.max(lineHeight, sourceLines.length * lineHeight);
+  const insets = dataLabelInsets(textStyle, textPtToPx);
+  const measuredRotated = rotatedDataLabelSize(
+    measuredW + insets.left + insets.right,
+    measuredH + insets.top + insets.bottom,
+    textStyle?.textRotation,
+    textStyle?.textVerticalMode,
+  );
   let placement = resolveDataLabelPlacement(
-    anchor, bounds, { w: measuredW, h: measuredH }, fontSizePx, manualLayout,
+    anchor, bounds, { w: measuredRotated.w, h: measuredRotated.h }, fontSizePx, manualLayout,
     layoutReferenceRect,
   );
   if (!placement) return;
   const measure = (value: string): number => ctx.measureText(value).width;
-  const lines = fitDataLabelLines(
-    text, placement.maxWidth, placement.maxHeight, lineHeight, measure,
+  const lines = fitStyledDataLabelLines(
+    text, placement.maxWidth, placement.maxHeight, lineHeight, measure, textStyle,
   );
   if (lines.length === 0) return;
   const fittedW = lines.reduce((max, line) => Math.max(max, measure(line)), 0);
   const fittedH = lines.length * lineHeight;
+  const fittedRotated = rotatedDataLabelSize(
+    fittedW + insets.left + insets.right,
+    fittedH + insets.top + insets.bottom,
+    textStyle?.textRotation,
+    textStyle?.textVerticalMode,
+  );
   placement = resolveDataLabelPlacement(
-    anchor, bounds, { w: fittedW, h: fittedH }, fontSizePx, manualLayout,
+    anchor, bounds, { w: fittedRotated.w, h: fittedRotated.h }, fontSizePx, manualLayout,
     layoutReferenceRect,
   );
   if (!placement) return;
@@ -11216,16 +12045,31 @@ function drawBoundedDataLabelText(
   ctx.beginPath();
   ctx.rect(placement.clip.x, placement.clip.y, placement.clip.w, placement.clip.h);
   ctx.clip();
+  paintChartLabelBox(ctx, labelBox, placement.rect, textPtToPx, shapeRotationDeg);
+  const textPaintUnavailable = textStyle?.fontPaintAuthored === true
+    && (textStyle.fontHidden === true || textStyle.fontColor == null);
   ctx.fillStyle = color;
-  ctx.textAlign = placement.textAlign;
+  const paintAlign = dataLabelCanvasTextAlign(textStyle, placement.textAlign);
+  ctx.textAlign = paintAlign;
   ctx.textBaseline = placement.textBaseline;
+  const anchored = anchoredDataLabelPoint(
+    placement.x, placement.y, placement.rect,
+    fittedH + insets.top + insets.bottom, textStyle, manualLayout != null,
+    paintAlign, placement.textAlign,
+    fittedW + insets.left + insets.right, fittedRotated.radians,
+  );
+  const transformed = transformDataLabelText(
+    ctx, anchored.x, anchored.y, fittedRotated.radians, paintAlign,
+    placement.textBaseline, insets,
+  );
+  const baselineShift = (textStyle?.fontBaseline ?? 0) * fontSizePx;
   const firstY = placement.textBaseline === 'middle'
-    ? placement.y - ((lines.length - 1) * lineHeight) / 2
+    ? transformed.y - ((lines.length - 1) * lineHeight) / 2
     : placement.textBaseline === 'bottom'
-      ? placement.y - ((lines.length - 1) * lineHeight)
-      : placement.y;
-  for (let index = 0; index < lines.length; index++) {
-    ctx.fillText(lines[index], placement.x, firstY + index * lineHeight);
+      ? transformed.y - ((lines.length - 1) * lineHeight)
+      : transformed.y;
+  if (!textPaintUnavailable) for (let index = 0; index < lines.length; index++) {
+    ctx.fillText(lines[index], transformed.x, firstY + index * lineHeight - baselineShift);
   }
   ctx.restore();
 }
@@ -11244,6 +12088,8 @@ function drawBoundedDataLabelWithLegendKey(
   layoutReferenceRect: DataLabelRect,
   rich: RichDataLabelOptions | undefined,
   legendKey: DataLabelLegendKey,
+  textStyle?: DataLabelTextStyle,
+  labelBox?: ChartLabelBox,
 ): void {
   const { entry, ptToPx, shapeRotationDeg } = legendKey;
   const keyWidth = legendSwatchWidths([entry], fontSizePx, ptToPx)[0] ?? 0;
@@ -11262,10 +12108,16 @@ function drawBoundedDataLabelWithLegendKey(
   );
   const sourceTextHeight = richBlock?.height
     ?? (sourceLines.length > 0 ? Math.max(lineHeight, sourceLines.length * lineHeight) : 0);
+  const insets = dataLabelInsets(textStyle, ptToPx);
+  const sourceWidth = keyWidth + gap + sourceTextWidth + insets.left + insets.right;
+  const sourceHeight = Math.max(keyHeight, sourceTextHeight) + insets.top + insets.bottom;
+  const sourceRotated = rotatedDataLabelSize(
+    sourceWidth, sourceHeight, textStyle?.textRotation, textStyle?.textVerticalMode,
+  );
   let placement = resolveDataLabelPlacement(
     anchor,
     bounds,
-    { w: keyWidth + gap + sourceTextWidth, h: Math.max(keyHeight, sourceTextHeight) },
+    { w: sourceRotated.w, h: sourceRotated.h },
     fontSizePx,
     manualLayout,
     layoutReferenceRect,
@@ -11274,12 +12126,13 @@ function drawBoundedDataLabelWithLegendKey(
 
   let lines = sourceLines;
   if (text && !richBlock) {
-    lines = fitDataLabelLines(
+    lines = fitStyledDataLabelLines(
       text,
       Math.max(0, placement.maxWidth - keyWidth - gap),
       placement.maxHeight,
       lineHeight,
       value => ctx.measureText(value).width,
+      textStyle,
     );
     if (lines.length === 0) return;
   }
@@ -11287,34 +12140,56 @@ function drawBoundedDataLabelWithLegendKey(
     (max, line) => Math.max(max, ctx.measureText(line).width), 0,
   );
   const textHeight = richBlock?.height ?? (lines.length * lineHeight);
-  const totalWidth = keyWidth + gap + textWidth;
-  const totalHeight = Math.max(keyHeight, textHeight);
+  const contentWidth = keyWidth + gap + textWidth;
+  const contentHeight = Math.max(keyHeight, textHeight);
+  const totalWidth = contentWidth + insets.left + insets.right;
+  const totalHeight = contentHeight + insets.top + insets.bottom;
+  const rotated = rotatedDataLabelSize(
+    totalWidth, totalHeight, textStyle?.textRotation, textStyle?.textVerticalMode,
+  );
   placement = resolveDataLabelPlacement(
-    anchor, bounds, { w: totalWidth, h: totalHeight }, fontSizePx, manualLayout,
+    anchor, bounds, { w: rotated.w, h: rotated.h }, fontSizePx, manualLayout,
     layoutReferenceRect,
   );
   if (!placement) return;
 
-  const left = placement.textAlign === 'left'
-    ? placement.x
+  let centerX = placement.textAlign === 'left'
+    ? placement.x + rotated.w / 2
     : placement.textAlign === 'right'
-      ? placement.x - totalWidth
-      : placement.x - totalWidth / 2;
-  const top = placement.textBaseline === 'top'
-    ? placement.y
+      ? placement.x - rotated.w / 2
+      : placement.x;
+  let centerY = placement.textBaseline === 'top'
+    ? placement.y + rotated.h / 2
     : placement.textBaseline === 'bottom'
-      ? placement.y - totalHeight
-      : placement.y - totalHeight / 2;
+      ? placement.y - rotated.h / 2
+      : placement.y;
+  if (manualLayout) {
+    const paintAlign = dataLabelCanvasTextAlign(textStyle, 'center');
+    const anchored = anchoredDataLabelPoint(
+      centerX, centerY, placement.rect, totalHeight, textStyle, true, paintAlign,
+    );
+    centerX = paintAlign === 'left' ? anchored.x + totalWidth / 2
+      : paintAlign === 'right' ? anchored.x - totalWidth / 2 : anchored.x;
+    centerY = anchored.y;
+  }
+  const left = centerX - totalWidth / 2 + insets.left;
+  const top = centerY - totalHeight / 2 + insets.top;
   ctx.save();
   ctx.beginPath();
   ctx.rect(placement.clip.x, placement.clip.y, placement.clip.w, placement.clip.h);
   ctx.clip();
+  paintChartLabelBox(ctx, labelBox, placement.rect, ptToPx, shapeRotationDeg);
+  if (rotated.radians !== 0) {
+    ctx.translate(centerX, centerY);
+    ctx.rotate(rotated.radians);
+    ctx.translate(-centerX, -centerY);
+  }
   drawLegendSwatch(
     ctx,
     entry.swatchStyle,
     entry.color,
     left,
-    top + (totalHeight - keyHeight) / 2,
+    top + (contentHeight - keyHeight) / 2,
     keyWidth,
     keyHeight,
     entry.marker,
@@ -11331,13 +12206,15 @@ function drawBoundedDataLabelWithLegendKey(
     const textX = left + keyWidth + gap;
     if (richBlock) {
       paintRichDataLabelBlock(
-        ctx, richBlock, textX, top + (totalHeight - textHeight) / 2, 'left', 'top',
+        ctx, richBlock, textX, top + (contentHeight - textHeight) / 2, 'left', 'top',
       );
-    } else {
+    } else if (!(textStyle?.fontPaintAuthored === true
+      && (textStyle.fontHidden === true || textStyle.fontColor == null))) {
       ctx.fillStyle = color;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      const firstY = top + (totalHeight - textHeight) / 2;
+      const baselineShift = (textStyle?.fontBaseline ?? 0) * fontSizePx;
+      const firstY = top + (contentHeight - textHeight) / 2 - baselineShift;
       for (let index = 0; index < lines.length; index++) {
         ctx.fillText(lines[index], textX, firstY + index * lineHeight);
       }
@@ -11392,26 +12269,6 @@ function dashPatternForLine(
 ): number[] {
   const scale = Number.isFinite(lineWidth) && lineWidth > 0 ? lineWidth : 1;
   return drawingmlLineDashArray(customDash, preset, scale);
-}
-
-/** True when the series carries any explicit `<c:marker>` detail (symbol, size,
- *  fill, line, line width) or per-point `<c:dPt>` marker overrides — i.e. a reason to route
- *  through {@link drawMarker} instead of the line/area family's historical
- *  fixed-circle fast path. A series without any of these keeps the exact prior
- *  circle marker (byte-stable), so charts that never parsed marker detail are
- *  unchanged. `markerSymbol: "none"` counts as detail (it disables the marker),
- *  handled by the caller's showMarker gate. */
-function seriesHasMarkerDetail(s: ChartSeries): boolean {
-  return (
-    s.markerSymbol != null ||
-    s.markerSize != null ||
-    s.markerFill != null ||
-    s.markerFillPaint !== undefined ||
-    s.markerFillPaintAuthored === true ||
-    s.markerLine != null ||
-    s.markerLineWidthEmu != null ||
-    (s.dataPointOverrides != null && s.dataPointOverrides.length > 0)
-  );
 }
 
 /** Draw error bars for a category-axis series (line / area). Mirrors the scatter
@@ -11561,6 +12418,7 @@ function drawCategoryDataLabels(
   valueDisplayUnits?: ChartDisplayUnits | null,
   legendKeyAt?: (pointIndex: number) => DataLabelLegendKey | undefined,
   isValueVisible?: (value: number) => boolean,
+  shapeRotationDeg = 0,
 ): boolean {
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
@@ -11575,7 +12433,7 @@ function drawCategoryDataLabels(
     // Genuine `<c:delete val="1"/>` (§21.2.2.43) skips; a style/flag-only
     // override is not a delete. Per-point show-flags (§21.2.2.47) win over the
     // series defaults.
-    if (ovr?.deleted) continue;
+    if (dataLabelIsDeleted(seriesDef, ovr)) continue;
     const showCatName = ovr?.showCatName ?? seriesDef?.showCatName;
     const showSerName = ovr?.showSerName ?? seriesDef?.showSerName;
     const showVal     = ovr?.showVal ?? seriesDef?.showVal;
@@ -11617,6 +12475,9 @@ function drawCategoryDataLabels(
       ptToPx,
       richFontFamilyForFace,
       legendKey,
+      effectiveDataLabelTextStyle(ovr, seriesDef),
+      mergeChartLabelBoxes(ovr?.labelBox, seriesDef?.labelBox),
+      shapeRotationDeg,
     );
   }
   return true;
@@ -11637,6 +12498,9 @@ interface ResolvedChartExLabel {
   fontBold?: boolean;
   fontFace?: string;
   manualLayout?: ChartDataLabelOverride['manualLayout'];
+  labelBox?: ChartLabelBox;
+  richRuns?: ChartDataLabelOverride['richRuns'];
+  textStyle: DataLabelTextStyle;
 }
 
 /** Effective CT_Series formatting index. The shared parser preserves authored
@@ -11672,7 +12536,7 @@ function resolveChartExLabel(
   if (!series) return null;
   const definition = series.seriesDataLabels;
   const override = overrideLookup.get(index);
-  if (override?.deleted) return null;
+  if (dataLabelIsDeleted(definition, override)) return null;
   if (!definition && !override && !defaults.visible) return null;
   const suppressValue = typeof valueOption === 'boolean' ? valueOption : false;
   const percentRatio = typeof valueOption === 'number' ? valueOption : undefined;
@@ -11718,6 +12582,10 @@ function resolveChartExLabel(
     fontBold: override?.fontBold ?? definition?.fontBold,
     fontFace: override?.fontFace ?? definition?.fontFace,
     manualLayout: override?.manualLayout,
+    labelBox: mergeChartLabelBoxes(override?.labelBox, definition?.labelBox),
+    // Rich text is authoritative only for a non-empty custom point label.
+    richRuns: override?.text ? override.richRuns : undefined,
+    textStyle: effectiveDataLabelTextStyle(override, definition),
   };
 }
 
@@ -11810,7 +12678,24 @@ function chartExStylePaintDecision(
   const paint = chartExStyleFillPaint(style, index);
   if (paint) return paint;
   const color = chartExStyleColor(chart, style, 'fill', index, count);
-  return color ? { fillType: 'solid', color } : undefined;
+  if (color) return { fillType: 'solid', color };
+  return style.fillPaintAuthored === true ? null : undefined;
+}
+
+function chartExMarkerPaint(
+  chart: ChartModel,
+  index: number,
+  count: number,
+  localStyle: ChartExStyle | null | undefined,
+  legacyColor: string | null | undefined,
+  linkedStyle: ChartExStyle | null | undefined,
+): Fill | null {
+  const local = chartExStylePaintDecision(chart, localStyle, index, count);
+  if (local !== undefined) return local;
+  if (legacyColor) return { fillType: 'solid', color: legacyColor };
+  const linked = chartExStylePaintDecision(chart, linkedStyle, index, count);
+  if (linked !== undefined) return linked;
+  return { fillType: 'solid', color: chartExSemanticFill(chart, index, count) };
 }
 
 function chartExDataPointPaint(
@@ -12011,108 +12896,97 @@ function chartExLegendSeries(
 // point into several synchronous Canvas calls can monopolize the UI thread.
 // Refuse an oversized paint atomically instead of drawing a misleading prefix.
 // This is an availability boundary, not an automatic chart-layout heuristic.
-const MAX_CANVAS_CHART_POINTS = 10_000;
+
 // Marker gradients are resolved for each painted marker. Bound both one
 // recipe and the chart-wide stop registrations so a valid public model cannot
 // turn a bounded point count into unbounded synchronous Canvas work.
 const MAX_CANVAS_MARKER_GRADIENT_STOPS = 4_096;
 const MAX_CANVAS_MARKER_PAINT_COMPONENTS = 1_048_576;
+const MAX_CANVAS_LABEL_GRADIENT_STOPS = MAX_CANVAS_MARKER_GRADIENT_STOPS;
+const MAX_CANVAS_LABEL_PAINT_COMPONENTS = MAX_CANVAS_MARKER_PAINT_COMPONENTS;
 // The package parser already applies its XML-depth ceiling. Keep the same kind
 // of stack-safety boundary for caller-constructed public ChartModel objects.
 const MAX_CANVAS_HIERARCHY_DEPTH = 512;
 
-const CLASSIC_CANVAS_POINT_FAMILIES = new Set([
-  'clusteredBar', 'clusteredBarH', 'stackedBar', 'stackedBarH',
-  'stackedBarPct', 'stackedBarHPct', 'clusteredColumn',
+const CLASSIC_THREE_D_FAMILIES = new Set([
+  'pie',
   'line', 'stackedLine', 'stackedLinePct',
   'area', 'stackedArea', 'stackedAreaPct',
-  'pie', 'doughnut', 'radar', 'scatter', 'bubble', 'stock', 'surface',
+  'clusteredBar', 'clusteredBarH',
+  'stackedBar', 'stackedBarH', 'stackedBarPct', 'stackedBarHPct',
 ]);
 
-/**
- * Count the point slots a classic Canvas renderer may expand. ChartEx families
- * keep their semantic preflights (histogram counts bounded output bins rather
- * than raw observations; hierarchy/box count their structured models).
- */
-function classicCanvasPointCount(chart: ChartModel): number | null {
-  if (!CLASSIC_CANVAS_POINT_FAMILIES.has(chart.chartType)) return null;
-  let total = 0;
-  for (const series of chart.series) {
-    let errorBarPoints = 0;
-    for (const errorBars of series.errBars ?? []) {
-      errorBarPoints = Math.max(errorBarPoints, errorBars.plus.length, errorBars.minus.length);
-    }
-    const points = Math.max(
-      1,
-      chart.categories.length,
-      series.categories?.length ?? 0,
-      series.values.length,
-      series.bubbleSizes?.length ?? 0,
-      series.dataPointOverrides?.length ?? 0,
-      series.dataLabelOverrides?.length ?? 0,
-      series.trendLines?.length ?? 0,
-      errorBarPoints,
-    );
-    if (!Number.isSafeInteger(points) || points > MAX_CANVAS_CHART_POINTS - total) {
-      return MAX_CANVAS_CHART_POINTS + 1;
-    }
-    total += points;
-  }
-  return total;
-}
-
-function classicMarkerPointIsPainted(
+function classicDataLabelPointIsPainted(
   chart: ChartModel,
   series: ChartSeries,
   family: string,
   index: number,
   scatterHasNumericX: boolean,
 ): boolean {
+  if (family === 'surface') return false;
+  if (family === 'area' || family === 'stackedArea' || family === 'stackedAreaPct') {
+    return index < Math.max(
+      chart.categories.length,
+      series.categories?.length ?? 0,
+      series.values.length,
+    );
+  }
   const value = series.values[index];
-  let painted = value != null;
-  if (!painted && (family === 'line' || family === 'stackedLine'
-    || family === 'stackedLinePct')) {
+  if ((family === 'line' || family === 'stackedLine' || family === 'stackedLinePct')
+    && value == null) {
     const renderedByLineFamily = chart.chartType === 'line'
       || chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
-    painted = renderedByLineFamily
+    return renderedByLineFamily
       && (chart.chartType !== 'line' || chart.dispBlanksAs === 'zero');
   }
-  if (!painted) return false;
-  if (family === 'scatter' && scatterHasNumericX) {
+  if (value == null || !Number.isFinite(value)) return false;
+  if ((family === 'pie' || family === 'doughnut') && value <= 0) return false;
+  if (family === 'scatter') {
+    if (!scatterHasNumericX) return true;
     const category = (series.categories ?? chart.categories)[index];
-    if (category == null || !Number.isFinite(Number.parseFloat(category))) return false;
-  }
-  if (family === 'scatter' && chart.chartType === 'bubble') {
-    return (chart.bubbleScale ?? 100) > 0
-      && visibleBubbleSize(chart, series.bubbleSizes?.[index]) != null;
+    return category != null && Number.isFinite(Number.parseFloat(category));
   }
   return true;
 }
 
-function dataLabelLegendKeyCount(
+function markerKeyPaintSizesPx(
   chart: ChartModel,
   series: ChartSeries,
-  family: string,
-  pointCount: number,
-  scatterHasNumericX: boolean,
-): number {
-  if (!series.seriesDataLabels && !(series.dataLabelOverrides?.length)) return 0;
-  const overrides = indexPointOverrides(series.dataLabelOverrides);
-  let count = 0;
-  for (let index = 0; index < pointCount; index++) {
-    const point = overrides.get(index);
-    if (point?.deleted === true) continue;
-    if ((point?.showLegendKey ?? series.seriesDataLabels?.showLegendKey ?? false) !== true) continue;
-    if (!classicMarkerPointIsPainted(chart, series, family, index, scatterHasNumericX)) continue;
-    count++;
+  ptToPx: number,
+): { legend: number; table: number; labels: number } {
+  const legendFontPx = chartTextFontSizePx(chart.legendFontSizeHpt, ptToPx) ?? 10 * ptToPx;
+  const tableFontPx = chartTextFontSizePx(chart.dataTable?.fontSizeHpt, ptToPx) ?? 9 * ptToPx;
+  let labelFontPx = chartTextFontSizePx(
+    series.seriesDataLabels?.fontSizeHpt ?? chart.dataLabelFontSizeHpt,
+    ptToPx,
+  ) ?? 10 * ptToPx;
+  for (const label of series.dataLabelOverrides ?? []) {
+    labelFontPx = Math.max(
+      labelFontPx,
+      chartTextFontSizePx(label.fontSizeHpt, ptToPx) ?? labelFontPx,
+    );
   }
-  return count;
+  // Side legends retain at most two lines. Their marker receives 0.58× the
+  // final row height; data-table and data-label keys are no larger than their
+  // respective font boxes. Use those actual consumer bounds, not markerSize.
+  return {
+    legend: Math.max(2, (2 * legendFontPx + LEGEND_ROW_EXTRA_PX) * 0.58),
+    table: Math.max(2, tableFontPx),
+    labels: Math.max(2, labelFontPx),
+  };
 }
 
 /** @internal Exported for resource-boundary regression tests; package entry
  * points do not expose the renderer module as public API. */
-export function classicMarkerPaintWorkCount(chart: ChartModel): number | null {
-  if (!CLASSIC_CANVAS_POINT_FAMILIES.has(chart.chartType)) return null;
+export function classicMarkerPaintWorkCount(
+  chart: ChartModel,
+  imageLookup?: ChartImageLookup,
+  ptToPx = PT_TO_PX,
+  chartRect?: ChartRect,
+): number | null {
+  const hasClassicMarkers = classicCanvasPointFamilyIsPainted(chart.chartType);
+  const hasBoxMarkers = chart.chartexBox != null;
+  if (!hasClassicMarkers && !hasBoxMarkers) return null;
   const scatterHasNumericX = chart.series.some(series => {
     const family = series.seriesType ?? chart.chartType;
     if (family !== 'scatter') return false;
@@ -12123,10 +12997,26 @@ export function classicMarkerPaintWorkCount(chart: ChartModel): number | null {
   const dataTableMarkerKeysVisible = chartHasDataTable(chart)
     && chartCategories(chart).length > 0
     && chart.dataTable?.showKeys === true;
+  const deletedLegendEntries = deletedLegendEntryIndices(chart);
+  const bubbleScale = chart.chartType === 'bubble' && chartRect
+    ? bubbleSizeToDiameterScale(
+        chart,
+        chart.series.map((series, index) => makeScatterSeriesLayer(chart, series, index)),
+        !scatterHasNumericX,
+        chartRect.w,
+        chartRect.h,
+      )
+    : 0;
   let total = 0;
-  const chargePaint = (paint: Fill | null | undefined, repetitions = 1): boolean => {
+  const chargePaint = (
+    paint: Fill | null | undefined,
+    repetitions = 1,
+    sizePx = Math.max(2, 5 * ptToPx),
+  ): boolean => {
     if (repetitions <= 0 || paint == null) return true;
-    const components = markerPaintComponents(paint);
+    const components = paint.fillType === 'image'
+      ? chartImageFillPaintWorkUpperBound(paint, imageLookup, sizePx, sizePx, ptToPx)
+      : markerPaintComponents(paint);
     if (paint.fillType === 'gradient' && components > MAX_CANVAS_MARKER_GRADIENT_STOPS) {
       return false;
     }
@@ -12137,7 +13027,7 @@ export function classicMarkerPaintWorkCount(chart: ChartModel): number | null {
     total += components * repetitions;
     return true;
   };
-  for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
+  if (hasClassicMarkers) for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
     const series = chart.series[seriesIndex];
     const family = series.seriesType ?? chart.chartType;
     const markerFamily = family === 'line' || family === 'stackedLine'
@@ -12173,23 +13063,220 @@ export function classicMarkerPaintWorkCount(chart: ChartModel): number | null {
         chart, series, family, index, scatterHasNumericX,
       )) continue;
       const point = overrides.get(index);
-      if (effectiveMarkerSymbol(series, point, 'circle', seriesVisible) === 'none') continue;
+      const symbol = effectiveMarkerSymbol(series, point, 'circle', seriesVisible);
+      if (!markerSymbolConsumesFill(symbol)) continue;
       const paint = markerFillPaintFor(series, point, index);
-      if (!chargePaint(paint)) return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+      let sizePx = Math.max(2, (point?.markerSize ?? series.markerSize ?? 5) * ptToPx);
+      if (family === 'scatter' && chart.chartType === 'bubble') {
+        const size = visibleBubbleSize(chart, series.bubbleSizes?.[index]);
+        sizePx = size == null ? 0 : bubbleSizeMagnitude(chart, size) * bubbleScale;
+      } else if (family === 'radar' && point?.markerSize == null && series.markerSize == null
+        && chartRect) {
+        sizePx = Math.max(4 * ptToPx, Math.min(chartRect.w, chartRect.h) * 0.025);
+      }
+      if (!chargePaint(paint, 1, sizePx)) return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
     }
 
-    if (seriesLegendMarkerIsVisible(chart.chartType, chart.scatterStyle, series)) {
-      let repeatedKeys = 0;
-      const legendEntryDeleted = chart.legendEntries?.some(entry =>
-        entry.idx === seriesIndex && entry.deleted === true
-      ) === true;
-      if (chart.showLegend && !legendEntryDeleted) repeatedKeys++;
-      if (dataTableMarkerKeysVisible) repeatedKeys++;
-      repeatedKeys += dataLabelLegendKeyCount(
+    const seriesKeySymbol = series.markerSymbol ?? (family === 'stock' ? 'none' : 'circle');
+    if (markerSymbolConsumesFill(seriesKeySymbol) && seriesLegendMarkerIsVisible(
+      chart.chartType, chart.scatterStyle, series, chart.radarStyle,
+    )) {
+      const legendEntryDeleted = deletedLegendEntries.has(seriesIndex);
+      const labelKeys = dataLabelLegendKeyCount(
         chart, series, family, pointCount, scatterHasNumericX,
       );
-      if (!chargePaint(seriesMarkerFillPaint(series), repeatedKeys)) {
+      const keySizes = markerKeyPaintSizesPx(chart, series, ptToPx);
+      const keyPaint = seriesMarkerFillPaint(series);
+      if ((chart.showLegend && !legendEntryDeleted
+          && !chargePaint(keyPaint, 1, keySizes.legend))
+        || (dataTableMarkerKeysVisible && !chargePaint(keyPaint, 1, keySizes.table))
+        || !chargePaint(keyPaint, labelKeys, keySizes.labels)) {
         return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+      }
+    }
+  }
+  const box = chart.chartexBox;
+  if (box) {
+    const seriesCount = box.series.length;
+    const markerStyle = chart.chartexDataPointMarkerStyle ?? chart.chartexDataPointStyle;
+    const symbol = chart.chartStyleMarkerSymbol ?? chart.chartexMarkerSymbol ?? 'circle';
+    if (markerSymbolConsumesFill(symbol)) {
+      for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex++) {
+        const series = box.series[seriesIndex];
+        if (!series.showNonoutliers && !series.showOutliers) continue;
+        let repetitions = 0;
+        for (const values of series.valuesByCategory) {
+          const stats = computeBoxWhiskerStats(values, series.quartileMethod);
+          if (!stats) continue;
+          if (series.showNonoutliers) repetitions += stats.inner.length;
+          if (series.showOutliers) repetitions += stats.outliers.length;
+        }
+        const styleIndex = chartExSeriesFormatIndex(series, seriesIndex);
+        const paint = chartExMarkerPaint(
+          chart, styleIndex, seriesCount, series.chartexStyle, series.color, markerStyle,
+        );
+        if (!chargePaint(paint, repetitions, Math.max(2, 3 * ptToPx))) {
+          return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+        }
+      }
+    }
+  }
+  return total;
+}
+
+function chartLabelBoxPaintComponents(box: ChartLabelBox | null | undefined): number | null {
+  let total = 0;
+  for (const paint of [box?.fillPaint, box?.borderFill]) {
+    if (!paint) continue;
+    const components = markerPaintComponents(paint);
+    if (paint.fillType === 'gradient' && components > MAX_CANVAS_LABEL_GRADIENT_STOPS) {
+      return null;
+    }
+    total += components;
+  }
+  return total;
+}
+
+function dataLabelHasContent(
+  chart: ChartModel,
+  series: ChartSeries,
+  index: number,
+  override: ChartDataLabelOverride | undefined,
+): boolean {
+  const defaults = series.seriesDataLabels;
+  if (dataLabelIsDeleted(defaults, override)) return false;
+  return Boolean(
+    override?.text
+    || (override?.showVal ?? defaults?.showVal ?? chart.showDataLabels)
+    || (override?.showCatName ?? defaults?.showCatName)
+    || (override?.showSerName ?? defaults?.showSerName)
+    || (override?.showPercent ?? defaults?.showPercent)
+    || (override?.showBubbleSize ?? defaults?.showBubbleSize)
+    || (override?.showLegendKey ?? defaults?.showLegendKey)
+  ) && index < Math.max(series.values.length, series.categories?.length ?? 0, chart.categories.length);
+}
+
+/** Bound structured label-shape work before any family starts painting. The
+ * count follows the shared 2-D/ChartEx label placement and the optional 3-D
+ * label path, plus one generated box per visible 2-D trendline label. */
+/** @internal Exported for resource-boundary regression tests. */
+export function chartLabelPaintWorkCount(
+  chart: ChartModel,
+  threeD: ChartThreeDRenderer | undefined,
+): number | null {
+  let total = 0;
+  const charge = (box: ChartLabelBox | null | undefined): boolean => {
+    const components = chartLabelBoxPaintComponents(box);
+    if (components == null || components > MAX_CANVAS_LABEL_PAINT_COMPONENTS - total) {
+      return false;
+    }
+    total += components;
+    return true;
+  };
+  const threeDLabels = chart.threeD != null && threeD != null
+    && CLASSIC_THREE_D_FAMILIES.has(chart.chartType);
+  const scatterHasNumericX = chart.series.some(series => {
+    const family = series.seriesType ?? chart.chartType;
+    return family === 'scatter' && (series.categories ?? chart.categories).some(category =>
+      Number.isFinite(Number.parseFloat(category))
+    );
+  });
+  const hierarchy = chart.chartexSunburst
+    ? { rows: chart.chartexSunburst.rows, kind: 'sunburst' as const }
+    : chart.chartexTreemap
+      ? { rows: chart.chartexTreemap.rows, kind: 'treemap' as const }
+      : undefined;
+  // Hierarchy ChartEx families do not paint the compatibility series' flat
+  // point labels. Their label indices belong to the interned hierarchy nodes,
+  // handled below. Keeping the paths disjoint also avoids charging one box
+  // twice for shallow hierarchies.
+  if (!hierarchy) for (const series of chart.series) {
+    const overrides = indexPointOverrides(series.dataLabelOverrides);
+    const family = series.seriesType ?? chart.chartType;
+    const pointCount = Math.max(
+      series.values.length, series.categories?.length ?? 0, chart.categories.length,
+    );
+    for (let index = 0; index < pointCount; index++) {
+      const value = series.values[index];
+      if (threeDLabels) {
+        if (value == null || !Number.isFinite(value)) continue;
+        if (chart.showDataLabelsOverMax !== true) {
+          const maximum = series.useSecondaryAxis
+            ? chart.secondaryValAxis?.max : chart.valMax;
+          if (maximum != null && Number.isFinite(maximum) && value > maximum) continue;
+        }
+      } else if (!classicDataLabelPointIsPainted(
+        chart, series, family, index, scatterHasNumericX,
+      )) {
+        continue;
+      }
+      const override = overrides.get(index);
+      if (!dataLabelHasContent(chart, series, index, override)) continue;
+      const box = mergeChartLabelBoxes(override?.labelBox, series.seriesDataLabels?.labelBox);
+      if (box && !charge(box)) return MAX_CANVAS_LABEL_PAINT_COMPONENTS + 1;
+    }
+    if (!threeDLabels) for (const trendline of series.trendLines ?? []) {
+      const hasLabelContent = trendline.dispEq === true || trendline.dispRSqr === true
+        || Boolean(trendline.labelText)
+        || trendline.labelRichRuns?.some(run => run.text.length > 0) === true;
+      if (hasLabelContent && trendline.labelBox
+        && !charge(trendline.labelBox)) return MAX_CANVAS_LABEL_PAINT_COMPONENTS + 1;
+    }
+  }
+
+  // Hierarchy ChartEx families address labels by interned pre-order node index,
+  // not by source row. A single deep row can therefore paint many label boxes,
+  // while repeated parent paths can collapse many rows into one node. Build the
+  // same bounded tree and apply the same semantic visibility resolver as the
+  // painters before charging structured paint work.
+  if (hierarchy && hierarchy.rows.length > 0) {
+    if (hierarchyInputTooLarge(hierarchy.rows)) {
+      return MAX_CANVAS_LABEL_PAINT_COMPONENTS + 1;
+    }
+    const root = buildSunburstTree(hierarchy.rows, hierarchy.kind === 'treemap');
+    if (root.layoutWeight <= 0 || root.children.length === 0) return total;
+    if (hierarchy.kind === 'sunburst') {
+      root.a0 = -Math.PI / 2;
+      root.a1 = root.a0 + Math.PI * 2;
+      layoutSunburstAngles(root);
+    }
+    const series = chart.series[0];
+    const overrides = indexPointOverrides(series?.dataLabelOverrides);
+    const parentMode = chart.chartexTreemap?.parentLabelLayout ?? 'overlapping';
+    const pending = [...root.children];
+    while (pending.length > 0) {
+      const node = pending.pop() as SunburstNode;
+      for (const child of node.children) pending.push(child);
+      // Match the hierarchy painters' first geometry gate. Zero-area treemap
+      // nodes and vanishing sunburst wedges never reach label-box painting, so
+      // charging their structured paint would reject a valid sparse hierarchy.
+      if (node.layoutWeight <= 0
+        || (hierarchy.kind === 'sunburst' && node.a1 - node.a0 <= 1e-4)) continue;
+      let label: ResolvedChartExLabel | null;
+      if (hierarchy.kind === 'sunburst') {
+        label = resolveChartExLabel(
+          chart, series, node.labelIndex, node.label, node.value,
+          { visible: false, showVal: false, showCatName: false },
+          overrides,
+        );
+      } else if (node.children.length > 0) {
+        label = resolveChartExLabel(
+          chart, series, node.labelIndex, node.label, node.value,
+          { visible: parentMode !== 'none', showVal: false, showCatName: true },
+          overrides,
+        );
+        // In overlapping mode only the top-level parent caption reaches the
+        // painter; intermediate parents still partition descendant tiles.
+        if (parentMode === 'overlapping' && node.depth !== 0) label = null;
+      } else {
+        label = resolveChartExLabel(
+          chart, series, node.labelIndex, node.label, node.value,
+          { visible: false, showVal: false, showCatName: false },
+          overrides,
+        );
+      }
+      if (label?.labelBox && !charge(label.labelBox)) {
+        return MAX_CANVAS_LABEL_PAINT_COMPONENTS + 1;
       }
     }
   }
@@ -12211,13 +13298,7 @@ function classicThreeDWorkCount(
   // rejecting it by a cost that will never be allocated would make the
   // tree-shaken fallback less capable than an ordinary 2-D chart.
   if (!chart.threeD || !threeD) return null;
-  if (!new Set([
-    'pie',
-    'line', 'stackedLine', 'stackedLinePct',
-    'area', 'stackedArea', 'stackedAreaPct',
-    'clusteredBar', 'clusteredBarH',
-    'stackedBar', 'stackedBarH', 'stackedBarPct', 'stackedBarHPct',
-  ]).has(chart.chartType)) return null;
+  if (!CLASSIC_THREE_D_FAMILIES.has(chart.chartType)) return null;
   let total = 0;
   for (const series of chart.series) {
     const points = Math.max(1, series.values.length, series.categories?.length ?? 0);
@@ -12661,7 +13742,7 @@ function renderWaterfallChart(
       const dataLabelFont = chartFontFamily(
         chart, label.fontFace ?? chart.dataLabelFontFace, 'minor',
       );
-      ctx.font = `${dataLabelBold ? 'bold ' : ''}${dataLabelFontPx}px ${dataLabelFont}`;
+      ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${dataLabelBold ? 'bold ' : ''}${dataLabelFontPx}px ${dataLabelFont}`;
       drawBoundedDataLabelText(
         ctx,
         label.text,
@@ -12677,6 +13758,14 @@ function renderWaterfallChart(
         labelColor,
         label.manualLayout,
         { x, y, w, h },
+        richDataLabelOptions(
+          chart, label.richRuns, ptToPx, dataLabelFont, dataLabelBold, label.textStyle,
+        ),
+        undefined,
+        label.textStyle,
+        ptToPx,
+        label.labelBox,
+        shapeRotationDeg,
       );
     }
   });
@@ -12832,7 +13921,7 @@ function renderFunnelChart(
       const labelFont = chartFontFamily(
         chart, label.fontFace ?? chart.dataLabelFontFace, 'minor',
       );
-      ctx.font = `${label.fontBold ? 'bold ' : ''}${fontPx}px ${labelFont}`;
+      ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${label.fontBold ? 'bold ' : ''}${fontPx}px ${labelFont}`;
       drawBoundedDataLabelText(
         ctx,
         label.text,
@@ -12848,6 +13937,14 @@ function renderFunnelChart(
         label.fontColor ? `#${label.fontColor}` : '#ffffff',
         label.manualLayout,
         { x, y, w, h },
+        richDataLabelOptions(
+          chart, label.richRuns, ptToPx, labelFont, label.fontBold ?? false, label.textStyle,
+        ),
+        undefined,
+        label.textStyle,
+        ptToPx,
+        label.labelBox,
+        shapeRotationDeg,
       );
     }
   }
@@ -13058,7 +14155,6 @@ function renderBoxWhiskerChart(
   // 3pt observation/outlier dots and a 6pt mean `x`, independent of box width.
   // The linked recipe still supplies the marker symbol and paint.
   const observationMarkerSizePt = 3;
-  const observationMarkerRadiusPx = observationMarkerSizePt * ptToPx / 2;
   const meanMarkerRadiusPx = 3 * ptToPx;
   const box = chart.chartexBox;
   if (!box || box.categories.length === 0 || box.series.length === 0) return;
@@ -13426,7 +14522,7 @@ function renderBoxWhiskerChart(
           : 1;
       const lineEdge = chartExStyleColor(chart, lineStyle, 'line', styleIndex, nSer);
       const markerFill = chartExStyleColor(chart, markerStyle, 'fill', styleIndex, nSer);
-      const markerFillPaint = chartExDataPointPaint(
+      const markerFillPaint = chartExMarkerPaint(
         chart, styleIndex, nSer, s.chartexStyle, s.color, markerStyle,
       );
       const markerEdge = chartExStyleColor(chart, markerStyle, 'line', styleIndex, nSer);
@@ -13503,44 +14599,24 @@ function renderBoxWhiskerChart(
       // Interior sample points. Excel overlays the raw non-outlier values on
       // the box/whiskers when cx:visibility@nonoutliers is enabled.
       if (s.showNonoutliers) {
-        const pR = observationMarkerRadiusPx;
         const pointSymbol = chart.chartStyleMarkerSymbol ?? chart.chartexMarkerSymbol ?? 'circle';
         for (const point of stats.inner) {
           if (pointSymbol === 'none') continue;
           const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
           const pointY = yOf(point);
-          if (markerFillPaint) {
-            ctx.fillStyle = chartExFillStyle(
-              ctx,
-              markerFillPaint,
-              cx - pR,
-              pointY - pR,
-              pR * 2,
-              pR * 2,
-              markerFill ? `#${markerFill}` : fill,
-              shapeRotationDeg,
-            );
-          }
-          if (pointSymbol === 'circle') {
-            ctx.beginPath();
-            ctx.arc(cx, pointY, pR, 0, Math.PI * 2);
-            if (markerFillPaint) ctx.fill();
-            if (markerLineVisible) ctx.stroke();
-          } else {
-            drawMarker(
-              ctx,
-              cx,
-              pointY,
-              pointSymbol,
-              observationMarkerSizePt,
-              markerFillPaint ? (markerFill ? `#${markerFill}` : fill) : 'transparent',
-              markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
-              ptToPx,
-              ctx.lineWidth,
-              markerFillPaint,
-              shapeRotationDeg,
-            );
-          }
+          drawMarker(
+            ctx,
+            cx,
+            pointY,
+            pointSymbol,
+            observationMarkerSizePt,
+            markerFillPaint ? (markerFill ? `#${markerFill}` : fill) : 'transparent',
+            markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
+            ptToPx,
+            ctx.lineWidth,
+            markerFillPaint,
+            shapeRotationDeg,
+          );
         }
       }
 
@@ -13559,42 +14635,23 @@ function renderBoxWhiskerChart(
       // Outlier dots.
       if (s.showOutliers) {
         const pointSymbol = chart.chartStyleMarkerSymbol ?? chart.chartexMarkerSymbol ?? 'circle';
-        const oR = observationMarkerRadiusPx;
         for (const o of stats.outliers) {
           if (pointSymbol === 'none') continue;
           const markerLineVisible = applySeriesLine(markerStyle, markerEdge ?? edge);
           const outlierY = yOf(o);
-          if (markerFillPaint) {
-            ctx.fillStyle = chartExFillStyle(
-              ctx,
-              markerFillPaint,
-              cx - oR,
-              outlierY - oR,
-              oR * 2,
-              oR * 2,
-              markerFill ? `#${markerFill}` : fill,
-              shapeRotationDeg,
-            );
-          }
-          if (pointSymbol === 'circle') {
-            ctx.beginPath(); ctx.arc(cx, outlierY, oR, 0, Math.PI * 2);
-            if (markerFillPaint) ctx.fill();
-            if (markerLineVisible) ctx.stroke();
-          } else {
-            drawMarker(
-              ctx,
-              cx,
-              outlierY,
-              pointSymbol,
-              observationMarkerSizePt,
-              markerFillPaint ? (markerFill ? `#${markerFill}` : fill) : 'transparent',
-              markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
-              ptToPx,
-              ctx.lineWidth,
-              markerFillPaint,
-              shapeRotationDeg,
-            );
-          }
+          drawMarker(
+            ctx,
+            cx,
+            outlierY,
+            pointSymbol,
+            observationMarkerSizePt,
+            markerFillPaint ? (markerFill ? `#${markerFill}` : fill) : 'transparent',
+            markerLineVisible ? (markerEdge ? `#${markerEdge}` : edge) : null,
+            ptToPx,
+            ctx.lineWidth,
+            markerFillPaint,
+            shapeRotationDeg,
+          );
         }
       }
     }
@@ -13991,7 +15048,7 @@ function renderSunburstChart(
 
       const labelX = cx + Math.cos(midA) * midR;
       const labelY = cy + Math.sin(midA) * midR;
-      ctx.font = `${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${nodeLabelFont}`;
+      ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${nodeLabelFont}`;
       if (label.manualLayout) {
         drawBoundedDataLabelText(
           ctx,
@@ -14002,6 +15059,14 @@ function renderSunburstChart(
           nodeLabelColor,
           label.manualLayout,
           { x, y, w, h },
+          richDataLabelOptions(
+            chart, label.richRuns, ptToPx, nodeLabelFont, label.fontBold ?? false, label.textStyle,
+          ),
+          undefined,
+          label.textStyle,
+          ptToPx,
+          label.labelBox,
+          shapeRotationDeg,
         );
         continue;
       }
@@ -14014,7 +15079,7 @@ function renderSunburstChart(
       const deg = ((rot * 180) / Math.PI) % 360;
       if (deg > 90 || deg < -90) rot += Math.PI;
       ctx.rotate(rot);
-      ctx.font = `${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${nodeLabelFont}`;
+      ctx.font = `${label.textStyle.fontItalic ? 'italic ' : ''}${label.fontBold ? 'bold ' : ''}${nodeLabelPx}px ${nodeLabelFont}`;
       drawBoundedDataLabelText(
         ctx,
         labelText,
@@ -14022,6 +15087,16 @@ function renderSunburstChart(
         { x: -radialRoom / 2, y: -arcLen / 2, w: radialRoom, h: arcLen },
         nodeLabelPx,
         nodeLabelColor,
+        undefined,
+        { x: -radialRoom / 2, y: -arcLen / 2, w: radialRoom, h: arcLen },
+        richDataLabelOptions(
+          chart, label.richRuns, ptToPx, nodeLabelFont, label.fontBold ?? false, label.textStyle,
+        ),
+        undefined,
+        label.textStyle,
+        ptToPx,
+        label.labelBox,
+        shapeRotationDeg,
       );
       ctx.restore();
     }
@@ -14293,6 +15368,15 @@ function renderTreemapChart(
           nodeLabelColor,
           parentLabel.manualLayout,
           r,
+          richDataLabelOptions(
+            chart, parentLabel.richRuns, ptToPx, parentFontFamily, nodeLabelBold,
+            parentLabel.textStyle,
+          ),
+          undefined,
+          parentLabel.textStyle,
+          ptToPx,
+          parentLabel.labelBox,
+          shapeRotationDeg,
         );
       }
       return;
@@ -14360,6 +15444,15 @@ function renderTreemapChart(
       leafLabel.fontColor ? `#${leafLabel.fontColor}` : nodeLabelColor,
       leafLabel.manualLayout,
       r,
+      richDataLabelOptions(
+        chart, leafLabel.richRuns, ptToPx, leafFontFamily, leafLabel.fontBold ?? false,
+        leafLabel.textStyle,
+      ),
+      undefined,
+      leafLabel.textStyle,
+      ptToPx,
+      leafLabel.labelBox,
+      shapeRotationDeg,
     );
   };
 
@@ -14561,7 +15654,7 @@ function chartSpaceRoundedPath(
  * Render a chart (background frame + dispatch on `chartType`).
  * `rect` is in pixel coordinates on the target canvas.
  */
-export function renderChart(
+function renderChartImpl(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
   rect: ChartRect,
@@ -14582,6 +15675,8 @@ export function renderChart(
   threeD?: ChartThreeDRenderer,
   /** Optional offline Region Map renderer. */
   regionMap?: ChartRegionMapRenderer,
+  /** Host-warmed image cache used by picture-fill availability preflight. */
+  imageLookup?: ChartImageLookup,
 ): void {
   // The per-family renderers (and the early-return/default text paths below)
   // mutate shared canvas state — textAlign, textBaseline, font, fillStyle,
@@ -14592,6 +15687,12 @@ export function renderChart(
   // caller instead of requiring each call site to remember to do so.
   ctx.save();
   try {
+    // Refuse oversized caller-supplied classic models before visibility/style
+    // projections allocate replacement series, override, or trendline arrays.
+    // Parsed packages are already bounded, but the public ChartModel contract
+    // can also be constructed directly by an application.
+    const sourceStructureCount = sourceChartStructureCount(chart);
+    if (rejectOversizedCanvasChart(ctx, rect, sourceStructureCount)) return;
     chart = applyPlotVisibleOnly(chart);
     chart = applyLinkedChartStyleRoles(chart);
     const { x, y, w, h } = rect;
@@ -14630,31 +15731,21 @@ export function renderChart(
       // `<a:ln>` with no `@w` means width 0 per ECMA-376 §20.1.2.2.24, i.e. invisible;
       // but Excel renders a fill-without-width line as a ~hairline, so we draw 1px to
       // match the app rather than dropping a declared border.
-      ctx.lineWidth = chart.chartBorderWidthEmu
+      const totalLineWidth = chart.chartBorderWidthEmu
         ? Math.max(0.5, chart.chartBorderWidthEmu / EMU_PER_PT) * ptToPx
         : 1;
       ctx.setLineDash(dashPatternForLine(
-        chart.chartBorderCustomDash, chart.chartBorderDash, ctx.lineWidth,
+        chart.chartBorderCustomDash, chart.chartBorderDash, totalLineWidth,
       ));
       ctx.lineCap = chart.chartBorderCap === 'rnd'
         ? 'round' : chart.chartBorderCap === 'sq' ? 'square' : 'butt';
       ctx.lineJoin = chart.chartBorderJoin === 'round' || chart.chartBorderJoin === 'bevel'
         ? chart.chartBorderJoin : 'miter';
       // Inset by half the line width so the full stroke stays inside the rect.
-      const lw = ctx.lineWidth;
-      if (rounded) {
-        chartSpaceRoundedPath(
-          ctx,
-          x + lw / 2,
-          y + lw / 2,
-          Math.max(0, w - lw),
-          Math.max(0, h - lw),
-          Math.max(0, cornerRadius - lw / 2),
-        );
-        ctx.stroke();
-      } else {
-        ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
-      }
+      strokeChartFrameRect(
+        ctx, x, y, w, h, totalLineWidth, chart.chartBorderCompound,
+        rounded ? cornerRadius : 0,
+      );
         ctx.restore();
       }
     }
@@ -14675,12 +15766,14 @@ export function renderChart(
     }
 
     const classicPointCount = classicCanvasPointCount(chart);
-    const classicMarkerPaintWork = classicPointCount != null
-      && classicPointCount <= MAX_CANVAS_CHART_POINTS
-      ? classicMarkerPaintWorkCount(chart) : null;
+    const classicMarkerPaintWork = (classicPointCount != null || chart.chartexBox != null)
+      && (classicPointCount ?? 0) <= MAX_CANVAS_CHART_POINTS
+      ? classicMarkerPaintWorkCount(chart, imageLookup, ptToPx, rect) : null;
     const classicThreeDWork = classicThreeDWorkCount(chart, threeD);
+    const classicLabelPaintWork = chartLabelPaintWorkCount(chart, threeD);
     if (
-      (classicPointCount != null || classicMarkerPaintWork != null || classicThreeDWork != null)
+      (classicPointCount != null || classicMarkerPaintWork != null
+        || classicThreeDWork != null || classicLabelPaintWork != null)
       && rejectOversizedCanvasChart(
         ctx,
         rect,
@@ -14690,6 +15783,9 @@ export function renderChart(
             && classicMarkerPaintWork > MAX_CANVAS_MARKER_PAINT_COMPONENTS
             ? MAX_CANVAS_CHART_POINTS + 1 : 0,
           classicThreeDWork ?? 0,
+          classicLabelPaintWork != null
+            && classicLabelPaintWork > MAX_CANVAS_LABEL_PAINT_COMPONENTS
+            ? MAX_CANVAS_CHART_POINTS + 1 : 0,
         ),
       )
     ) {
@@ -14779,4 +15875,21 @@ export function renderChart(
   } finally {
     ctx.restore();
   }
+}
+
+export function renderChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  rect: ChartRect,
+  ptToPx: number = PT_TO_PX,
+  shapeRotationDeg = 0,
+  threeD?: ChartThreeDRenderer,
+  regionMap?: ChartRegionMapRenderer,
+  imageLookup?: ChartImageLookup,
+): void {
+  withChartImageLookup(imageLookup, () => {
+    renderChartImpl(
+      ctx, chart, rect, ptToPx, shapeRotationDeg, threeD, regionMap, imageLookup,
+    );
+  });
 }

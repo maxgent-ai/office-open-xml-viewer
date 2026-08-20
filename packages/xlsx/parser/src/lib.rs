@@ -373,6 +373,10 @@ struct WorkbookShared {
     /// sheet's shape tree. Keeping the complete recipes avoids the previous
     /// per-sheet theme re-inflate and width-only `lnStyleLst` projection.
     theme_format_scheme: Rc<ooxml_common::theme::ThemeFormatScheme>,
+    /// Image relationships owned by the workbook theme part. Chart Style
+    /// `fillRef` recipes resolve `blipFill` rIds in this scope, not in the
+    /// chart or style part.
+    theme_chart_images: Rc<ooxml_common::chart::ChartImageRelationships>,
     /// Workbook theme `(majorFont.latin, minorFont.latin)` Latin faces
     /// (§20.1.4.2). Chart-text fallback font (CH10).
     theme_fonts: (Option<String>, Option<String>),
@@ -400,6 +404,7 @@ struct XlsxThemeData {
     colors: Vec<String>,
     format_scheme: ooxml_common::theme::ThemeFormatScheme,
     fonts: (Option<String>, Option<String>),
+    chart_images: ooxml_common::chart::ChartImageRelationships,
 }
 
 impl XlsxThemeData {
@@ -411,7 +416,16 @@ impl XlsxThemeData {
         let Ok(xml) = read_zip_string(archive, &theme_path) else {
             return Self::default();
         };
-        Self::parse(&xml)
+        let mut theme = Self::parse(&xml);
+        let rels_path = ooxml_common::rels::relationship_part_path(&theme_path);
+        if let Ok(rels_xml) = read_zip_string(archive, &rels_path) {
+            theme.chart_images.insert_part_relationships(
+                ooxml_common::chart::ChartImageSource::Theme,
+                &theme_path,
+                &rels_xml,
+            );
+        }
+        theme
     }
 
     fn parse(xml: &str) -> Self {
@@ -426,6 +440,7 @@ impl XlsxThemeData {
             colors,
             format_scheme: ooxml_common::theme::ThemeFormatScheme::parse(xml),
             fonts: (theme_fonts.major.latin, theme_fonts.minor.latin),
+            chart_images: ooxml_common::chart::ChartImageRelationships::default(),
         }
     }
 }
@@ -468,6 +483,7 @@ impl WorkbookShared {
         let theme_colors: Rc<[String]> = theme.colors.into();
         let theme_format_scheme = Rc::new(theme.format_scheme);
         let theme_fonts = theme.fonts;
+        let theme_chart_images = Rc::new(theme.chart_images);
         let (default_font, chart_number_formats, styles) = if include_full_styles {
             match parse_styles(archive, theme_colors.as_ref()) {
                 Ok(parsed) => (
@@ -496,6 +512,7 @@ impl WorkbookShared {
                 sheets,
                 theme_colors,
                 theme_format_scheme,
+                theme_chart_images,
                 theme_fonts,
                 default_font,
                 chart_number_formats,
@@ -634,7 +651,7 @@ fn finalize_projected_sheet(
         }
     };
     let defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
-    let charts = load_sheet_charts(
+    let charts = load_sheet_charts_with_theme_images(
         archive,
         sheet_path,
         Some(ChartReferenceContext {
@@ -654,6 +671,7 @@ fn finalize_projected_sheet(
             shared.theme_fonts.1.as_deref(),
         ),
         Some(shared.theme_format_scheme.as_ref()),
+        shared.theme_chart_images.as_ref(),
     );
     ws.charts = charts;
     ws.shape_groups = load_sheet_shape_groups(

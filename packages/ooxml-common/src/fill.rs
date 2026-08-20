@@ -41,13 +41,19 @@ pub struct FillRect {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TileInfo {
-    pub tx: i64,
-    pub ty: i64,
-    pub sx: f64,
-    pub sy: f64,
-    pub flip: String,
-    /// Optional CT_TileInfoProperties registration point. The schema declares
-    /// no default; hosts may apply their own compatibility policy when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ty: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sx: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sy: Option<f64>,
+    /// `CT_TileInfoProperties@flip` has the schema default `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip: Option<String>,
+    /// The remaining optional placement attributes have no schema defaults;
+    /// absence stays explicit so chart paint does not invent semantics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub algn: Option<String>,
 }
@@ -143,8 +149,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 pub fn parse_relative_rect(node: Node<'_, '_>) -> FillRect {
     let read = |name: &str| {
         attr(node, name)
-            .and_then(|value| value.parse::<f64>().ok())
-            .map(|value| value / 100_000.0)
+            .and_then(|value| crate::units::drawingml_percentage_to_fraction(&value))
             .unwrap_or(0.0)
     };
     FillRect {
@@ -161,8 +166,7 @@ pub fn parse_fill_rect(stretch: Node<'_, '_>) -> Option<FillRect> {
     let fill_rect = child(stretch, "fillRect")?;
     let read = |name: &str| {
         attr(fill_rect, name)
-            .and_then(|value| value.parse::<f64>().ok())
-            .map(|value| value / 100_000.0)
+            .and_then(|value| crate::units::drawingml_percentage_to_fraction(&value))
             .unwrap_or(0.0)
     };
     let rect = FillRect {
@@ -178,26 +182,16 @@ pub fn parse_fill_rect(stretch: Node<'_, '_>) -> Option<FillRect> {
     }
 }
 
-/// Parse `<a:tile>` preserving optional host policy: zero offsets, 100% scale,
-/// and no mirroring are schema defaults, while `algn` has no normative default.
+/// Parse `<a:tile>`, applying only the schema-defined `flip="none"` default.
 pub fn parse_tile(tile: Node<'_, '_>) -> TileInfo {
-    let coordinate = |name: &str| {
-        attr(tile, name)
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(0)
-    };
-    let scale = |name: &str| {
-        attr(tile, name)
-            .and_then(|value| value.parse::<f64>().ok())
-            .map(|value| value / 100_000.0)
-            .unwrap_or(1.0)
-    };
     TileInfo {
-        tx: coordinate("tx"),
-        ty: coordinate("ty"),
-        sx: scale("sx"),
-        sy: scale("sy"),
-        flip: attr(tile, "flip").unwrap_or_else(|| "none".to_owned()),
+        tx: attr(tile, "tx").and_then(|value| crate::units::coordinate_to_emu(&value)),
+        ty: attr(tile, "ty").and_then(|value| crate::units::coordinate_to_emu(&value)),
+        sx: attr(tile, "sx")
+            .and_then(|value| crate::units::drawingml_percentage_to_fraction(&value)),
+        sy: attr(tile, "sy")
+            .and_then(|value| crate::units::drawingml_percentage_to_fraction(&value)),
+        flip: Some(attr(tile, "flip").unwrap_or_else(|| "none".to_string())),
         algn: attr(tile, "algn"),
     }
 }
@@ -317,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn blip_placement_parsers_preserve_signed_insets_and_tile_defaults() {
+    fn blip_placement_parsers_preserve_signed_insets_and_tile_attribute_presence() {
         let stretch_xml =
             format!(r#"<a:stretch xmlns:a="{NS}"><a:fillRect l="10000" r="-7574"/></a:stretch>"#,);
         let stretch = doc(&stretch_xml);
@@ -336,14 +330,35 @@ mod tests {
         assert_eq!(
             parse_tile(tile.root_element()),
             TileInfo {
-                tx: 0,
-                ty: 0,
-                sx: 1.0,
-                sy: 1.0,
-                flip: "none".to_owned(),
+                tx: None,
+                ty: None,
+                sx: None,
+                sy: None,
+                flip: Some("none".to_string()),
                 algn: None,
             },
         );
+
+        let strict_stretch_xml =
+            format!(r#"<a:stretch xmlns:a="{NS}"><a:fillRect l="25%" r="-10%"/></a:stretch>"#);
+        let strict_stretch = doc(&strict_stretch_xml);
+        assert_eq!(
+            parse_fill_rect(strict_stretch.root_element()),
+            Some(FillRect {
+                l: 0.25,
+                t: 0.0,
+                r: -0.1,
+                b: 0.0
+            }),
+        );
+        let strict_tile_xml = format!(
+            r#"<a:tile xmlns:a="{NS}" tx="1pt" ty="-0.5pt" sx="50%" sy="125%" algn="tl"/>"#
+        );
+        let strict_tile = doc(&strict_tile_xml);
+        assert_eq!(parse_tile(strict_tile.root_element()).tx, Some(12_700));
+        assert_eq!(parse_tile(strict_tile.root_element()).ty, Some(-6_350));
+        assert_eq!(parse_tile(strict_tile.root_element()).sx, Some(0.5));
+        assert_eq!(parse_tile(strict_tile.root_element()).sy, Some(1.25));
     }
 
     /// gradFill: stops parsed + sorted, linear angle from `<a:lin ang>`.

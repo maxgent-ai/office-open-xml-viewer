@@ -608,10 +608,12 @@ export function fitTrendline(
     const period = Math.max(2, Math.round(opts?.period ?? 2));
     if (n < period) return { xs: [], ys: [] };
     const ox: number[] = []; const oy: number[] = [];
+    let sum = 0;
+    for (let index = 0; index < period; index++) sum += ys[index];
     for (let i = period - 1; i < n; i++) {
-      let sum = 0;
-      for (let k = 0; k < period; k++) sum += ys[i - k];
       ox.push(xs[i]); oy.push(sum / period);
+      const next = i + 1;
+      if (next < n) sum += ys[next] - ys[next - period];
     }
     return { xs: ox, ys: oy };
   }

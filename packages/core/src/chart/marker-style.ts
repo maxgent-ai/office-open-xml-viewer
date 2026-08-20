@@ -1,5 +1,112 @@
 import type { Fill } from '../types/common';
-import type { ChartDataPointOverride, ChartSeries } from '../types/chart';
+import type { ChartDataPointOverride, ChartModel, ChartSeries } from '../types/chart';
+import { dataLabelIsDeleted } from './data-label-style.js';
+
+/** Index series legend deletions once instead of rescanning all entries for
+ * every series at the public-model resource boundary. */
+export function deletedLegendEntryIndices(chart: ChartModel): ReadonlySet<number> {
+  const deleted = new Set<number>();
+  for (const entry of chart.legendEntries ?? []) {
+    if (entry.deleted === true) deleted.add(entry.idx);
+  }
+  return deleted;
+}
+
+/** True when a series has authored marker geometry/paint or point overrides. */
+export function seriesHasMarkerDetail(series: ChartSeries): boolean {
+  return series.markerSymbol != null
+    || series.markerSize != null
+    || series.markerFill != null
+    || series.markerFillPaint !== undefined
+    || series.markerFillPaintAuthored === true
+    || series.markerLine != null
+    || series.markerLineWidthEmu != null;
+}
+
+export function pointHasMarkerDetail(point: ChartDataPointOverride | undefined): boolean {
+  return point != null && (
+    point.markerSymbol != null
+    || point.markerSize != null
+    || point.markerFill != null
+    || point.color != null
+    || point.markerFillPaint !== undefined
+    || point.markerFillPaintAuthored === true
+    || point.markerLine != null
+    || point.markerLineWidthEmu != null
+  );
+}
+
+/** Open stroke-only symbols do not consume a fill recipe. */
+export function markerSymbolConsumesFill(symbol: string | null | undefined): boolean {
+  return symbol !== 'none' && symbol !== 'x' && symbol !== 'plus';
+}
+
+/** Whether one classic-series point can reach the marker painter. Shared with
+ * image prefetch and paint-work preflight so hidden/null points do no I/O. */
+export function classicMarkerPointIsPainted(
+  chart: ChartModel,
+  series: ChartSeries,
+  family: string,
+  index: number,
+  scatterHasNumericX: boolean,
+): boolean {
+  const value = series.values[index];
+  let painted = value != null;
+  if (!painted && (family === 'line' || family === 'stackedLine'
+    || family === 'stackedLinePct')) {
+    const renderedByLineFamily = chart.chartType === 'line'
+      || chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
+    painted = renderedByLineFamily
+      && (chart.chartType !== 'line' || chart.dispBlanksAs === 'zero');
+  }
+  if (!painted) return false;
+  if (family === 'scatter' && scatterHasNumericX) {
+    const category = (series.categories ?? chart.categories)[index];
+    if (category == null || !Number.isFinite(Number.parseFloat(category))) return false;
+  }
+  if (family === 'scatter' && chart.chartType === 'bubble') {
+    const size = series.bubbleSizes?.[index];
+    if (size == null || !Number.isFinite(size) || size === 0) return false;
+    if (size < 0 && chart.showNegativeBubbles !== true) return false;
+    return (chart.bubbleScale ?? 100) > 0;
+  }
+  return true;
+}
+
+/** Count visible data-label legend keys that reuse the series marker paint. */
+export function dataLabelLegendKeyCount(
+  chart: ChartModel,
+  series: ChartSeries,
+  family: string,
+  pointCount: number,
+  scatterHasNumericX: boolean,
+): number {
+  // Radar currently has no data-label consumer; do not prefetch or charge keys
+  // that the family renderer cannot paint.
+  if (family === 'radar') return 0;
+  if (!series.seriesDataLabels && !(series.dataLabelOverrides?.length)) return 0;
+  const overrides = new Map((series.dataLabelOverrides ?? []).map(point => [point.idx, point]));
+  let count = 0;
+  for (let index = 0; index < pointCount; index++) {
+    const point = overrides.get(index);
+    if (dataLabelIsDeleted(series.seriesDataLabels, point)) continue;
+    if ((point?.showLegendKey ?? series.seriesDataLabels?.showLegendKey ?? false) !== true) continue;
+    if (!classicMarkerPointIsPainted(chart, series, family, index, scatterHasNumericX)) continue;
+    count++;
+  }
+  return count;
+}
+
+/** Whether the current classic family routes CT_DTable through its renderer. */
+export function chartDataTableFamilyIsPainted(chartType: string): boolean {
+  return chartType === 'line' || chartType === 'stackedLine'
+    || chartType === 'stackedLinePct' || chartType === 'area'
+    || chartType === 'stackedArea' || chartType === 'stackedAreaPct'
+    || chartType === 'stock' || chartType === 'clusteredBar'
+    || chartType === 'clusteredBarH' || chartType === 'stackedBar'
+    || chartType === 'stackedBarH' || chartType === 'stackedBarPct'
+    || chartType === 'stackedBarHPct';
+}
 
 /** A point marker is more specific than the series marker visibility. */
 export function hasVisiblePointMarkerOverride(series: ChartSeries): boolean {
@@ -28,11 +135,13 @@ export function seriesLegendMarkerIsVisible(
   chartType: string | undefined,
   scatterStyle: string | null | undefined,
   series: ChartSeries,
+  radarStyle?: string | null,
 ): boolean {
   const family = series.seriesType ?? chartType;
   const lineFamily = family === 'line' || family === 'stackedLine'
-    || family === 'stackedLinePct' || family === 'stock';
+    || family === 'stackedLinePct' || family === 'stock' || family === 'radar';
   if (!lineFamily && family !== 'scatter') return false;
+  if (family === 'radar' && radarStyle === 'filled') return false;
   if (family === 'scatter'
     && (scatterStyle === 'lineNoMarker' || scatterStyle === 'smoothNoMarker')) return false;
   const symbol = series.markerSymbol ?? (family === 'stock' ? 'none' : 'circle');

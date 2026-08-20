@@ -1,5 +1,5 @@
 import { drawImageCropped, renderChart } from '@silurus/ooxml-core';
-import type { ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
+import type { ChartImageLookup, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
 import type {
   ImagePaintResourceDescriptor,
   LayoutRect,
@@ -90,6 +90,7 @@ function paintDrawableResource(
 export function createCanonicalCanvasPaintResourceHandlers(
   threeD?: ChartThreeDRenderer,
   regionMap?: ChartRegionMapRenderer,
+  chartImageLookup?: ChartImageLookup,
 ): CanvasPaintResourceHandlers {
   return Object.freeze({
   image(resource, bounds, ctx) {
@@ -106,6 +107,7 @@ export function createCanonicalCanvasPaintResourceHandlers(
       0,
       threeD,
       regionMap,
+      chartImageLookup,
     );
   },
   math(resource, bounds, ctx) {

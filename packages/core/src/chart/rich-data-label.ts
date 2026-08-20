@@ -6,19 +6,27 @@ export interface RichDataLabelOptions {
   ptToPx: number;
   fontFamily: string;
   fallbackBold: boolean;
+  fallbackItalic?: boolean;
+  /** Normalized baseline shift inherited from the label's default run. */
+  fallbackBaseline?: number;
+  /** Effective label-default text paint is absent/unresolved. */
+  fallbackColorHidden?: boolean;
   fontFamilyForFace?: (face: string) => string;
 }
 
 export interface RichDataLabelPaintRun {
   text: string;
   font: string;
-  fillStyle: string;
+  fillStyle: string | null;
   width: number;
   fontSizePx: number;
+  baselineShiftPx: number;
 }
 
 export interface RichDataLabelBlock {
   lines: RichDataLabelPaintRun[][];
+  /** Per-line alignment authored on the owning DrawingML paragraph. */
+  lineAligns: Array<string | null>;
   lineHeights: number[];
   lineWidths: number[];
   width: number;
@@ -36,6 +44,7 @@ export function resolveRichDataLabelBlock(
   fallbackColor: string,
 ): RichDataLabelBlock | null {
   const lines: RichDataLabelPaintRun[][] = [[]];
+  const lineAligns: Array<string | null> = [null];
   let scalarCount = 0;
   const cleanColor = (value: string | null | undefined): string | null => {
     if (!value) return null;
@@ -46,6 +55,9 @@ export function resolveRichDataLabelBlock(
     runIndex < options.runs.length && runIndex < MAX_RUNS;
     runIndex++) {
     const source = options.runs[runIndex];
+    if (source.text !== '\n' && lineAligns[lines.length - 1] == null) {
+      lineAligns[lines.length - 1] = source.paragraphAlign ?? null;
+    }
     const fontSizePx = chartTextFontSizePx(source.fontSizeHpt, options.ptToPx)
       ?? fallbackFontSizePx;
     const authoredFace = source.fontFace?.trim().replaceAll('"', '');
@@ -53,8 +65,14 @@ export function resolveRichDataLabelBlock(
     const fontFamily = authoredFace && options.fontFamilyForFace
       ? options.fontFamilyForFace(authoredFace)
       : safeFace ? `"${safeFace}", Calibri, Arial, sans-serif` : options.fontFamily;
-    const font = `${(source.bold ?? options.fallbackBold) ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
-    const fillStyle = cleanColor(source.color) ?? fallbackColor;
+    const italic = source.italic ?? options.fallbackItalic ?? false;
+    const font = `${italic ? 'italic ' : ''}${(source.bold ?? options.fallbackBold) ? 'bold ' : ''}${fontSizePx}px ${fontFamily}`;
+    const baselineShiftPx = (source.baseline ?? options.fallbackBaseline ?? 0) * fontSizePx;
+    const sourcePaintAuthored = source.colorPaintAuthored === true
+      || source.color != null || source.colorHidden === true;
+    const fillStyle = sourcePaintAuthored
+      ? (source.colorHidden === true ? null : cleanColor(source.color))
+      : options.fallbackColorHidden === true ? null : fallbackColor;
     let chunk = '';
     const flush = (): void => {
       if (!chunk) return;
@@ -63,6 +81,7 @@ export function resolveRichDataLabelBlock(
         text: chunk, font, fillStyle,
         width: ctx.measureText(chunk).width,
         fontSizePx,
+        baselineShiftPx,
       });
       chunk = '';
     };
@@ -84,17 +103,24 @@ export function resolveRichDataLabelBlock(
         flush();
         if (lines.length >= MAX_LINES) break outer;
         lines.push([]);
+        // A newline embedded in one DrawingML run stays in the same paragraph,
+        // so the paragraph alignment continues on the following visual line.
+        // The synthetic paragraph-boundary run has no alignment; the next real
+        // run will set the new paragraph's value as before.
+        lineAligns.push(source.paragraphAlign ?? null);
       } else chunk += character;
     }
     flush();
   }
   if (!lines.some(line => line.length > 0)) return null;
-  const lineHeights = lines.map(line =>
-    Math.max(fallbackFontSizePx, ...line.map(run => run.fontSizePx)) * 1.15
-  );
+  const lineHeights = lines.map(line => Math.max(
+    fallbackFontSizePx * 1.15,
+    ...line.map(run => run.fontSizePx * 1.15 + Math.abs(run.baselineShiftPx)),
+  ));
   const lineWidths = lines.map(line => line.reduce((sum, run) => sum + run.width, 0));
   return {
     lines,
+    lineAligns,
     lineHeights,
     lineWidths,
     width: Math.max(0, ...lineWidths),
@@ -109,6 +135,7 @@ export function paintRichDataLabelBlock(
   y: number,
   textAlign: CanvasTextAlign = 'center',
   textBaseline: CanvasTextBaseline = 'middle',
+  containerWidth = block.width,
 ): void {
   const top = textBaseline === 'top'
     ? y : textBaseline === 'bottom' ? y - block.height : y - block.height / 2;
@@ -116,17 +143,32 @@ export function paintRichDataLabelBlock(
   for (let lineIndex = 0; lineIndex < block.lines.length; lineIndex++) {
     const line = block.lines[lineIndex];
     const lineWidth = block.lineWidths[lineIndex];
-    let cursorX = textAlign === 'left' ? x : textAlign === 'right' ? x - lineWidth : x - lineWidth / 2;
+    const paragraphAlign = block.lineAligns[lineIndex];
+    const effectiveAlign: CanvasTextAlign = paragraphAlign === 'l' ? 'left'
+      : paragraphAlign === 'r' ? 'right'
+        : paragraphAlign === 'ctr' ? 'center' : textAlign;
+    // `just` and `dist` need word/glyph expansion. Retain the authored token
+    // while avoiding invented distribution geometry.
+    const containerLeft = textAlign === 'left' ? x
+      : textAlign === 'right' ? x - containerWidth : x - containerWidth / 2;
+    const containerRight = containerLeft + containerWidth;
+    let cursorX = effectiveAlign === 'left' ? containerLeft
+      : effectiveAlign === 'right' ? containerRight - lineWidth
+        : containerLeft + (containerWidth - lineWidth) / 2;
     const paintY = textBaseline === 'top'
       ? lineTop : textBaseline === 'bottom'
         ? lineTop + block.lineHeights[lineIndex]
         : lineTop + block.lineHeights[lineIndex] / 2;
     for (const run of line) {
       ctx.font = run.font;
+      if (run.fillStyle == null) {
+        cursorX += run.width;
+        continue;
+      }
       ctx.fillStyle = run.fillStyle;
       ctx.textAlign = 'left';
       ctx.textBaseline = textBaseline;
-      ctx.fillText(run.text, cursorX, paintY);
+      ctx.fillText(run.text, cursorX, paintY - run.baselineShiftPx);
       cursorX += run.width;
     }
     lineTop += block.lineHeights[lineIndex];

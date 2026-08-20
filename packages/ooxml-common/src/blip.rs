@@ -22,6 +22,7 @@ pub const R_NS: &str = relationships::TRANSITIONAL;
 /// vector image carries `<a:extLst><a:ext uri="{96DAC541-…}"><asvg:svgBlip
 /// r:embed="…"/></a:ext></a:extLst>`.
 pub const SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
+pub const SVG_BLIP_NS: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
 
 /// Resolve a blip-like node's `r:embed` relationship id (the raster image, or
 /// an `svgBlip`'s vector target). Reads the `embed` attribute in the
@@ -35,8 +36,9 @@ pub fn blip_embed_rid(node: &Node<'_, '_>) -> Option<String> {
 }
 
 /// Resolve the relationship id of the vector original from an `<a:blip>`'s
-/// `asvg:svgBlip` extension. Matching is by namespace-local element name
-/// (`svgBlip`), so the producer's prefix (`asvg:` etc.) does not matter. Returns
+/// `asvg:svgBlip` extension. Both the registered extension URI and Microsoft
+/// SVG namespace are required; an unrelated extension may legally reuse the
+/// same local name. The producer's prefix (`asvg:` etc.) does not matter. Returns
 /// `None` when the blip carries no svgBlip extension (the common, raster-only
 /// case).
 pub fn svg_blip_rid(blip: Node<'_, '_>) -> Option<String> {
@@ -44,9 +46,13 @@ pub fn svg_blip_rid(blip: Node<'_, '_>) -> Option<String> {
         .find(|n| n.is_element() && n.tag_name().name() == "extLst")?
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "ext")
+        .filter(|ext| ext.attribute("uri") == Some(SVG_BLIP_EXT_URI))
         .find_map(|ext| {
-            ext.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "svgBlip")
+            ext.children().find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "svgBlip"
+                    && n.tag_name().namespace() == Some(SVG_BLIP_NS)
+            })
         })
         .and_then(|svg_blip| blip_embed_rid(&svg_blip))
 }
@@ -122,8 +128,7 @@ pub fn parse_src_rect(blip_fill: Node<'_, '_>) -> Option<SrcRect> {
         .find(|n| n.is_element() && n.tag_name().name() == "srcRect")?;
     let read = |name: &str| -> f64 {
         sr.attribute(name)
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100_000.0)
+            .and_then(crate::units::drawingml_percentage_to_fraction)
             .unwrap_or(0.0)
     };
     let rect = SrcRect {
@@ -145,7 +150,7 @@ pub fn parse_src_rect(blip_fill: Node<'_, '_>) -> Option<SrcRect> {
 /// scale fraction (0.0–1.0). The effect multiplies the picture's opacity by that
 /// fraction — the renderer applies it via `globalAlpha`.
 ///
-/// Returns `None` when there is no `alphaModFix` OR when the amount is ≥ ~100%
+/// Returns `None` when there is no `alphaModFix` OR when the amount is ≥ 100%
 /// (fully opaque = nothing to apply), so an unaffected picture never forces the
 /// renderer onto the alpha path. Negative amounts clamp to 0. Shared by the
 /// pptx and xlsx parsers (docx can carry it too) so the three formats read the
@@ -154,15 +159,26 @@ pub fn parse_blip_alpha(blip_fill: Node<'_, '_>) -> Option<f64> {
     let blip = blip_fill
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "blip")?;
-    let amf = blip
+    let mut found = false;
+    let mut frac = 1.0;
+    for effect in blip
         .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "alphaModFix")?;
-    let amt: f64 = amf.attribute("amt")?.parse().ok()?;
-    let frac = amt / 100_000.0;
-    if frac >= 0.9999 {
+        .filter(|node| node.is_element() && node.tag_name().name() == "alphaModFix")
+    {
+        let amt = effect
+            .attribute("amt")
+            .map(crate::units::drawingml_percentage_to_fraction)
+            .unwrap_or(Some(1.0))?;
+        frac *= amt.max(0.0);
+        found = true;
+    }
+    if !found {
+        return None;
+    }
+    if frac >= 1.0 {
         None
     } else {
-        Some(frac.max(0.0))
+        Some(frac)
     }
 }
 
@@ -274,6 +290,22 @@ mod tests {
     }
 
     #[test]
+    fn svg_blip_rid_requires_registered_uri_and_namespace() {
+        for (uri, namespace) in [
+            ("{00000000-0000-0000-0000-000000000000}", ASVG_NS),
+            (SVG_BLIP_EXT_URI, "urn:example:not-microsoft-svg"),
+        ] {
+            let xml = format!(
+                r#"<a:blip xmlns:a="{A_NS}" xmlns:r="{R_NS}" xmlns:x="{namespace}">
+                     <a:extLst><a:ext uri="{uri}"><x:svgBlip r:embed="rIdWrong"/></a:ext></a:extLst>
+                   </a:blip>"#
+            );
+            let doc = Document::parse(&xml).unwrap();
+            assert_eq!(svg_blip_rid(doc.root_element()), None);
+        }
+    }
+
+    #[test]
     fn parse_src_rect_reads_fractions_and_defaults_absent_edges() {
         // l/r given, t/b absent → fractions = raw/100000, absent ⇒ 0.
         let xml = format!(
@@ -285,6 +317,14 @@ mod tests {
         assert!((sr.r - 0.03829).abs() < 1e-9);
         assert_eq!(sr.t, 0.0);
         assert_eq!(sr.b, 0.0);
+
+        let strict_xml = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip/><a:srcRect l="25%" r="-10%"/></a:blipFill>"#
+        );
+        let strict = Document::parse(&strict_xml).unwrap();
+        let sr = parse_src_rect(strict.root_element()).expect("Strict srcRect present");
+        assert_eq!(sr.l, 0.25);
+        assert_eq!(sr.r, -0.1);
     }
 
     #[test]
@@ -364,6 +404,13 @@ mod tests {
         let doc = Document::parse(&xml).unwrap();
         let a = parse_blip_alpha(doc.root_element()).expect("alpha present");
         assert!((a - 0.70).abs() < 1e-9);
+
+        let strict = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip><a:alphaModFix amt="70%"/></a:blip></a:blipFill>"#
+        );
+        let a = parse_blip_alpha(Document::parse(&strict).unwrap().root_element())
+            .expect("Strict alpha present");
+        assert!((a - 0.70).abs() < 1e-9);
     }
 
     #[test]
@@ -375,6 +422,20 @@ mod tests {
             r#"<a:blipFill xmlns:a="{A_NS}"><a:blip><a:alphaModFix amt="100000"/></a:blip></a:blipFill>"#
         );
         assert!(parse_blip_alpha(Document::parse(&opaque).unwrap().root_element()).is_none());
+        let defaulted = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip><a:alphaModFix/></a:blip></a:blipFill>"#
+        );
+        assert!(parse_blip_alpha(Document::parse(&defaulted).unwrap().root_element()).is_none());
+
+        for amt in ["99990", "99999"] {
+            let xml = format!(
+                r#"<a:blipFill xmlns:a="{A_NS}"><a:blip><a:alphaModFix amt="{amt}"/></a:blip></a:blipFill>"#
+            );
+            assert!(
+                parse_blip_alpha(Document::parse(&xml).unwrap().root_element()).is_some(),
+                "a non-identity authored alpha must be retained: {amt}"
+            );
+        }
     }
 
     #[test]

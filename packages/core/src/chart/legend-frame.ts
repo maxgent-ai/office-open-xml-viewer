@@ -2,6 +2,7 @@ import type { ChartModel, ChartRect } from '../types/chart.js';
 import { drawingmlLineDashArray } from '../draw/dash.js';
 import { resolveFill } from '../shape/paint.js';
 import { axisLineWidthPx } from './axis-style.js';
+import { strokeChartFrameRect } from './compound-frame.js';
 
 /** Paint the authored solid `<c:legend><c:spPr>` frame before legend content.
  * Omitted/noFill properties stay transparent; there is no invented default.
@@ -45,7 +46,6 @@ export function paintLegendFrame(
       return;
     }
     ctx.strokeStyle = stroke;
-    ctx.lineWidth = width;
     ctx.lineCap = chart.legendLineCap === 'rnd'
       ? 'round' : chart.legendLineCap === 'sq' ? 'square' : 'butt';
     ctx.lineJoin = chart.legendLineJoin === 'round' || chart.legendLineJoin === 'bevel'
@@ -53,11 +53,8 @@ export function paintLegendFrame(
     ctx.setLineDash(drawingmlLineDashArray(
       chart.legendLineCustomDash, chart.legendLineDash, width,
     ));
-    ctx.strokeRect(
-      bounds.x + width / 2,
-      bounds.y + width / 2,
-      Math.max(0, bounds.w - width),
-      Math.max(0, bounds.h - width),
+    strokeChartFrameRect(
+      ctx, bounds.x, bounds.y, bounds.w, bounds.h, width, chart.legendLineCompound,
     );
   }
   ctx.restore();

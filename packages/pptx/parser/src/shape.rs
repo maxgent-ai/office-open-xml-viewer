@@ -4,7 +4,7 @@
 //! `fill`, text-body parsing from `text`, chart parsing from `chart`, and the
 //! shared XML/zip helpers + `TableStyleDef` from the crate root.
 
-use crate::chart::{parse_chartex, parse_legacy_chart_with_style_parts};
+use crate::chart::{parse_chartex_with_images, parse_legacy_chart_with_style_parts_and_images};
 use crate::fill::{
     line_properties_to_stroke, parse_blip_alpha, parse_color_node, parse_cust_geom,
     parse_effect_lst, parse_fill, parse_scene3d, parse_sp3d, parse_stroke,
@@ -65,6 +65,37 @@ fn load_chart_color_style_xml(zip: &mut PptxZip, chart_path: &str) -> Option<Str
     )
 }
 
+fn load_chart_image_relationships(
+    zip: &mut PptxZip,
+    chart_path: &str,
+) -> ooxml_common::chart::ChartImageRelationships {
+    let mut images = ooxml_common::chart::ChartImageRelationships::default();
+    let rels_path = relationship_part_path(chart_path);
+    let Ok(rels_xml) = read_zip_str(zip, &rels_path) else {
+        return images;
+    };
+    images.insert_part_relationships(
+        ooxml_common::chart::ChartImageSource::Chart,
+        chart_path,
+        &rels_xml,
+    );
+    let base_dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    if let Some(target) =
+        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)
+    {
+        let style_path = resolve_path(base_dir, &target);
+        let style_rels_path = relationship_part_path(&style_path);
+        if let Ok(style_rels_xml) = read_zip_str(zip, &style_rels_path) {
+            images.insert_part_relationships(
+                ooxml_common::chart::ChartImageSource::Style,
+                &style_path,
+                &style_rels_xml,
+            );
+        }
+    }
+    images
+}
+
 fn load_chart_sidecar_xml(
     zip: &mut PptxZip,
     chart_path: &str,
@@ -87,13 +118,14 @@ mod chartex_sidecar_package_tests {
         let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
         let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOffice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
         let presentation_xml = r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rIdSlide"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#;
-        let presentation_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
+        let presentation_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#;
         let slide_xml = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Chart 1"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart r:id="rIdChart"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
         let slide_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="../charts/chartEx1.xml"/></Relationships>"#;
         let chart_xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chartData><cx:data id="0"><cx:numDim type="val"><cx:lvl ptCount="1"><cx:pt idx="0">1</cx:pt></cx:lvl></cx:numDim></cx:data></cx:chartData><cx:chart><cx:plotArea><cx:plotAreaRegion><cx:series layoutId="boxWhisker"/></cx:plotAreaRegion></cx:plotArea></cx:chart></cx:chartSpace>"#;
         let rels_xml = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/><Relationship Id="rIdColors" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/></Relationships>"#;
-        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint></cs:chartStyle>"#;
+        let style_xml = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:dataPoint><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef><cs:spPr><a:pattFill prst="diagCross"><a:fgClr><a:schemeClr val="phClr"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill></cs:spPr></cs:dataPoint><cs:dataPointMarker><cs:fillRef idx="1"><cs:styleClr val="auto"/></cs:fillRef></cs:dataPointMarker><cs:dataLabelCallout><cs:defRPr><a:noFill/></cs:defRPr><cs:bodyPr/></cs:dataLabelCallout><cs:trendlineLabel><cs:defRPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></cs:defRPr></cs:trendlineLabel></cs:chartStyle>"#;
         let colors_xml = r#"<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" meth="cycle"><a:srgbClr val="336699"/></cs:colorStyle>"#;
+        let theme_xml = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Theme"><a:themeElements><a:fmtScheme name="Theme"><a:fillStyleLst><a:blipFill><a:blip r:embed="rIdThemeMarker"/><a:stretch/></a:blipFill></a:fillStyleLst><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#;
 
         let mut bytes = Vec::new();
         {
@@ -109,7 +141,18 @@ mod chartex_sidecar_package_tests {
                 ("ppt/charts/chartEx1.xml", chart_xml),
                 ("ppt/charts/_rels/chartEx1.xml.rels", rels_xml),
                 ("ppt/charts/style1.xml", style_xml),
+                (
+                    "ppt/charts/_rels/style1.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/style-marker.png"/></Relationships>"#,
+                ),
                 ("ppt/charts/colors1.xml", colors_xml),
+                ("ppt/theme/theme1.xml", theme_xml),
+                (
+                    "ppt/theme/_rels/theme1.xml.rels",
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdThemeMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/theme-marker.png"/></Relationships>"#,
+                ),
+                ("ppt/media/theme-marker.png", "png"),
+                ("ppt/media/style-marker.png", "png"),
             ] {
                 writer.start_file(path, options).unwrap();
                 writer.write_all(xml.as_bytes()).unwrap();
@@ -126,12 +169,33 @@ mod chartex_sidecar_package_tests {
             serde_json::Value::String("336699".to_string()),
         );
         assert_eq!(
+            chart["chartStyleRoles"]["dataLabelCallout"]["fontHidden"],
+            serde_json::Value::Bool(true),
+        );
+        assert_eq!(
+            chart["chartStyleRoles"]["dataLabelCallout"]["textBodyAuthored"],
+            serde_json::Value::Bool(true),
+        );
+        assert_eq!(
+            chart["chartStyleRoles"]["trendlineLabel"]["fontColor"],
+            serde_json::Value::String("112233".to_string()),
+        );
+        assert_eq!(
             chart["chartexDataPointStyle"]["fillPaints"][0],
             serde_json::json!({
                 "fillType": "pattern",
                 "fg": "336699",
                 "bg": "FFFFFF",
                 "preset": "diagCross",
+            }),
+        );
+        assert_eq!(
+            chart["chartStyleRoles"]["dataPointMarker"]["fillPaints"][0],
+            serde_json::json!({
+                "fillType": "image",
+                "imagePath": "ppt/media/theme-marker.png",
+                "mimeType": "image/png",
+                "stretch": true,
             }),
         );
     }
@@ -178,6 +242,54 @@ mod chartex_sidecar_package_tests {
         assert_eq!(
             chart["chartStyleRoles"]["dropLine"]["lineColors"][0],
             serde_json::Value::String("336699".to_string()),
+        );
+    }
+
+    #[test]
+    fn pptx_package_resolves_picture_marker_relationships() {
+        let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+        let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOffice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
+        let presentation_xml = r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rIdSlide"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#;
+        let presentation_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSlide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
+        let slide_xml = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Chart 1"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
+        let slide_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+        let chart_xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:chart><c:plotArea><c:lineChart><c:ser><c:idx val="0"/><c:order val="0"/><c:marker><c:symbol val="picture"/><c:spPr><a:blipFill><a:blip r:embed="rIdMarker"/><a:stretch/></a:blipFill></c:spPr></c:marker><c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>A</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let chart_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdMarker" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/marker.png"/></Relationships>"#;
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, content) in [
+                ("[Content_Types].xml", content_types.as_bytes()),
+                ("_rels/.rels", root_rels.as_bytes()),
+                ("ppt/presentation.xml", presentation_xml.as_bytes()),
+                (
+                    "ppt/_rels/presentation.xml.rels",
+                    presentation_rels.as_bytes(),
+                ),
+                ("ppt/slides/slide1.xml", slide_xml.as_bytes()),
+                ("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+                ("ppt/charts/chart1.xml", chart_xml.as_bytes()),
+                ("ppt/charts/_rels/chart1.xml.rels", chart_rels.as_bytes()),
+                ("ppt/media/marker.png", b"png".as_slice()),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(content).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let json = crate::parse_pptx_native(&bytes).expect("full PPTX package parses");
+        let presentation: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            presentation["slides"][0]["elements"][0]["chart"]["series"][0]["markerFillPaint"],
+            serde_json::json!({
+                "fillType": "image",
+                "imagePath": "ppt/media/marker.png",
+                "mimeType": "image/png",
+                "stretch": true,
+            }),
         );
     }
 }
@@ -2670,25 +2782,45 @@ pub(crate) fn parse_sp_tree_node(
                                 // rels. Read it best-effort before parsing.
                                 let style_xml = load_chart_style_xml(zip, &chart_path);
                                 let color_style_xml = load_chart_color_style_xml(zip, &chart_path);
-                                parse_chartex(
+                                let image_relationships =
+                                    load_chart_image_relationships(zip, &chart_path);
+                                let empty_theme_images =
+                                    ooxml_common::chart::ChartImageRelationships::default();
+                                let image_resolver =
+                                    ooxml_common::chart::ChartImageResolverChain::new(
+                                        &image_relationships,
+                                        theme_source.chart_images().unwrap_or(&empty_theme_images),
+                                    );
+                                parse_chartex_with_images(
                                     &chart_xml,
                                     style_xml.as_deref(),
                                     color_style_xml.as_deref(),
                                     theme,
                                     theme_source.format_scheme(),
+                                    &image_resolver,
                                 )
                             } else {
                                 let style_xml = load_chart_style_xml(zip, &chart_path);
                                 let color_style_xml = load_chart_color_style_xml(zip, &chart_path);
+                                let image_relationships =
+                                    load_chart_image_relationships(zip, &chart_path);
+                                let empty_theme_images =
+                                    ooxml_common::chart::ChartImageRelationships::default();
+                                let image_resolver =
+                                    ooxml_common::chart::ChartImageResolverChain::new(
+                                        &image_relationships,
+                                        theme_source.chart_images().unwrap_or(&empty_theme_images),
+                                    );
                                 let user_shapes_xml =
                                     load_chart_user_shapes_xml(zip, &chart_path, &chart_xml);
-                                parse_legacy_chart_with_style_parts(
+                                parse_legacy_chart_with_style_parts_and_images(
                                     &chart_xml,
                                     style_xml.as_deref(),
                                     color_style_xml.as_deref(),
                                     user_shapes_xml.as_deref(),
                                     theme,
                                     theme_source.format_scheme(),
+                                    &image_resolver,
                                 )
                             };
                             if let Some(mut chart) = chart_opt {

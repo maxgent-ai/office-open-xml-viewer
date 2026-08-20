@@ -218,6 +218,12 @@ export {
   type DecodedBitmapCacheOwner,
   type CachedBitmapOptions,
 } from './image/bitmap-image-by-path';
+export {
+  chartImageFillKey,
+  collectChartMarkerImageFills,
+  collectChartMarkerImageFillsForCharts,
+  type ChartImageLookup,
+} from './chart/image-fill';
 // Shared WMF (Windows Metafile) player + the raster/metafile decoder all three
 // renderers route through, so a WMF/EMF blip (which `createImageBitmap` cannot
 // decode) rasterizes or is skipped gracefully instead of throwing and vanishing.

@@ -872,9 +872,16 @@ function canInvertParagraphTextReplacement(paragraph: Paragraph): boolean {
   if (paragraph.runs.length !== 1) return false;
   const run = paragraph.runs[0];
   return run?.type === 'text'
-    && run.fieldType === undefined
-    && run.hyperlink === undefined
-    && run.hyperlinkAction === undefined;
+    && run.fieldType == null
+    && run.hyperlink == null
+    && run.hyperlinkAction == null;
+}
+
+export function canInvertTextBodyPlainTextReplacement(textBody: TextBody): boolean {
+  const paragraph = textBody.paragraphs[0];
+  return textBody.paragraphs.length === 1
+    && paragraph !== undefined
+    && canInvertParagraphTextReplacement(paragraph);
 }
 
 function captureStyleFromRun(

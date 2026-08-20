@@ -28,6 +28,7 @@ import {
 import {
   applyTextStyleEdit,
   applyTextStylePatch,
+  canInvertTextBodyPlainTextReplacement,
   captureInverseShapeStylePatch,
   captureInverseTextStyleEdits,
   captureTextStylePatchAtScope,
@@ -185,6 +186,11 @@ export class UpdateTextMutation extends Mutation {
         edits: inverseEdits,
       });
     }
+
+    if (
+      this.value !== undefined
+      && !canInvertTextBodyPlainTextReplacement(element.textBody)
+    ) return undefined;
 
     const value = this.value === undefined
       ? undefined

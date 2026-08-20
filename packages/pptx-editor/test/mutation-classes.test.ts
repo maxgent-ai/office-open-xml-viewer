@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { createElementRef } from '../src/adapters/pptx-json-adapter';
 import { AddElementMutation } from '../src/mutations/add-element';
 import { UpdateTextMutation } from '../src/mutations/update-text';
-import { deck, shape } from './fixtures/presentation';
+import { deck, plainShape, shape } from './fixtures/presentation';
 
 describe('Mutation classes', () => {
   it('exposes serializable fields and executable text behavior', () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const presentation = deck([target]);
     const ref = createElementRef(presentation.slides[0], target, 0);
     const mutation = new UpdateTextMutation({ target: ref, value: 'after' });

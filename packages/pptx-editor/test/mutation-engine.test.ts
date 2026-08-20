@@ -592,4 +592,145 @@ describe('mutation engine', () => {
     expect(target.textBody?.paragraphs[0].runs[0]).toHaveProperty('text', 'before');
     expect(presentation.slides[0].elements).toHaveLength(1);
   });
+
+  it('replaces paragraph text and style via incremental edits', () => {
+    const first = shape('7', 'Title');
+    const second = shape('8', 'Body');
+    for (const run of [
+      ...first.textBody!.paragraphs[0].runs,
+      ...second.textBody!.paragraphs[0].runs,
+    ]) {
+      if (run.type === 'text') delete run.fieldType;
+    }
+    first.textBody = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+    const presentation = deck([first]);
+    const ref = createElementRef(presentation.slides[0], first, 0);
+
+    const mutation = new UpdateTextMutation({
+      target: ref,
+      edits: [
+        {
+          scope: { kind: 'paragraph', paragraphIndex: 0 },
+          text: '新标题',
+          style: { bold: true, fontSize: 24, color: 'FF0000' },
+        },
+        {
+          scope: { kind: 'paragraph', paragraphIndex: 1 },
+          text: '新正文',
+        },
+      ],
+    });
+
+    const result = applyMutation(presentation, mutation);
+    const updated = result.presentation.slides[0].elements[0] as ShapeElement;
+    expect(updated.textBody?.paragraphs.map((paragraph) => (
+      paragraph.runs
+        .filter((run) => run.type === 'text')
+        .map((run) => run.text)
+        .join('')
+    ))).toEqual(['新标题', '新正文']);
+    expect(updated.textBody?.paragraphs[0].runs[0]).toMatchObject({
+      text: '新标题',
+      bold: true,
+      fontSize: 24,
+      color: 'FF0000',
+    });
+    expect(updated.textBody?.paragraphs[1].runs[0]).toMatchObject({
+      text: '新正文',
+      bold: true,
+      fontSize: 18,
+    });
+
+    const inverse = mutation.inverse(presentation);
+    expect(inverse?.edits).toEqual([
+      {
+        scope: { kind: 'paragraph', paragraphIndex: 1 },
+        text: 'Body',
+      },
+      {
+        scope: { kind: 'paragraph', paragraphIndex: 0 },
+        text: 'Title',
+        style: { bold: true, fontSize: 18, color: '000000' },
+      },
+    ]);
+
+    const restored = inverse!.apply(result.presentation).presentation
+      .slides[0].elements[0] as ShapeElement;
+    expect(restored.textBody?.paragraphs.map((paragraph) => (
+      paragraph.runs
+        .filter((run) => run.type === 'text')
+        .map((run) => run.text)
+        .join('')
+    ))).toEqual(['Title', 'Body']);
+  });
+
+  it('does not offer a lossy inverse for rich paragraph text replacement', () => {
+    const target = shape('7', 'Hello World');
+    const firstRun = target.textBody!.paragraphs[0].runs[0];
+    if (firstRun.type !== 'text') throw new TypeError('expected a text run');
+    target.textBody!.paragraphs[0].runs = [
+      { ...firstRun, text: 'Hello ', fieldType: undefined, hyperlink: 'https://example.com' },
+      { ...firstRun, text: 'World', fieldType: undefined, bold: false, color: '00FF00' },
+    ];
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    const mutation = new UpdateTextMutation({
+      target: ref,
+      edits: [{
+        scope: { kind: 'paragraph', paragraphIndex: 0 },
+        text: 'Changed',
+      }],
+    });
+
+    expect(mutation.inverse(presentation)).toBeUndefined();
+  });
+
+  it('rejects mixing paragraph text replacement with span edits', () => {
+    const target = shape('7', 'Hello');
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    expect(() => new UpdateTextMutation({
+      target: ref,
+      edits: [
+        {
+          scope: { kind: 'paragraph', paragraphIndex: 0 },
+          text: 'Hi',
+        },
+        {
+          scope: { kind: 'spans', spans: [{ start: 0, end: 1 }] },
+          style: { bold: false },
+        },
+      ],
+    })).toThrow(/cannot be combined with span edits/);
+  });
+
+  it('rejects paragraph text edits that include newlines or span scopes', () => {
+    const target = shape('7', 'Hello');
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+
+    expect(() => applyMutation(presentation, new UpdateTextMutation({
+      target: ref,
+      edits: [{
+        scope: { kind: 'paragraph', paragraphIndex: 0 },
+        text: 'a\nb',
+      }],
+    }))).toThrow(/single paragraph/);
+
+    expect(() => applyMutation(presentation, new UpdateTextMutation({
+      target: ref,
+      edits: [{
+        scope: { kind: 'spans', spans: [{ start: 0, end: 1 }] },
+        text: 'x',
+      }],
+    }))).toThrow(/paragraph scope/);
+  });
 });

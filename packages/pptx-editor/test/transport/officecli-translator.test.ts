@@ -520,6 +520,57 @@ describe('toOfficeCliBatch', () => {
     ]);
   });
 
+  it('translates paragraph text+style edits to set on /p[N]', () => {
+    const first = shape('7', 'Title');
+    const second = shape('8', 'Body');
+    first.textBody = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+    const presentation = deck([first]);
+    const ref = createElementRef(presentation.slides[0], first, 0);
+
+    const batch = toOfficeCliBatch(presentation, {
+      id: 'paragraph-text-edits',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        edits: [
+          {
+            scope: { kind: 'paragraph', paragraphIndex: 0 },
+            text: '新标题',
+            style: { bold: true, fontSize: 24 },
+          },
+          {
+            scope: { kind: 'paragraph', paragraphIndex: 1 },
+            text: '新正文',
+          },
+        ],
+      })],
+    });
+
+    expect(batch.commands).toEqual([
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[1]',
+        props: {
+          text: '新标题',
+          bold: 'true',
+          size: '24pt',
+        },
+      },
+      {
+        command: 'set',
+        path: '/slide[1]/shape[@id=7]/p[2]',
+        props: {
+          text: '新正文',
+        },
+      },
+    ]);
+  });
+
   it('preserves mutation order in a native OfficeCLI batch command array', () => {
     const target = shape('7', 'before');
     const presentation = deck([target]);

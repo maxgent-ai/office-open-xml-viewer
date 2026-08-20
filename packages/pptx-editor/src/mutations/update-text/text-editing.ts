@@ -1,5 +1,7 @@
 import type { Paragraph, TextBody, TextRun, TextRunData } from '@maxgent/ooxml/pptx';
 
+import { replaceTextBodyParagraphPlainText } from '../../adapters/pptx-json-adapter';
+
 /**
  * 相对某一 plain-text 基线的 0-based half-open 字符选区。
  * 基线为 OfficeCLI 同款：只拼接 text run 的 `text`（不含段落间额外 `\n`）。
@@ -27,11 +29,18 @@ export type TextScope =
   };
 
 /**
- * 一条选区样式编辑（MVP 仅 style，不含选区改字）。
+ * 一条增量文本编辑：可改整段文案、作用域样式，或两者同时。
+ *
+ * - `text`：整段纯文本替换（无 `\n`）；仅 `paragraph` 且无 `spans`。
+ * - `style`：字段级样式补丁；与 `text` 至少提供一类。
+ * - `spans` scope 仍仅支持 style（不含选区改字）。
  */
 export interface TextStyleEdit {
   readonly scope: Exclude<TextScope, { kind: 'shape' }>;
-  readonly style: TextStylePatch;
+  /** 整段纯文本；仅 paragraph 全段。 */
+  readonly text?: string;
+  /** 作用域样式补丁。 */
+  readonly style?: TextStylePatch;
 }
 
 /**
@@ -224,7 +233,7 @@ export function materializeTextStyleEditForOfficeCli(
   edit: TextStyleEdit,
   inheritance: Omit<TextStyleInheritanceContext, 'paragraph' | 'textBody'>,
 ): readonly TextStyleEdit[] {
-  if (!hasNullClearableStyleKeys(edit.style)) return [edit];
+  if (!edit.style || !hasNullClearableStyleKeys(edit.style)) return [edit];
 
   if (edit.scope.kind === 'paragraph') {
     const paragraph = textBody.paragraphs[edit.scope.paragraphIndex];
@@ -235,6 +244,7 @@ export function materializeTextStyleEditForOfficeCli(
     }
     return [freezeTextStyleEdit({
       scope: edit.scope,
+      ...(edit.text !== undefined ? { text: edit.text } : {}),
       style: resolveInheritedStylePatch(edit.style, {
         textBody,
         paragraph,
@@ -316,10 +326,22 @@ export function freezeScope(scope: TextScope): TextScope {
 }
 
 export function freezeTextStyleEdit(edit: TextStyleEdit): TextStyleEdit {
+  const hasText = edit.text !== undefined;
+  const hasStyle = edit.style !== undefined && hasStyleKeys(edit.style);
+  if (!hasText && !hasStyle) {
+    throw new TypeError('TextStyleEdit requires text and/or a non-empty style patch');
+  }
   return Object.freeze({
     scope: freezeScope(edit.scope) as TextStyleEdit['scope'],
-    style: freezeStyle(edit.style),
+    ...(hasText ? { text: edit.text } : {}),
+    ...(hasStyle ? { style: freezeStyle(edit.style!) } : {}),
   });
+}
+
+export function editHasStyle(edit: TextStyleEdit): edit is TextStyleEdit & {
+  readonly style: TextStylePatch;
+} {
+  return edit.style !== undefined && hasStyleKeys(edit.style);
 }
 
 export function assertValidSpan(span: TextSpan, textLength: number, label: string): void {
@@ -337,14 +359,27 @@ export function assertValidSpan(span: TextSpan, textLength: number, label: strin
 }
 
 export function assertValidStyleEdit(edit: TextStyleEdit, textBody: TextBody): void {
-  if (!hasStyleKeys(edit.style)) {
-    throw new TypeError('TextStyleEdit requires a non-empty style patch');
+  const hasText = edit.text !== undefined;
+  const hasStyle = editHasStyle(edit);
+  if (!hasText && !hasStyle) {
+    throw new TypeError('TextStyleEdit requires text and/or a non-empty style patch');
+  }
+  if (hasText) {
+    if (edit.scope.kind !== 'paragraph') {
+      throw new TypeError('TextStyleEdit text is only supported on paragraph scope');
+    }
+    if (edit.scope.spans) {
+      throw new TypeError('TextStyleEdit text cannot be combined with paragraph spans');
+    }
+    if (/[\r\n]/.test(edit.text!)) {
+      throw new TypeError('TextStyleEdit text must be a single paragraph (no newlines)');
+    }
   }
   if (edit.scope.kind === 'spans') {
     if (edit.scope.spans.length === 0) {
       throw new TypeError('TextStyleEdit spans scope requires at least one span');
     }
-    if ('verticalAlign' in edit.style) {
+    if (hasStyle && 'verticalAlign' in edit.style) {
       throw new TypeError('verticalAlign is only valid on whole-shape text style updates');
     }
     const length = runPlainText(textBody).length;
@@ -360,7 +395,7 @@ export function assertValidStyleEdit(edit: TextStyleEdit, textBody: TextBody): v
       `paragraphIndex ${edit.scope.paragraphIndex} is out of range`,
     );
   }
-  if ('verticalAlign' in edit.style) {
+  if (hasStyle && 'verticalAlign' in edit.style) {
     throw new TypeError('verticalAlign is only valid on whole-shape text style updates');
   }
   if (edit.scope.spans) {
@@ -385,16 +420,32 @@ export function applyTextStylePatch(textBody: TextBody, style: TextStylePatch): 
 
 export function applyTextStyleEdit(textBody: TextBody, edit: TextStyleEdit): TextBody {
   assertValidStyleEdit(edit, textBody);
+
+  let next = textBody;
+  if (edit.text !== undefined && edit.scope.kind === 'paragraph') {
+    const replaced = replaceTextBodyParagraphPlainText(
+      next,
+      edit.scope.paragraphIndex,
+      edit.text,
+    );
+    if (!replaced) {
+      throw new TypeError(`paragraphIndex ${edit.scope.paragraphIndex} is out of range`);
+    }
+    next = replaced;
+  }
+
+  if (!editHasStyle(edit)) return next;
+
   if (edit.scope.kind === 'spans') {
-    return applySpansToTextBody(textBody, edit.scope.spans, edit.style, 0);
+    return applySpansToTextBody(next, edit.scope.spans, edit.style, 0);
   }
 
   const paragraphIndex = edit.scope.paragraphIndex;
   const spans = edit.scope.spans;
   if (!spans) {
     return {
-      ...textBody,
-      paragraphs: textBody.paragraphs.map((paragraph, index) => (
+      ...next,
+      paragraphs: next.paragraphs.map((paragraph, index) => (
         index === paragraphIndex ? patchParagraph(paragraph, edit.style) : paragraph
       )),
     };
@@ -402,13 +453,13 @@ export function applyTextStyleEdit(textBody: TextBody, edit: TextStyleEdit): Tex
 
   let offset = 0;
   for (let index = 0; index < paragraphIndex; index += 1) {
-    offset += paragraphRunPlainText(textBody.paragraphs[index]).length;
+    offset += paragraphRunPlainText(next.paragraphs[index]).length;
   }
   const absoluteSpans = spans.map((span) => ({
     start: offset + span.start,
     end: offset + span.end,
   }));
-  return applySpansToTextBody(textBody, absoluteSpans, edit.style, paragraphIndex);
+  return applySpansToTextBody(next, absoluteSpans, edit.style, paragraphIndex);
 }
 
 /**
@@ -682,8 +733,8 @@ function tryCollapseInverseShapeStyle(
   edits: readonly TextStyleEdit[],
   verticalAlign: TextStylePatch['verticalAlign'],
 ): TextStylePatch | undefined {
-  const runEdits = edits.filter((edit) => hasRunScopedKeys(edit.style));
-  const alignEdits = edits.filter((edit) => 'align' in edit.style);
+  const runEdits = edits.filter((edit) => editHasStyle(edit) && hasRunScopedKeys(edit.style));
+  const alignEdits = edits.filter((edit) => editHasStyle(edit) && 'align' in edit.style);
 
   if (hasRunScopedKeys(originalPatch)) {
     if (runEdits.length !== 1) return undefined;
@@ -697,9 +748,11 @@ function tryCollapseInverseShapeStyle(
     if (alignEdits.length !== textBody.paragraphs.length || textBody.paragraphs.length === 0) {
       return undefined;
     }
-    const values = new Set(alignEdits.map((edit) => edit.style.align));
+    const values = new Set(alignEdits.map((edit) => edit.style!.align));
     if (values.size !== 1) return undefined;
-    align = alignEdits[0]!.style.align;
+    align = alignEdits[0]!.style!.align;
+  } else if (alignEdits.length > 0) {
+    return undefined;
   }
 
   const captured: Record<string, unknown> = {
@@ -730,6 +783,32 @@ function captureInversePiecesForEdit(
   textBody: TextBody,
   edit: TextStyleEdit,
 ): TextStyleEdit[] | undefined {
+  if (edit.text !== undefined) {
+    if (edit.scope.kind !== 'paragraph' || edit.scope.spans) return undefined;
+    const paragraph = textBody.paragraphs[edit.scope.paragraphIndex];
+    if (!paragraph || !canInvertParagraphTextReplacement(paragraph)) return undefined;
+
+    const priorText = paragraphRunPlainText(paragraph);
+    let style: TextStylePatch | undefined;
+    if (editHasStyle(edit)) {
+      const captured = captureTextStylePatchAtScope(
+        textBody,
+        { kind: 'paragraph', paragraphIndex: edit.scope.paragraphIndex },
+        edit.style,
+      );
+      if (captured === undefined) return undefined;
+      style = captured;
+    }
+
+    return [freezeTextStyleEdit({
+      scope: { kind: 'paragraph', paragraphIndex: edit.scope.paragraphIndex },
+      text: priorText,
+      ...(style ? { style } : {}),
+    })];
+  }
+
+  if (!editHasStyle(edit)) return undefined;
+
   const pieces: TextStyleEdit[] = [];
 
   if (hasRunScopedKeys(edit.style)) {
@@ -787,6 +866,15 @@ function captureInversePiecesForEdit(
   }
 
   return pieces;
+}
+
+function canInvertParagraphTextReplacement(paragraph: Paragraph): boolean {
+  if (paragraph.runs.length !== 1) return false;
+  const run = paragraph.runs[0];
+  return run?.type === 'text'
+    && run.fieldType === undefined
+    && run.hyperlink === undefined
+    && run.hyperlinkAction === undefined;
 }
 
 function captureStyleFromRun(

@@ -62,9 +62,10 @@ export interface UpdateTextMutationParams {
    */
   readonly style?: TextStylePatch;
   /**
-   * 多选区、每段不同样式（style-only）。与顶层 `value` 互斥；
-   * 与顶层 `style` 互斥，除非 `style` 仅含 `verticalAlign`。
-   * 坐标相对修改前的 run 拼接纯文本（与 OfficeCLI `range` 一致）。
+   * 增量段落/选区编辑。每条可含 `text`（整段文案）和/或 `style`。
+   * 与顶层 `value` 互斥；与顶层 `style` 互斥，除非 `style` 仅含 `verticalAlign`。
+   * 段落 `text` 与 span 编辑不能出现在同一个 mutation 中。
+   * 字符坐标相对修改前的 run 拼接纯文本（与 OfficeCLI `range` 一致）。
    */
   readonly edits?: readonly TextStyleEdit[];
 }
@@ -99,12 +100,25 @@ export class UpdateTextMutation extends Mutation {
       throw new TypeError('UpdateTextMutation edits must be non-empty when provided');
     }
 
+    const frozenEdits = edits === undefined
+      ? undefined
+      : Object.freeze(edits.map(freezeTextStyleEdit));
+    if (
+      frozenEdits?.some((edit) => edit.text !== undefined)
+      && frozenEdits.some((edit) => (
+        edit.text === undefined
+        && (edit.scope.kind === 'spans' || edit.scope.spans !== undefined)
+      ))
+    ) {
+      throw new TypeError(
+        'UpdateTextMutation paragraph text replacement cannot be combined with span edits',
+      );
+    }
+
     this.target = freezeTarget(target);
     this.value = value;
     this.style = style === undefined ? undefined : freezeStyle(style);
-    this.edits = edits === undefined
-      ? undefined
-      : Object.freeze(edits.map(freezeTextStyleEdit));
+    this.edits = frozenEdits;
     Object.freeze(this);
   }
 
@@ -341,8 +355,14 @@ export class UpdateTextMutation extends Mutation {
     edit: TextStyleEdit,
     paragraphCountOverride?: number,
   ): OfficeCliCommand {
-    const styleProps = styleToOfficeCliProps(edit.style, context, this);
-    if (Object.keys(styleProps).length === 0) {
+    const styleProps = edit.style
+      ? styleToOfficeCliProps(edit.style, context, this)
+      : {};
+    const props: Record<string, string> = { ...styleProps };
+    if (edit.text !== undefined) {
+      props.text = edit.text;
+    }
+    if (Object.keys(props).length === 0) {
       throw officeCliError(
         'value.invalidText',
         context,
@@ -352,6 +372,14 @@ export class UpdateTextMutation extends Mutation {
     }
 
     if (edit.scope.kind === 'spans') {
+      if (edit.text !== undefined) {
+        throw officeCliError(
+          'value.unsupportedFidelity',
+          context,
+          this,
+          'TextStyleEdit text is only supported on paragraph scope',
+        );
+      }
       return Object.freeze({
         command: OFFICECLI_COMMAND_TYPES.SET,
         path: resolveStableShapePath(presentation, this, context),
@@ -369,8 +397,15 @@ export class UpdateTextMutation extends Mutation {
       edit.scope.paragraphIndex,
       paragraphCountOverride,
     );
-    const props: Record<string, string> = { ...styleProps };
     if (edit.scope.spans) {
+      if (edit.text !== undefined) {
+        throw officeCliError(
+          'value.unsupportedFidelity',
+          context,
+          this,
+          'TextStyleEdit text cannot be combined with paragraph spans',
+        );
+      }
       props.range = formatOfficeCliRange(edit.scope.spans);
     }
     return Object.freeze({

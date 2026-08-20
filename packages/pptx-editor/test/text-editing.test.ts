@@ -74,4 +74,66 @@ describe('text-editing addressing', () => {
       color: '000000',
     });
   });
+
+  it('replaces a single paragraph plain text while leaving siblings intact', () => {
+    const first = shape('7', 'Title');
+    const second = shape('8', 'Body');
+    const body = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+
+    const next = applyTextStyleEdit(body, {
+      scope: { kind: 'paragraph', paragraphIndex: 1 },
+      text: 'Updated body',
+      style: { italic: true },
+    });
+
+    expect(runPlainText(next)).toBe('TitleUpdated body');
+    expect(next.paragraphs[0].runs[0]).toMatchObject({ text: 'Title', bold: true });
+    expect(next.paragraphs[1].runs[0]).toMatchObject({
+      text: 'Updated body',
+      italic: true,
+      bold: true,
+    });
+  });
+
+  it('uses paragraph defaults when replacing text in an empty paragraph', () => {
+    const first = shape('7', 'Styled sibling');
+    const second = shape('8', '');
+    second.textBody!.paragraphs[0] = {
+      ...second.textBody!.paragraphs[0],
+      defBold: false,
+      defFontSize: 11,
+      defColor: '123456',
+      defFontFamily: 'Paragraph Font',
+      runs: [],
+    };
+    const body = {
+      ...first.textBody!,
+      paragraphs: [
+        first.textBody!.paragraphs[0],
+        second.textBody!.paragraphs[0],
+      ],
+    };
+
+    const next = applyTextStyleEdit(body, {
+      scope: { kind: 'paragraph', paragraphIndex: 1 },
+      text: 'New text',
+    });
+
+    expect(next.paragraphs[1].runs).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: 'New text',
+        bold: false,
+        fontSize: 11,
+        color: '123456',
+        fontFamily: 'Paragraph Font',
+      }),
+    ]);
+  });
 });

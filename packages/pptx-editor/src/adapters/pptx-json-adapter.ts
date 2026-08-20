@@ -207,6 +207,23 @@ export function replaceTextBodyPlainText(textBody: TextBody, value: string): Tex
   return { ...textBody, paragraphs };
 }
 
+/** Replaces one paragraph with plain text while preserving its nearest run style. */
+export function replaceTextBodyParagraphPlainText(
+  textBody: TextBody,
+  paragraphIndex: number,
+  value: string,
+): TextBody | undefined {
+  const paragraph = textBody.paragraphs[paragraphIndex];
+  if (!paragraph) return undefined;
+
+  const run = paragraph.runs.find(
+    (candidate): candidate is TextRunData => candidate.type === 'text',
+  );
+  const paragraphs = textBody.paragraphs.slice();
+  paragraphs[paragraphIndex] = replaceParagraphText(paragraph, run, value);
+  return { ...textBody, paragraphs };
+}
+
 function findFirstTextRun(textBody: TextBody): TextRunData | undefined {
   for (const paragraph of textBody.paragraphs) {
     const run = paragraph.runs.find((candidate): candidate is TextRunData => candidate.type === 'text');

@@ -29,6 +29,7 @@ describe('UpdateTextMutation × OfficeCLI 真实执行', () => {
   let plainShapePath: string;
   let multilineShapePath: string;
   let spacingShapePath: string;
+  let paragraphEditShapePath: string;
 
   beforeAll(() => {
     assertLiveOfficeCli();
@@ -54,6 +55,13 @@ describe('UpdateTextMutation × OfficeCLI 真实执行', () => {
       text: 'spacing',
       x: '914400emu',
       y: '3200400emu',
+      width: '1828800emu',
+      height: '914400emu',
+    });
+    paragraphEditShapePath = addShape(pptxPath, '/slide[1]', {
+      text: 'seed',
+      x: '914400emu',
+      y: '4572000emu',
       width: '1828800emu',
       height: '914400emu',
     });
@@ -147,5 +155,74 @@ describe('UpdateTextMutation × OfficeCLI 真实执行', () => {
       (candidate) => candidate.type === 'text',
     );
     expect(run).toMatchObject({ letterSpacing: 1.2 });
+  });
+
+  it('paragraph edits 可对 /p[N] set text+style，且不影响其它段落', () => {
+    const ref = refForElementId(presentation, elementIdOfPath(paragraphEditShapePath));
+    runBatch(pptxPath, toOfficeCliBatch(presentation, {
+      id: 'live-paragraph-seed',
+      mutations: [new UpdateTextMutation({
+        target: ref,
+        value: '标题\n正文',
+      })],
+    }));
+    const seeded = parseDeck(pptxPath);
+
+    const mutation = new UpdateTextMutation({
+      target: ref,
+      edits: [
+        {
+          scope: { kind: 'paragraph', paragraphIndex: 0 },
+          text: '新标题',
+          style: { bold: true, fontSize: 24 },
+        },
+      ],
+    });
+
+    expect(toOfficeCliBatch(seeded, {
+      id: 'live-paragraph-props',
+      mutations: [mutation],
+    }).commands).toEqual([
+      expect.objectContaining({
+        command: 'set',
+        path: expect.stringMatching(/\/p\[1\]$/),
+        props: expect.objectContaining({
+          text: '新标题',
+          bold: 'true',
+          size: '24pt',
+        }),
+      }),
+    ]);
+
+    runBatch(pptxPath, toOfficeCliBatch(seeded, {
+      id: 'live-paragraph-text-style',
+      mutations: [mutation],
+    }));
+
+    const node = getNode(pptxPath, paragraphEditShapePath, 2);
+    const paragraphs = node.children.filter((child) => child.type === 'paragraph');
+    expect(paragraphs.map((paragraph) => paragraph.text)).toEqual(['新标题', '正文']);
+
+    const seededShape = seeded.slides[0].elements.find(
+      (element) => (element as { id?: string }).id === ref.elementId,
+    ) as ShapeElement;
+    const seededBodyRun = seededShape.textBody?.paragraphs[1]?.runs.find(
+      (candidate) => candidate.type === 'text',
+    );
+
+    const reparsed = parseDeck(pptxPath);
+    const shape = reparsed.slides[0].elements.find(
+      (element) => (element as { id?: string }).id === ref.elementId,
+    ) as ShapeElement;
+    const titleRun = shape.textBody?.paragraphs[0]?.runs.find(
+      (candidate) => candidate.type === 'text',
+    );
+    const bodyRun = shape.textBody?.paragraphs[1]?.runs.find(
+      (candidate) => candidate.type === 'text',
+    );
+    expect(titleRun).toMatchObject({ text: '新标题', bold: true, fontSize: 24 });
+    expect(bodyRun?.text).toBe('正文');
+    expect(bodyRun?.bold).toBe(seededBodyRun?.bold);
+    expect(bodyRun?.fontSize).toBe(seededBodyRun?.fontSize);
   });
 });

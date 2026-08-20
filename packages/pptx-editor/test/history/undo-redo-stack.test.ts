@@ -9,6 +9,7 @@ import { UndoRedoStackError } from '../../src/history/errors';
 import type { UndoRedoCommandIdFactory } from '../../src/history/types';
 import { UndoRedoStack } from '../../src/history/undo-redo-stack';
 import { RemoveElementMutation } from '../../src/mutations/remove-element';
+import { RemoveSlideMutation } from '../../src/mutations/remove-slide';
 import { UpdateShapeMutation } from '../../src/mutations/update-shape';
 import { UpdateTextMutation } from '../../src/mutations/update-text';
 import { PptxEditorStore } from '../../src/store/editor-store';
@@ -22,7 +23,7 @@ import type { OfficeCliBatch } from '../../src/transport/officecli/types';
 import { deck, plainShape, shape } from '../fixtures/presentation';
 
 describe('UndoRedoStack', () => {
-  it('records only confirmed commands and submits undo and redo through OfficeCLI', async () => {
+  it('records commands optimistically and submits undo and redo serially', async () => {
     const target = plainShape('7', 'before');
     const store = new PptxEditorStore(deck([target]));
     const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
@@ -51,9 +52,9 @@ describe('UndoRedoStack', () => {
     expect(textOf(store)).toBe('after');
     expect(shapeOf(store).x).toBe(100);
     expect(history.getSnapshot()).toMatchObject({
-      undoDepth: 0,
+      undoDepth: 1,
       pendingSubmissions: 1,
-      canUndo: false,
+      canUndo: true,
     });
 
     await edit.settled;
@@ -92,6 +93,40 @@ describe('UndoRedoStack', () => {
     ]);
   });
 
+  it('redoes an optimistic undo before any submission settles', async () => {
+    const target = plainShape('7', 'before');
+    const store = new PptxEditorStore(deck([target]));
+    const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
+    const gate = deferred<OfficeCliBatchSendResult>();
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockImplementationOnce(() => gate.promise)
+      .mockResolvedValue(confirmedSendResult());
+    const history = createHistory(store, sendBatch);
+
+    const edit = history.submit(updateTextCommand('edit-1', ref, 'after'));
+    const undo = history.undo();
+    const redo = history.redo();
+
+    expect(textOf(store)).toBe('after');
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 1,
+      redoDepth: 0,
+      pendingSubmissions: 3,
+      canUndo: true,
+    });
+    expect(sendBatch).toHaveBeenCalledTimes(1);
+
+    gate.resolve(confirmedSendResult());
+    await Promise.all([edit.settled, undo.settled, redo.settled]);
+
+    expect(textOfBase(store)).toBe('after');
+    expect(sendBatch.mock.calls.map(([batch]) => batch.commandId)).toEqual([
+      'edit-1',
+      'undo-1',
+      'redo-2',
+    ]);
+  });
+
   it('reverses inverse mutations so a compound command returns to its original state', async () => {
     const target = plainShape('7', 'before');
     const store = new PptxEditorStore(deck([target]));
@@ -117,8 +152,8 @@ describe('UndoRedoStack', () => {
     ]);
   });
 
-  it('blocks undo while commands are pending and ignores rejected or invalidated commands', async () => {
-    const target = shape('7', 'before');
+  it('undoes pending commands immediately and drops the optimistic tail after rejection', async () => {
+    const target = plainShape('7', 'before');
     const store = new PptxEditorStore(deck([target]));
     const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
     const gate = deferred<OfficeCliBatchSendResult>();
@@ -126,12 +161,20 @@ describe('UndoRedoStack', () => {
     const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
       .mockImplementationOnce(() => gate.promise);
     const history = createHistory(store, sendBatch);
+    const listener = vi.fn();
+    store.subscribe(listener);
     const first = history.submit(updateTextCommand('edit-1', ref, 'one'));
     const second = history.submit(updateTextCommand('edit-2', ref, 'two'));
+    const undo = history.undo();
 
-    expect(() => history.undo()).toThrowError(
-      expect.objectContaining<Partial<UndoRedoStackError>>({ code: 'undoRedo.busy' }),
-    );
+    expect(textOf(store)).toBe('one');
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 1,
+      redoDepth: 1,
+      pendingSubmissions: 3,
+      canUndo: true,
+      canRedo: true,
+    });
     gate.resolve({
       status: OFFICECLI_BATCH_SEND_STATUSES.REJECTED,
       cause: rejection,
@@ -143,13 +186,136 @@ describe('UndoRedoStack', () => {
     await expect(second.settled).resolves.toMatchObject({
       status: COMMAND_SUBMISSION_STATUSES.INVALIDATED,
     });
+    await expect(undo.settled).resolves.toMatchObject({
+      status: COMMAND_SUBMISSION_STATUSES.INVALIDATED,
+    });
+    expect(textOf(store)).toBe('before');
     expect(history.getSnapshot()).toMatchObject({
       undoDepth: 0,
       redoDepth: 0,
       pendingSubmissions: 0,
       canUndo: false,
     });
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'command.rejected',
+      commandId: 'edit-1',
+      invalidatedCommandIds: ['edit-2', 'undo-1'],
+    }));
     expect(sendBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores confirmed history when an optimistic undo is rejected', async () => {
+    const target = plainShape('7', 'before');
+    const store = new PptxEditorStore(deck([target]));
+    const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
+    const rejection = new Error('backend rejected undo');
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockResolvedValueOnce(confirmedSendResult())
+      .mockResolvedValueOnce({
+        status: OFFICECLI_BATCH_SEND_STATUSES.REJECTED,
+        cause: rejection,
+      });
+    const history = createHistory(store, sendBatch);
+
+    await history.submit(updateTextCommand('edit-1', ref, 'after')).settled;
+    const undo = history.undo();
+
+    expect(textOf(store)).toBe('before');
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 0,
+      redoDepth: 1,
+      canRedo: true,
+    });
+    await expect(undo.settled).resolves.toMatchObject({
+      status: COMMAND_SUBMISSION_STATUSES.REJECTED,
+    });
+    expect(textOf(store)).toBe('after');
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 1,
+      redoDepth: 0,
+      canUndo: true,
+    });
+  });
+
+  it('keeps an entry redoable when an optimistic redo is rejected', async () => {
+    const target = plainShape('7', 'before');
+    const store = new PptxEditorStore(deck([target]));
+    const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockResolvedValueOnce(confirmedSendResult())
+      .mockResolvedValueOnce(confirmedSendResult())
+      .mockResolvedValueOnce({
+        status: OFFICECLI_BATCH_SEND_STATUSES.REJECTED,
+        cause: new Error('backend rejected redo'),
+      });
+    const history = createHistory(store, sendBatch);
+
+    await history.submit(updateTextCommand('edit-1', ref, 'after')).settled;
+    await history.undo().settled;
+    const redo = history.redo();
+
+    expect(textOf(store)).toBe('after');
+    await redo.settled;
+    expect(textOf(store)).toBe('before');
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 0,
+      redoDepth: 1,
+      canRedo: true,
+    });
+  });
+
+  it('temporarily blocks history while a non-undoable command is pending', async () => {
+    const target = plainShape('7', 'before');
+    const store = new PptxEditorStore(deck([target]));
+    const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
+    const gate = deferred<OfficeCliBatchSendResult>();
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockResolvedValueOnce(confirmedSendResult())
+      .mockImplementationOnce(() => gate.promise)
+      .mockResolvedValueOnce(confirmedSendResult());
+    const history = createHistory(store, sendBatch);
+
+    await history.submit(updateTextCommand('edit-1', ref, 'after')).settled;
+    const remove = history.submit({
+      id: 'remove-slide-1',
+      mutations: [new RemoveSlideMutation({
+        target: { slideId: 'ppt/slides/slide1.xml' },
+      })],
+    });
+
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 1,
+      redoDepth: 0,
+      canUndo: false,
+      canRedo: false,
+    });
+    expect(() => history.undo()).toThrowError(
+      expect.objectContaining<Partial<UndoRedoStackError>>({ code: 'undoRedo.busy' }),
+    );
+
+    gate.resolve({
+      status: OFFICECLI_BATCH_SEND_STATUSES.REJECTED,
+      cause: new Error('backend rejected removal'),
+    });
+    await remove.settled;
+
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 1,
+      redoDepth: 0,
+      canUndo: true,
+    });
+
+    await history.submit({
+      id: 'remove-slide-2',
+      mutations: [new RemoveSlideMutation({
+        target: { slideId: 'ppt/slides/slide1.xml' },
+      })],
+    }).settled;
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 0,
+      redoDepth: 0,
+      canUndo: false,
+    });
   });
 
   it('restores a removed element at its original position through undo', async () => {

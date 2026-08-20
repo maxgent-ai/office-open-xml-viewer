@@ -92,6 +92,7 @@ export class PptxEditorSession {
     this.#disposed = true;
     this.#unsubscribeStore();
     this.#unsubscribeHistory();
+    this.#history.dispose();
     this.#listeners.clear();
     this.#batchedStoreChange = undefined;
     this.#batchedHistoryChange = false;

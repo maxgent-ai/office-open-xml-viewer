@@ -320,8 +320,11 @@ createCommandId: ({ direction, sourceCommandId }) =>
   `${direction}:${sourceCommandId}:${crypto.randomUUID()}`,
 ```
 
-Undo depth advances only after the forward command is **confirmed**. While a
-command is pending, `canUndo` stays false for that entry.
+Undo and redo history advances optimistically with the local presentation.
+Pending invertible commands can be undone or redone immediately; the resulting
+commands remain serial in the OfficeCLI submission queue. A pending
+non-invertible command temporarily disables both operations. If a command is
+rejected, it and its invalidated optimistic tail are removed from history.
 
 ### Submission outcomes
 
@@ -329,7 +332,7 @@ Your `sendBatch` must return one of:
 
 | Status | Meaning | Session effect |
 | --- | --- | --- |
-| `confirmed` | Server accepted the batch | Command leaves pending; undo entry commits |
+| `confirmed` | Server accepted the batch | Command leaves pending; optimistic history becomes confirmed |
 | `rejected` | Server rejected with known cause | Optimistic change rolled back for that command |
 | `unknown` | Outcome unclear (timeout, network ambiguity) | Sync **halts**; further submits blocked until `resync` |
 

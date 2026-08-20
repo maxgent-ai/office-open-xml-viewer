@@ -692,6 +692,68 @@ describe('mutation engine', () => {
     expect(mutation.inverse(presentation)).toBeUndefined();
   });
 
+  it('inverts whole-shape plain text when parser emits fieldType null', () => {
+    const target = shape('7', 'before');
+    const run = target.textBody!.paragraphs[0].runs[0];
+    if (run.type !== 'text') throw new TypeError('expected a text run');
+    (run as { fieldType: string | null }).fieldType = null;
+    const presentation = deck([target]);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+    const mutation = new UpdateTextMutation({ target: ref, value: 'after' });
+
+    expect(mutation.inverse(presentation)).toEqual(
+      new UpdateTextMutation({ target: ref, value: 'before' }),
+    );
+  });
+
+  it('does not offer a lossy inverse for whole-shape rich text replacement', () => {
+    const fieldTarget = shape('7', '7');
+
+    const hyperlinkTarget = shape('8', 'Link');
+    const hyperlinkRun = hyperlinkTarget.textBody!.paragraphs[0].runs[0];
+    if (hyperlinkRun.type !== 'text') throw new TypeError('expected a text run');
+    hyperlinkRun.fieldType = undefined;
+    hyperlinkRun.hyperlink = 'https://example.com';
+
+    const actionTarget = shape('9', 'Next');
+    const actionRun = actionTarget.textBody!.paragraphs[0].runs[0];
+    if (actionRun.type !== 'text') throw new TypeError('expected a text run');
+    actionRun.fieldType = undefined;
+    actionRun.hyperlinkAction = 'ppaction://hlinknextslide';
+
+    const multiRunTarget = shape('10', 'Hello World');
+    const firstRun = multiRunTarget.textBody!.paragraphs[0].runs[0];
+    if (firstRun.type !== 'text') throw new TypeError('expected a text run');
+    multiRunTarget.textBody!.paragraphs[0].runs = [
+      { ...firstRun, text: 'Hello ', fieldType: undefined },
+      { ...firstRun, text: 'World', fieldType: undefined, bold: false },
+    ];
+
+    const multiParagraphTarget = shape('11', 'First');
+    const firstParagraph = multiParagraphTarget.textBody!.paragraphs[0];
+    const paragraphRun = firstParagraph.runs[0];
+    if (paragraphRun.type !== 'text') throw new TypeError('expected a text run');
+    paragraphRun.fieldType = undefined;
+    multiParagraphTarget.textBody!.paragraphs.push({
+      ...firstParagraph,
+      runs: [{ ...paragraphRun, text: 'Second' }],
+    });
+
+    for (const target of [
+      fieldTarget,
+      hyperlinkTarget,
+      actionTarget,
+      multiRunTarget,
+      multiParagraphTarget,
+    ]) {
+      const presentation = deck([target]);
+      const ref = createElementRef(presentation.slides[0], target, 0);
+      const mutation = new UpdateTextMutation({ target: ref, value: 'Changed' });
+
+      expect(mutation.inverse(presentation)).toBeUndefined();
+    }
+  });
+
   it('rejects mixing paragraph text replacement with span edits', () => {
     const target = shape('7', 'Hello');
     const presentation = deck([target]);

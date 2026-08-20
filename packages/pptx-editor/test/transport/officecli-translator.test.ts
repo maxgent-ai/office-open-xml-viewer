@@ -16,7 +16,7 @@ import {
 } from '../../src/transport/officecli/constants';
 import { OfficeCliTranslatorError } from '../../src/transport/officecli/errors';
 import { toOfficeCliBatch } from '../../src/transport/officecli/officecli-translator';
-import { deck, shape } from '../fixtures/presentation';
+import { deck, plainShape, shape } from '../fixtures/presentation';
 
 describe('toOfficeCliBatch', () => {
   it('translates a complete transform to explicit OfficeCLI values', () => {
@@ -675,7 +675,7 @@ describe('toOfficeCliBatch', () => {
 
   it('advances presentation when translating a compound undo (Add then text restore)', () => {
     const keep = shape('7', 'keep');
-    const victim = shape('8', 'before');
+    const victim = plainShape('8', 'before');
     const presentation = deck([keep, victim]);
     const victimRef = createElementRef(presentation.slides[0], victim, 1);
     const forward: Command = {

@@ -19,11 +19,11 @@ import {
 import { SerialOfficeCliSubmitter } from '../../src/submission/serial-officecli-submitter';
 import type { OfficeCliBatchSendResult } from '../../src/submission/types';
 import type { OfficeCliBatch } from '../../src/transport/officecli/types';
-import { deck, shape } from '../fixtures/presentation';
+import { deck, plainShape, shape } from '../fixtures/presentation';
 
 describe('UndoRedoStack', () => {
   it('records only confirmed commands and submits undo and redo through OfficeCLI', async () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const store = new PptxEditorStore(deck([target]));
     const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
     const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
@@ -93,7 +93,7 @@ describe('UndoRedoStack', () => {
   });
 
   it('reverses inverse mutations so a compound command returns to its original state', async () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const store = new PptxEditorStore(deck([target]));
     const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
     const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
@@ -198,7 +198,7 @@ describe('UndoRedoStack', () => {
   });
 
   it('clears confirmed history after recovering a halted store from authoritative state', async () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const store = new PptxEditorStore(deck([target]));
     const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
     const unknownCause = new Error('request timed out');

@@ -16,11 +16,11 @@ import {
 } from '../../src/submission/constants';
 import type { OfficeCliBatchSendResult } from '../../src/submission/types';
 import type { OfficeCliBatch } from '../../src/transport/officecli/types';
-import { deck, shape } from '../fixtures/presentation';
+import { deck, plainShape, shape } from '../fixtures/presentation';
 
 describe('PptxEditorSession', () => {
   it('owns the optimistic pipeline and publishes a unified session snapshot', async () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const presentation = deck([target]);
     const ref = createElementRef(presentation.slides[0], target, 0);
     const gate = deferred<OfficeCliBatchSendResult>();
@@ -72,7 +72,7 @@ describe('PptxEditorSession', () => {
   });
 
   it('submits undo and redo through the same session boundary', async () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const presentation = deck([target]);
     const ref = createElementRef(presentation.slides[0], target, 0);
     const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
@@ -169,7 +169,7 @@ describe('PptxEditorSession', () => {
   });
 
   it('isolates listener failures from optimistic dispatch and confirmation', async () => {
-    const target = shape('7', 'before');
+    const target = plainShape('7', 'before');
     const presentation = deck([target]);
     const ref = createElementRef(presentation.slides[0], target, 0);
     const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()

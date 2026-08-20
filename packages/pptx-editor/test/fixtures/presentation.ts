@@ -61,6 +61,14 @@ export function shape(
   };
 }
 
+export function plainShape(id: string | undefined, text: string): ShapeElement {
+  const result = shape(id, text);
+  const run = result.textBody!.paragraphs[0].runs[0];
+  if (run.type !== 'text') throw new TypeError('expected a text run');
+  run.fieldType = undefined;
+  return result;
+}
+
 function textBody(text: string): TextBody {
   return {
     verticalAnchor: 't',

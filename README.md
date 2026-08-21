@@ -736,7 +736,7 @@ file without uploading it.
 | | Charts (pie, doughnut) | ✅ |
 | | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
 | | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
-| | Charts (combo — bar + line with a secondary value axis on the right) | ✅ |
+| | Charts (ordered classic combo groups — observed bar/line/area, scatter/bubble, and stock/line combinations; unsupported mixes fail closed) | ✅ |
 | | Charts (chartEx — funnel / histogram / treemap / sunburst / box &amp; whisker) | ✅ |
 | | Charts (stock — high / low / close candlesticks) | ✅ |
 | | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`, or a staged fallback to a text list when no drawing part is present; no native diagram layout engine) | ✅ |

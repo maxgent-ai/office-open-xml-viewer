@@ -79,6 +79,18 @@ export function threeDToMaxScale(
   );
 }
 
+/** Resolve pie3D `<c:view3D><c:hPercent>` as the Office-defined multiplier
+ * of the radial family's default wall thickness (MS-OE376 §2.1.1501(b)).
+ * Omission keeps automatic/default thickness. Public models created before
+ * authored-provenance was exposed continue to treat a supplied value as
+ * authored. */
+export function pieThreeDThicknessMultiplier(view: ChartThreeD): number {
+  const authored = view.heightPercentAuthored ?? view.heightPercent != null;
+  if (!authored || view.heightPercent == null || !Number.isFinite(view.heightPercent)) return 1;
+  if (view.heightPercent < 5 || view.heightPercent > 500) return 1;
+  return view.heightPercent / 100;
+}
+
 export interface ChartThreeDSceneTopology {
   farX: 'min' | 'max';
   farY: 'min' | 'max';
@@ -103,6 +115,10 @@ export interface ChartThreeDProjection {
   /** Bounded visible pie-wall thickness as a fraction of the horizontal radius. */
   pieThicknessFraction: number;
   project: (x: number, y: number, depth: number) => ThreeDPoint;
+  /** Project model geometry outside the base 0..1 depth interval. Used only
+   * for authored CT_Surface thickness; ordinary data geometry remains clipped
+   * to the chart volume through {@link project}. */
+  projectUnbounded: (x: number, y: number, depth: number) => ThreeDPoint;
   /** Camera-space depth used by the shared painter's far-to-near scene sort. */
   cameraDepth: (x: number, y: number, depth: number) => number;
   /** Reciprocal clip-space W used for perspective-correct interpolation of
@@ -143,19 +159,15 @@ export interface ChartThreeDProjectionOptions {
   sceneHeightScale?: number;
 }
 
-/** Reframe an existing homogeneous camera around the geometry actually used
- * by one chart. This is a final uniform viewport transform only: camera-space
- * depth, culling, straight lines and vanishing points remain unchanged. */
-export function fitChartThreeDProjectionToPoints(
+function fitProjectedGeometry(
   projection: ChartThreeDProjection,
-  points: readonly ThreeDScenePoint[],
+  projected: readonly ThreeDPoint[],
   target: ThreeDRect,
-  paddingFraction = 0.06,
+  paddingFraction: number,
 ): ChartThreeDProjection {
-  if (!points.length || points.length > 100_000
+  if (!projected.length || projected.length > 100_000
     || ![target.x, target.y, target.w, target.h].every(Number.isFinite)
     || target.w <= 0 || target.h <= 0) return projection;
-  const projected = points.map(point => projection.project(point.x, point.y, point.depth));
   if (!projected.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) {
     return projection;
   }
@@ -179,8 +191,9 @@ export function fitChartThreeDProjectionToPoints(
   if (!(scale > 0) || !Number.isFinite(scale)) return projection;
   const sourceCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
   const targetCenter = { x: target.x + target.w / 2, y: target.y + target.h / 2 };
-  const baseProject = projection.project;
-  const project = (x: number, y: number, depth: number): ThreeDPoint => {
+  const transformProject = (
+    baseProject: ChartThreeDProjection['project'],
+  ): ChartThreeDProjection['project'] => (x, y, depth) => {
     const point = baseProject(x, y, depth);
     return {
       x: targetCenter.x + (point.x - sourceCenter.x) * scale,
@@ -189,10 +202,195 @@ export function fitChartThreeDProjectionToPoints(
   };
   return {
     ...projection,
-    project,
+    project: transformProject(projection.project),
+    projectUnbounded: transformProject(projection.projectUnbounded),
     depthX: projection.depthX * scale,
     depthY: projection.depthY * scale,
   };
+}
+
+/** Reframe an existing homogeneous camera around the geometry actually used
+ * by one chart. This is a final uniform viewport transform only: camera-space
+ * depth, culling, straight lines and vanishing points remain unchanged. */
+export function fitChartThreeDProjectionToPoints(
+  projection: ChartThreeDProjection,
+  points: readonly ThreeDScenePoint[],
+  target: ThreeDRect,
+  paddingFraction = 0.06,
+): ChartThreeDProjection {
+  if (!points.length || points.length > 100_000) return projection;
+  return fitProjectedGeometry(
+    projection,
+    points.map(point => projection.project(point.x, point.y, point.depth)),
+    target,
+    paddingFraction,
+  );
+}
+
+export type ChartThreeDSurfaceKind = 'floor' | 'sideWall' | 'backWall';
+
+export interface ChartThreeDSurfaceGeometry {
+  /** Authored thickness in model-space chart units. */
+  thickness: number;
+  /** Plot-volume boundary face. */
+  inner: ThreeDScenePoint[];
+  /** Parallel exterior face. Equals `inner` when thickness is zero/invalid. */
+  outer: ThreeDScenePoint[];
+  /** One planar face at zero thickness, otherwise the closed six-face slab. */
+  faces: ThreeDScenePoint[][];
+  /** Projected plot-face width/height used by Office plain picture stacking. */
+  pictureStackAspect: number | null;
+  /** CSS-pixel metric represented by one normalized scene-depth unit. */
+  modelDepth: number;
+}
+
+const MAX_UNSIGNED_INT = 4_294_967_295;
+
+/** Resolve one CT_Surface as a bounded slab outside the plot volume.
+ * ECMA-376 §21.2.2.206 defines thickness as a percentage of the largest
+ * dimension of the plot volume. No screen-space offsets or family constants
+ * are involved: all six faces pass through the shared camera. */
+export function planChartThreeDSurfaceGeometry(
+  projection: ChartThreeDProjection,
+  kind: ChartThreeDSurfaceKind,
+  thicknessPercent: number | null | undefined,
+): ChartThreeDSurfaceGeometry {
+  const { front } = projection;
+  const xMin = front.x;
+  const xMax = front.x + front.w;
+  const sideX = projection.topology.farX === 'min' ? xMin : xMax;
+  const floorY = projection.topology.axisY === 'min' ? front.y : front.y + front.h;
+  const topY = floorY === front.y ? front.y + front.h : front.y;
+  const { nearDepth, farDepth } = projection.topology;
+  const stackReference = [
+    projection.projectUnbounded(xMin, topY, farDepth),
+    projection.projectUnbounded(xMax, topY, farDepth),
+    projection.projectUnbounded(xMin, floorY, farDepth),
+  ];
+  const stackReferenceWidth = Math.hypot(
+    stackReference[0].x - stackReference[1].x,
+    stackReference[0].y - stackReference[1].y,
+  );
+  const stackReferenceHeight = Math.hypot(
+    stackReference[0].x - stackReference[2].x,
+    stackReference[0].y - stackReference[2].y,
+  );
+  const pictureStackAspect = stackReferenceWidth > 0 && stackReferenceHeight > 0
+    ? stackReferenceWidth / stackReferenceHeight
+    : null;
+  const rawPercent = thicknessPercent == null ? 0 : thicknessPercent;
+  const validPercent = Number.isFinite(rawPercent)
+    && rawPercent >= 0 && rawPercent <= MAX_UNSIGNED_INT ? rawPercent : 0;
+  const thickness = Math.max(front.w, front.h, projection.modelDepth) * validPercent / 100;
+  let inner: ThreeDScenePoint[];
+  let outer: ThreeDScenePoint[];
+  if (kind === 'floor') {
+    inner = [
+      { x: xMin, y: floorY, depth: nearDepth },
+      { x: xMax, y: floorY, depth: nearDepth },
+      { x: xMax, y: floorY, depth: farDepth },
+      { x: xMin, y: floorY, depth: farDepth },
+    ];
+    const outerY = floorY + (floorY === front.y ? -thickness : thickness);
+    outer = inner.map(point => ({ ...point, y: outerY }));
+  } else if (kind === 'sideWall') {
+    inner = [
+      { x: sideX, y: floorY, depth: nearDepth },
+      { x: sideX, y: floorY, depth: farDepth },
+      { x: sideX, y: topY, depth: farDepth },
+      { x: sideX, y: topY, depth: nearDepth },
+    ];
+    const outerX = sideX + (sideX === xMin ? -thickness : thickness);
+    outer = inner.map(point => ({ ...point, x: outerX }));
+  } else {
+    inner = [
+      { x: xMin, y: floorY, depth: farDepth },
+      { x: xMax, y: floorY, depth: farDepth },
+      { x: xMax, y: topY, depth: farDepth },
+      { x: xMin, y: topY, depth: farDepth },
+    ];
+    const depthOffset = projection.modelDepth > 0 ? thickness / projection.modelDepth : 0;
+    const outerDepth = farDepth === 0 ? -depthOffset : 1 + depthOffset;
+    outer = inner.map(point => ({ ...point, depth: outerDepth }));
+  }
+  if (!(thickness > 0)) {
+    return {
+      thickness: 0,
+      inner,
+      outer: [...inner],
+      faces: [inner],
+      pictureStackAspect,
+      modelDepth: projection.modelDepth,
+    };
+  }
+  const sides = inner.map((point, index) => [
+    point,
+    inner[(index + 1) % inner.length],
+    outer[(index + 1) % outer.length],
+    outer[index],
+  ]);
+  const rawFaces = [inner, outer, ...sides];
+  const solidCenter = [...inner, ...outer].reduce(
+    (sum, point) => ({
+      x: sum.x + point.x / 8,
+      y: sum.y + point.y / 8,
+      depth: sum.depth + point.depth / 8,
+    }),
+    { x: 0, y: 0, depth: 0 },
+  );
+  const faces = rawFaces.map(face => {
+    const [a, b, c] = face;
+    const ab = { x: b.x - a.x, y: b.y - a.y, depth: b.depth - a.depth };
+    const ac = { x: c.x - a.x, y: c.y - a.y, depth: c.depth - a.depth };
+    const normal = {
+      x: ab.y * ac.depth - ab.depth * ac.y,
+      y: ab.depth * ac.x - ab.x * ac.depth,
+      depth: ab.x * ac.y - ab.y * ac.x,
+    };
+    const centroid = face.reduce(
+      (sum, point) => ({
+        x: sum.x + point.x / face.length,
+        y: sum.y + point.y / face.length,
+        depth: sum.depth + point.depth / face.length,
+      }),
+      { x: 0, y: 0, depth: 0 },
+    );
+    const outward = {
+      x: centroid.x - solidCenter.x,
+      y: centroid.y - solidCenter.y,
+      depth: centroid.depth - solidCenter.depth,
+    };
+    const dot = normal.x * outward.x + normal.y * outward.y + normal.depth * outward.depth;
+    return dot < 0 ? [...face].reverse() : face;
+  });
+  return { thickness, inner, outer, faces, pictureStackAspect, modelDepth: projection.modelDepth };
+}
+
+/** Refit the complete base cuboid and the three authored surface slabs into
+ * the existing plot rectangle with the same 3% scene margin used by the base
+ * camera. This is one uniform viewport transform, so data, axes and surfaces
+ * keep a coherent projection. */
+export function fitChartThreeDProjectionToWallThickness(
+  projection: ChartThreeDProjection,
+  view: Pick<ChartThreeD, 'floor' | 'sideWall' | 'backWall'>,
+  target: ThreeDRect,
+): ChartThreeDProjection {
+  const specs: Array<[ChartThreeDSurfaceKind, number | null | undefined]> = [
+    ['floor', view.floor?.thicknessPercent],
+    ['sideWall', view.sideWall?.thicknessPercent],
+    ['backWall', view.backWall?.thicknessPercent],
+  ];
+  const geometries = specs.map(([kind, thickness]) =>
+    planChartThreeDSurfaceGeometry(projection, kind, thickness)
+  );
+  if (!geometries.some(geometry => geometry.thickness > 0)) return projection;
+  const points = geometries.flatMap(geometry => geometry.faces.flat());
+  return fitProjectedGeometry(
+    projection,
+    points.map(point => projection.projectUnbounded(point.x, point.y, point.depth)),
+    target,
+    0.03,
+  );
 }
 
 const finiteOr = (value: number | null | undefined, fallback: number): number =>
@@ -289,11 +487,12 @@ export function planChartThreeDProjection(
     ? sceneDiagonal * 0.5 / Math.tan(perspectiveHalfAngle)
     : Number.POSITIVE_INFINITY;
 
-  const cameraPoint = (x: number, y: number, depth: number) => {
+  const cameraPoint = (x: number, y: number, depth: number, clampDepth = true) => {
     const worldX = x - centreX;
     const worldY = centreY - y;
     // Increasing chart depth moves away from the viewer.
-    const worldZ = (0.5 - clamp(Number.isFinite(depth) ? depth : 0, 0, 1))
+    const finiteDepth = Number.isFinite(depth) ? depth : 0;
+    const worldZ = (0.5 - (clampDepth ? clamp(finiteDepth, 0, 1) : finiteDepth))
       * depthMagnitude;
     const yawX = cosYaw * worldX + sinYaw * worldZ;
     const yawZ = -sinYaw * worldX + cosYaw * worldZ;
@@ -305,7 +504,7 @@ export function planChartThreeDProjection(
   };
   const cameraFaceNormal = (points: readonly ThreeDScenePoint[]) => {
     if (points.length < 3) return null;
-    const cameraPoints = points.map(point => cameraPoint(point.x, point.y, point.depth));
+    const cameraPoints = points.map(point => cameraPoint(point.x, point.y, point.depth, false));
     const a = cameraPoints[0];
     let unitNormal: ThreeDCameraNormal | null = null;
     // A clipped/sign-crossing solid can collapse one end of a quad to a
@@ -359,8 +558,13 @@ export function planChartThreeDProjection(
   const cameraDistance = perspectiveEnabled
     ? Math.max(requestedCameraDistance, maxCameraZ + sceneDiagonal * 0.01)
     : Number.POSITIVE_INFINITY;
-  const rawProject = (x: number, y: number, depth: number): ThreeDPoint => {
-    const camera = cameraPoint(x, y, depth);
+  const rawProject = (
+    x: number,
+    y: number,
+    depth: number,
+    clampDepth = true,
+  ): ThreeDPoint => {
+    const camera = cameraPoint(x, y, depth, clampDepth);
     if (!perspectiveEnabled) return { x: camera.x, y: -camera.y };
     const denominator = Math.max(cameraDistance * 1e-9, cameraDistance - camera.z);
     const scale = cameraDistance / denominator;
@@ -384,6 +588,13 @@ export function planChartThreeDProjection(
   const fitOffsetY = plot.y + (plot.h - rawHeight * fitScale) / 2 - rawMinY * fitScale;
   const project = (x: number, y: number, depth: number): ThreeDPoint => {
     const raw = rawProject(x, y, depth);
+    return {
+      x: fitOffsetX + raw.x * fitScale,
+      y: fitOffsetY + raw.y * fitScale,
+    };
+  };
+  const projectUnbounded = (x: number, y: number, depth: number): ThreeDPoint => {
+    const raw = rawProject(x, y, depth, false);
     return {
       x: fitOffsetX + raw.x * fitScale,
       y: fitOffsetY + raw.y * fitScale,
@@ -457,12 +668,13 @@ export function planChartThreeDProjection(
     // from the cartesian scene depth.
     pieThicknessFraction: 0.30 * Math.max(0, Math.cos(Math.abs(rotationX) * radians)),
     project,
+    projectUnbounded,
     cameraDepth(x, y, depth) {
-      return cameraPoint(x, y, depth).z;
+      return cameraPoint(x, y, depth, false).z;
     },
     cameraProjectionWeight(x, y, depth) {
       if (!perspectiveEnabled) return 1;
-      const z = cameraPoint(x, y, depth).z;
+      const z = cameraPoint(x, y, depth, false).z;
       return 1 / Math.max(cameraDistance * 1e-9, cameraDistance - z);
     },
     cameraFacing(points) {

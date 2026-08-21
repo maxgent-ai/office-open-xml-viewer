@@ -11,7 +11,8 @@ export type {
   TabStop,
   TextRun, TextRunData, LineBreak,
   RenderOptions,
-  ChartModel, ChartSeries, SecondaryValueAxis,
+  ChartModel, ChartPlotGroup, ChartPlotGroupAxisSlot, ChartPlotGroupKind,
+  ChartSeries, SecondaryValueAxis,
 } from '@silurus/ooxml-core';
 
 // ===== Presentation data model =====

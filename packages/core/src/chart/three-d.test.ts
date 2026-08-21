@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  fitChartThreeDProjectionToWallThickness,
   fitChartThreeDProjectionToPoints,
+  pieThreeDThicknessMultiplier,
+  planChartThreeDSurfaceGeometry,
   planChartThreeDProjection,
   planThreeDBarClusterSlot,
   threeDToMaxScale,
@@ -18,6 +21,22 @@ import {
 } from './three-d-renderer.js';
 
 const PLOT = { x: 20, y: 10, w: 360, h: 180 };
+
+describe('pieThreeDThicknessMultiplier', () => {
+  it('distinguishes omitted hPercent from an authored value and its bare 100% default', () => {
+    expect(pieThreeDThicknessMultiplier({ heightPercent: 50, heightPercentAuthored: false }))
+      .toBe(1);
+    expect(pieThreeDThicknessMultiplier({ heightPercent: 50, heightPercentAuthored: true }))
+      .toBe(0.5);
+    expect(pieThreeDThicknessMultiplier({ heightPercent: 100, heightPercentAuthored: true }))
+      .toBe(1);
+    expect(pieThreeDThicknessMultiplier({ heightPercent: 200 })).toBe(2);
+    expect(pieThreeDThicknessMultiplier({ heightPercent: 0, heightPercentAuthored: true }))
+      .toBe(1);
+    expect(pieThreeDThicknessMultiplier({ heightPercent: 501, heightPercentAuthored: true }))
+      .toBe(1);
+  });
+});
 
 describe('threeDMeshOutlineWidthPx', () => {
   it('matches the observed one-pixel 1pt Excel mesh edge at 100% zoom', () => {
@@ -80,6 +99,58 @@ describe('threeDWallGeometry', () => {
     const seriesStart = plan.project(walls.seriesAxisX, walls.floorY, walls.nearDepth);
     const seriesEnd = plan.project(walls.seriesAxisX, walls.floorY, walls.farDepth);
     expect((seriesStart.x + seriesEnd.x) / 2).toBeGreaterThan(sideMidX);
+  });
+
+  it('extrudes each CT_Surface outward by a percentage of the largest plot dimension', () => {
+    const plan = planChartThreeDProjection({
+      rotationX: 15, rotationY: 20, depthPercent: 100, perspective: 30,
+    }, PLOT, { sceneDepthScale: 1 });
+    if (!plan) throw new Error('projection not planned');
+    const floor = planChartThreeDSurfaceGeometry(plan, 'floor', 25);
+    const side = planChartThreeDSurfaceGeometry(plan, 'sideWall', 25);
+    const back = planChartThreeDSurfaceGeometry(plan, 'backWall', 25);
+    expect(floor.thickness).toBeCloseTo(90, 12);
+    expect(side.thickness).toBeCloseTo(90, 12);
+    expect(back.thickness).toBeCloseTo(90, 12);
+    expect(floor.faces).toHaveLength(6);
+    expect(side.faces).toHaveLength(6);
+    expect(back.faces).toHaveLength(6);
+    expect(floor.pictureStackAspect).toBeGreaterThan(0);
+    expect(side.pictureStackAspect).toBeCloseTo(floor.pictureStackAspect as number, 12);
+    expect(back.pictureStackAspect).toBeCloseTo(floor.pictureStackAspect as number, 12);
+    expect(Math.abs(floor.outer[0].y - floor.inner[0].y)).toBeCloseTo(90, 12);
+    expect(Math.abs(side.outer[0].x - side.inner[0].x)).toBeCloseTo(90, 12);
+    expect(
+      Math.abs(back.outer[0].depth - back.inner[0].depth) * plan.modelDepth,
+    ).toBeCloseTo(90, 12);
+  });
+
+  it('keeps zero-thickness surfaces planar and fits positive slabs inside the plot once', () => {
+    const plan = planChartThreeDProjection({
+      rotationX: 15, rotationY: 20, heightPercent: 100,
+      depthPercent: 100, perspective: 30,
+    }, PLOT, { sceneDepthScale: 1 });
+    if (!plan) throw new Error('projection not planned');
+    expect(planChartThreeDSurfaceGeometry(plan, 'floor', 0).faces).toHaveLength(1);
+    for (const invalid of [-1, Number.POSITIVE_INFINITY, 4_294_967_296]) {
+      expect(planChartThreeDSurfaceGeometry(plan, 'floor', invalid)).toMatchObject({
+        thickness: 0,
+        faces: [expect.any(Array)],
+      });
+    }
+    const fitted = fitChartThreeDProjectionToWallThickness(plan, {
+      floor: { thicknessPercent: 25 },
+      sideWall: { thicknessPercent: 25 },
+      backWall: { thicknessPercent: 25 },
+    }, PLOT);
+    const points = (['floor', 'sideWall', 'backWall'] as const).flatMap(kind =>
+      planChartThreeDSurfaceGeometry(fitted, kind, 25).faces.flat()
+        .map(point => fitted.projectUnbounded(point.x, point.y, point.depth))
+    );
+    expect(Math.min(...points.map(point => point.x))).toBeGreaterThanOrEqual(PLOT.x - 1e-9);
+    expect(Math.max(...points.map(point => point.x))).toBeLessThanOrEqual(PLOT.x + PLOT.w + 1e-9);
+    expect(Math.min(...points.map(point => point.y))).toBeGreaterThanOrEqual(PLOT.y - 1e-9);
+    expect(Math.max(...points.map(point => point.y))).toBeLessThanOrEqual(PLOT.y + PLOT.h + 1e-9);
   });
 });
 

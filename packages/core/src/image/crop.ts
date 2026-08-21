@@ -65,7 +65,7 @@ interface CropMapping {
  * Negative insets are normative outsets (§20.1.8.55): the logical source rect
  * extends beyond the bitmap and the unavailable part stays transparent in the
  * destination instead of being clamped and stretching the bitmap. */
-function cropMapping(
+export function cropSourceMapping(
   img: CanvasImageSource,
   srcRect: SrcRect | null | undefined,
 ): CropMapping | null {
@@ -117,7 +117,7 @@ export function cropSourceRect(
   img: CanvasImageSource,
   srcRect: SrcRect | null | undefined,
 ): { sx: number; sy: number; sw: number; sh: number } | null {
-  const mapping = cropMapping(img, srcRect);
+  const mapping = cropSourceMapping(img, srcRect);
   if (!mapping) return null;
   return { sx: mapping.sx, sy: mapping.sy, sw: mapping.sw, sh: mapping.sh };
 }
@@ -136,7 +136,7 @@ export function drawImageCropped(
   dw: number,
   dh: number,
 ): void {
-  const c = cropMapping(img, srcRect);
+  const c = cropSourceMapping(img, srcRect);
   if (!c) {
     ctx.drawImage(img, dx, dy, dw, dh);
   } else if (c.sw > 0 && c.sh > 0 && c.dwFraction > 0 && c.dhFraction > 0) {

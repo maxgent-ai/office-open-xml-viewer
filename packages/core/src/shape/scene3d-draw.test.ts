@@ -85,6 +85,31 @@ describe('drawProjected', () => {
     expect(d).toBeCloseTo(1, 3);
   });
 
+  it('maps a bounded source crop across the complete projected quad', () => {
+    const ctx = new RecordingCtx();
+    const corners: [Vec2, Vec2, Vec2, Vec2] = [
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+      { x: 100, y: 80 },
+      { x: 0, y: 80 },
+    ];
+    drawProjected(fakeImage, asCtx(ctx), 100, 80, corners, 0.5, {
+      x0: 25, y0: 0, x1: 100, y1: 80,
+    });
+    expect(ctx.draws).toHaveLength(1);
+    const draw = ctx.draws[0];
+    expect(draw.sx).toBeGreaterThanOrEqual(24);
+    expect(draw.sx).toBeLessThanOrEqual(25);
+    expect(draw.sx + draw.sw).toBeCloseTo(100, 6);
+    expect(draw.sy).toBe(0);
+    expect(draw.sh).toBe(80);
+    const [a, b, c, d] = ctx.transforms[0];
+    expect(a).toBeCloseTo(100 / 75, 3);
+    expect(b).toBeCloseTo(0, 3);
+    expect(c).toBeCloseTo(0, 3);
+    expect(d).toBeCloseTo(1, 3);
+  });
+
   it('subdivides a perspective quad into many cells (error-driven mesh)', () => {
     const ctx = new RecordingCtx();
     // A strongly non-affine quad (foreshortened top edge).
@@ -204,6 +229,26 @@ describe('drawProjected', () => {
       expect(blit.dw).toBeLessThanOrEqual(103);
       expect(blit.dh).toBeGreaterThanOrEqual(80);
       expect(blit.dh).toBeLessThanOrEqual(83);
+    });
+
+    it('retains the bounded source crop in the supersampled browser path', () => {
+      const { dst, auxes } = installAuxStub();
+      const rect: [Vec2, Vec2, Vec2, Vec2] = [
+        { x: 0, y: 0 },
+        { x: 100, y: 0 },
+        { x: 100, y: 80 },
+        { x: 0, y: 80 },
+      ];
+      drawProjected(fakeImage, asCtx(dst), 100, 80, rect, 0.5, {
+        x0: 25, y0: 0, x1: 100, y1: 80,
+      });
+      expect(auxes).toHaveLength(1);
+      expect(auxes[0].draws).toHaveLength(1);
+      const draw = auxes[0].draws[0];
+      expect(draw.sx).toBeGreaterThanOrEqual(24);
+      expect(draw.sx).toBeLessThanOrEqual(25);
+      expect(draw.sx + draw.sw).toBeCloseTo(100, 6);
+      expect(dst.draws).toHaveLength(1);
     });
   });
 

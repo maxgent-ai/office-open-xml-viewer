@@ -6,11 +6,13 @@
 import type { ChartDataLabelOverride, ChartDecorationLineStyle, ChartDisplayUnits, ChartLabelBox, ChartLegendEntryOverride, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartStockUpDownBarStyle, ChartStyleRole, ChartTextBox, ChartTextRun, ChartTrendline, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
 import {
+  chartImageFillSource,
   chartImageFillPaintWorkUpperBound,
   paintChartImageFill,
   type ChartImageLookup,
   withChartImageLookup,
 } from './image-fill.js';
+import { paintChartThreeDSurfacePicture } from './three-d-surface-picture.js';
 import { mergeChartLabelBoxes, paintChartLabelBox } from './label-box.js';
 import { strokeChartFrameRect } from './compound-frame.js';
 import {
@@ -25,6 +27,7 @@ import {
   type DataLabelTextStyle,
 } from './data-label-style.js';
 import {
+  bubblePointIsThreeD,
   classicMarkerPointIsPainted,
   chartDataTableFamilyIsPainted,
   dataLabelLegendKeyCount,
@@ -41,6 +44,7 @@ import {
   seriesMarkerFillPaint,
   seriesLegendMarkerIsVisible,
   seriesHasMarkerDetail,
+  visibleBubbleSize,
 } from './marker-style.js';
 import {
   AXIS_OUTER_TEXT_MARGIN_PT,
@@ -91,6 +95,7 @@ import {
   type CategoryGapPolicy,
 } from './category-spacing.js';
 import { planHistogramBins } from './histogram-binning.js';
+import { planOfPieSecondaryIndices } from './of-pie.js';
 import {
   boxWhiskerGeometry,
   boxWhiskerPointCount,
@@ -102,8 +107,15 @@ import {
   classicCanvasPointCount,
   classicCanvasPointFamilyIsPainted,
   MAX_CANVAS_CHART_POINTS,
+  MAX_CHART_PAINT_COMPONENTS,
+  MAX_CHART_PAINT_RECIPE_COMPONENTS,
   sourceChartStructureCount,
 } from './resource-limits.js';
+import {
+  classicPlotDispatch,
+  indexChartPlotGroups,
+  markerChartTypeForPlotGroup,
+} from './plot-groups.js';
 import {
   THREE_D_MAX_SHAPE_FACES_PER_DATUM,
   type ChartThreeDRenderer,
@@ -119,6 +131,14 @@ import { effectiveDataLabelText } from './data-label-content.js';
 import { placeTrendlineLabel } from './trendline-label.js';
 import { paintLegendFrame } from './legend-frame.js';
 import { paintPlotAreaFrame } from './plot-area-frame.js';
+import {
+  chartThreeDSurfacePaint,
+  chartStyleColor,
+  chartStyleFillDecision,
+  chartStyleFillPaint,
+  chartStyleLineDecision,
+  chartStyleLinePaint,
+} from './style-paint.js';
 import { applyPlotVisibleOnly } from './source-visibility.js';
 import {
   boundDataLabelText,
@@ -135,7 +155,12 @@ import {
   surfaceMaterialFactor,
   surfacePerspectiveTangentGain,
 } from './material-color.js';
-import { planChartThreeDProjection, type ThreeDScenePoint } from './three-d.js';
+import {
+  fitChartThreeDProjectionToWallThickness,
+  planChartThreeDSurfaceGeometry,
+  planChartThreeDProjection,
+  type ThreeDScenePoint,
+} from './three-d.js';
 import {
   DEFAULT_TEXT_INSET_LR_EMU,
   DEFAULT_TEXT_INSET_TB_EMU,
@@ -235,18 +260,21 @@ function legendIsCategoryDriven(chartType: string | undefined): boolean {
   return chartType === 'pie' || chartType === 'doughnut';
 }
 
-/** §21.2.2.227 `<c:varyColors val="1"/>` on a SINGLE-series bar/column chart:
- *  Office colors each bar from the theme/palette sequence (like a pie's slices)
- *  and lists one legend entry per data point. Restricted to the bar family with
- *  exactly one series — the only case Office varies this way, and the only case
- *  the shared parser sets `varyColors` for. Pie/doughnut are already
- *  category-driven via {@link legendIsCategoryDriven}; this covers the bar case
- *  so the plot fill and the legend agree on the same per-point resolution. */
+/** Whether the legend is point-driven outside the pie/doughnut families.
+ * §21.2.2.227 `<c:varyColors val="1"/>` drives the single-series bar case.
+ * Office also exposes a lone bubble series whose `<c:xVal>` is string-backed
+ * as one entry per point; the parser preserves that source provenance rather
+ * than inferring it from the cached values. */
 export function chartVariesColorsByPoint(chart: {
   chartType?: string | null;
-  series: unknown[];
+  series: Array<{ bubbleXSourceIsString?: boolean | null }>;
   varyColors?: boolean | null;
 }): boolean {
+  if (
+    chart.chartType === 'bubble' &&
+    chart.series.length === 1 &&
+    chart.series[0]?.bubbleXSourceIsString === true
+  ) return true;
   return (
     !!chart.varyColors &&
     chart.series.length === 1 &&
@@ -573,6 +601,7 @@ function drawChartDataTable(
     true,
     [],
     chart.radarStyle,
+    chart,
   );
   ctx.beginPath();
   ctx.rect(tableX, tableY, tableWidth, layout.totalHeight);
@@ -697,6 +726,12 @@ interface LegendMarker {
   fillPaint?: Fill | null;
   line: string | null;
   lineWidthEmu: number | null;
+  linePaint?: ChartModel['plotAreaLineFill'] | null;
+  lineDash?: string | null;
+  lineCustomDash?: ChartModel['plotAreaLineCustomDash'];
+  lineCap?: string | null;
+  lineJoin?: string | null;
+  bubble3D?: boolean;
   /** True when the plotted series draws both a connecting line and markers. */
   withLine: boolean;
 }
@@ -732,6 +767,7 @@ function legendMarkerFor(
   radarStyle: string | null | undefined,
   series: ChartSeries[],
   entryIndex: number,
+  chart?: ChartModel,
 ): LegendMarker | null {
   const s = series[entryIndex];
   if (!s) return null;
@@ -739,15 +775,34 @@ function legendMarkerFor(
   const isStock = family === 'stock';
   const isLineFamily = family === 'line' || family === 'stackedLine' ||
     family === 'stackedLinePct' || family === 'radar' || isStock;
-  const isScatter = family === 'scatter';
+  const isBubble = family === 'bubble';
+  const isScatter = family === 'scatter' || isBubble;
   if (!isLineFamily && !isScatter) return null;
   if (!seriesLegendMarkerIsVisible(chartType, scatterStyle, s, radarStyle)) return null;
   const symbol = s.markerSymbol ?? (isStock ? 'none' : 'circle');
   const base = chartColor(entryIndex, s); // '#RRGGBB'
   const fill = seriesMarkerFillColor(s, base.replace(/^#/, ''));
-  const withLine = isScatter
+  const withLine = isBubble ? false : isScatter
     ? scatterSeriesDrawsLine('scatter', scatterStyle, s)
     : s.lineHidden !== true;
+  if (isBubble && chart) {
+    const bubbleFill = bubblePointFill(chart, s, undefined, entryIndex, base);
+    const bubbleLine = bubblePointLine(chart, s, undefined, entryIndex);
+    return {
+      symbol: 'circle',
+      fill: bubbleFill.color,
+      fillPaint: bubbleFill.paint,
+      line: bubbleLine.color,
+      lineWidthEmu: bubbleLine.widthEmu ?? null,
+      linePaint: bubbleLine.paint,
+      lineDash: bubbleLine.dash,
+      lineCustomDash: bubbleLine.customDash,
+      lineCap: bubbleLine.cap,
+      lineJoin: bubbleLine.join,
+      bubble3D: bubblePointIsThreeD(s, undefined),
+      withLine: false,
+    };
+  }
   return {
     symbol,
     fill,
@@ -755,6 +810,31 @@ function legendMarkerFor(
     line: s.markerLine ?? null,
     lineWidthEmu: s.markerLineWidthEmu ?? null,
     withLine,
+  };
+}
+
+function bubblePointLegendMarker(
+  chart: ChartModel,
+  series: ChartSeries,
+  point: NonNullable<ChartSeries['dataPointOverrides']>[number] | undefined,
+  pointIndex: number,
+): LegendMarker {
+  const fallback = chartColor(0, series);
+  const fill = bubblePointFill(chart, series, point, pointIndex, fallback);
+  const line = bubblePointLine(chart, series, point, pointIndex);
+  return {
+    symbol: 'circle',
+    fill: fill.color,
+    fillPaint: fill.paint,
+    line: line.color,
+    lineWidthEmu: line.widthEmu ?? null,
+    linePaint: line.paint,
+    lineDash: line.dash,
+    lineCustomDash: line.customDash,
+    lineCap: line.cap,
+    lineJoin: line.join,
+    bubble3D: bubblePointIsThreeD(series, point),
+    withLine: false,
   };
 }
 
@@ -787,6 +867,8 @@ function drawLegendSwatch(
       marker.fill, marker.line, ptToPx,
       marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
       marker.fillPaint, shapeRotationDeg,
+      marker.linePaint, marker.lineDash, marker.lineCustomDash,
+      marker.lineCap, marker.lineJoin, marker.bubble3D,
     );
     return;
   }
@@ -815,6 +897,8 @@ function drawLegendSwatch(
           marker.fill, marker.line, ptToPx,
           marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
           marker.fillPaint, shapeRotationDeg,
+          marker.linePaint, marker.lineDash, marker.lineCustomDash,
+          marker.lineCap, marker.lineJoin, marker.bubble3D,
         );
       }
       return;
@@ -840,6 +924,8 @@ function drawLegendSwatch(
         marker.fill, marker.line, ptToPx,
         marker.lineWidthEmu != null ? axisLineWidthPx(marker.lineWidthEmu, ptToPx) : undefined,
         marker.fillPaint, shapeRotationDeg,
+        marker.linePaint, marker.lineDash, marker.lineCustomDash,
+        marker.lineCap, marker.lineJoin, marker.bubble3D,
       );
     }
     ctx.restore();
@@ -916,9 +1002,9 @@ interface DataLabelLegendKey {
   shapeRotationDeg: number;
 }
 
-/** Build the legend entries for a chart. Pie/doughnut legends are
- *  category-driven (one row per data point of the first series, labeled by
- *  category); every other chart type is series-driven (one row per series). */
+/** Build the legend entries for a chart. Pie/doughnut and the explicitly
+ *  resolved point-driven compatibility cases use one row per data point;
+ *  ordinary charts use one row per series. */
 function buildLegendEntries(
   series: ChartSeries[],
   chartType: string | undefined,
@@ -929,11 +1015,12 @@ function buildLegendEntries(
   pieVaryColors = true,
   entryOverrides: readonly ChartLegendEntryOverride[] = [],
   radarStyle?: string | null,
+  chart?: ChartModel,
 ): LegendEntry[] {
   if (varyByPoint || legendIsCategoryDriven(chartType)) {
-    // Category-driven: one entry per data point of the first series, labeled by
+    // Point-driven: one entry per data point of the first series, labeled by
     // its category and colored exactly like the mark the plot draws for that
-    // point (pie slice, or a varyColors bar). §21.2.2.227.
+    // point (pie slice, varyColors bar, or string-X bubble).
     const first = series[0];
     const n = first ? first.values.length : 0;
     const cats = first?.categories ?? chartCategories;
@@ -941,12 +1028,15 @@ function buildLegendEntries(
     const entries = Array.from({ length: n }, (_, i) => {
       const point = overrides.get(i);
       const lineVisible = (point?.lineHidden ?? first?.lineHidden) !== true;
+      const bubbleMarker = chartType === 'bubble' && chart && first
+        ? bubblePointLegendMarker(chart, first, point, i)
+        : null;
       return {
         label: (cats[i] ?? `Item ${i + 1}`).toString(),
         color: legendIsCategoryDriven(chartType) && first
           ? pieSliceColor(i, first, pieVaryColors)
           : legendEntryColor(chartType, series, i, varyByPoint),
-        marker: null, // pie/doughnut/varyColors keys are always filled swatches.
+        marker: bubbleMarker,
         swatchStyle: legendSwatchStyle(chartType),
         fillPaint: point?.fillHidden === true
           ? null
@@ -973,7 +1063,7 @@ function buildLegendEntries(
     const family = s.seriesType ?? chartType;
     const lineVisible = s.lineHidden !== true;
     const lineColor = lineVisible ? (s.lineColor ?? null) : null;
-    const marker = legendMarkerFor(chartType, scatterStyle, radarStyle, series, i);
+    const marker = legendMarkerFor(chartType, scatterStyle, radarStyle, series, i, chart);
     const swatchStyle: LegendSwatchStyle = family === 'stock' && !lineVisible && !marker
       ? 'none'
       : legendSwatchStyle(family);
@@ -1020,6 +1110,7 @@ function createDataLabelLegendKeyResolver(
     chart.varyColors !== false,
     [],
     chart.radarStyle,
+    chart,
   );
   return (seriesIndex, pointIndex) => {
     const entry = entries[categoryDriven ? pointIndex : seriesIndex];
@@ -1165,6 +1256,7 @@ function measuredLegendReserve(
     chart.varyColors !== false,
     chart.legendEntries ?? [],
     chart.radarStyle,
+    chart,
   );
   const entryStyles = entries.map(entry =>
     legendEntryTextStyle(chart, style, entry.textOverride, ptToPx)
@@ -1226,6 +1318,7 @@ function drawLegend(
     pieVaryColors,
     chartForEntryStyles?.legendEntries ?? [],
     chartForEntryStyles?.radarStyle,
+    chartForEntryStyles,
   );
   const canReuseMeasure = measured != null
     && measured.measuredLabels.length === entries.length
@@ -1386,8 +1479,8 @@ function drawLegendForLayout(
   if (!leg) return;
   const legStyle = legendTextStyle(chart, ptToPx);
   const legendSeries = legendSeriesWithTrendlines(chart);
-  // §21.2.2.227 varyColors single-series bar: the legend lists one entry per
-  // data point (colored like each bar), so the legend and the plot fill agree.
+  // Point-driven legends list one entry per data point, so key paint and plot
+  // paint resolve through the same point precedence.
   const varyByPoint = chartVariesColorsByPoint(chart);
   const sideInset = Math.min(
     LEGEND_SIDE_PADDING / 2,
@@ -2508,6 +2601,10 @@ function computeSecondaryAxis(
   errorBarDirection: 'x' | 'y' = 'y',
   percentStacked = false,
   includeZero = false,
+  isSecondary: (series: ChartSeries, index: number) => boolean = series =>
+    series.useSecondaryAxis === true,
+  valueAt: (series: ChartSeries, pointIndex: number, seriesIndex: number) => number | null =
+    () => null,
 ): SecondaryAxisScale | null {
   if (!sec) return null;
   let dMin = Infinity;
@@ -2518,12 +2615,19 @@ function computeSecondaryAxis(
     dMax = Math.max(dMax, value);
   };
   if (includeZero) include(0);
-  for (const s of seriesForSecondary) {
-    if (s.useSecondaryAxis !== true) continue;
-    for (const value of s.values) {
+  for (let seriesIndex = 0; seriesIndex < seriesForSecondary.length; seriesIndex++) {
+    const s = seriesForSecondary[seriesIndex];
+    if (!isSecondary(s, seriesIndex)) continue;
+    for (let pointIndex = 0; pointIndex < s.values.length; pointIndex++) {
+      const value = valueAt(s, pointIndex, seriesIndex) ?? s.values[pointIndex];
       if (value != null) include(value);
     }
-    forEachErrorBarEndpoint(s, errorBarDirection, index => s.values[index] ?? null, include);
+    forEachErrorBarEndpoint(
+      s,
+      errorBarDirection,
+      pointIndex => valueAt(s, pointIndex, seriesIndex) ?? s.values[pointIndex] ?? null,
+      include,
+    );
   }
   if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
     dMin = 0;
@@ -3088,11 +3192,12 @@ function renderBarChart(
   const groupIsHorizontal = (series: ChartSeries): boolean => series.barGroupDirection != null
     ? series.barGroupDirection === 'bar'
     : isH;
-  // One plot-area coordinate system cannot simultaneously be a horizontal and
-  // vertical bar axis. Preserve each group's authored direction and render the
-  // groups bound to the primary bar group's axes; incompatible overlay groups
-  // remain represented in the model rather than being silently reinterpreted.
-  const barSeries = allBarSeries.filter(series => groupIsHorizontal(series) === isH);
+  // The first bar group owns the visible axis orientation, but Excel retains
+  // each later CT_BarChart group's own barDir. Consequently a schema-valid
+  // shared-axis plot may contain vertical columns over horizontal bars. Keep
+  // every group in this one data pass; category/value geometry is selected per
+  // series below while axes remain owned by the first compatibility family.
+  const barSeries = allBarSeries;
   const fallbackBarGroupKey = (series: ChartSeries): string =>
     series.useSecondaryAxis === true ? 'secondary-default' : 'primary-default';
   const barGroupKey = (series: ChartSeries): string => series.barGroupIndex != null
@@ -3110,6 +3215,25 @@ function renderBarChart(
   const areaSeries = chart.series.filter(s => s.seriesType === 'area');
   const scatterSeries = chart.series.filter(s => s.seriesType === 'scatter');
   const sourceSeriesIndices = new Map(chart.series.map((series, index) => [series, index]));
+  const plotGroupBySeries = new Map<ChartSeries, NonNullable<ChartModel['plotGroups']>[number]>();
+  for (const group of chart.plotGroups ?? []) {
+    for (let index = group.seriesStart; index < group.seriesStart + group.seriesCount; index++) {
+      const series = chart.series[index];
+      if (series) plotGroupBySeries.set(series, group);
+    }
+  }
+  const axisPercentState = new Map<string, { count: number; percentCount: number }>();
+  for (const group of chart.plotGroups ?? []) {
+    if (group.seriesCount === 0) continue;
+    const state = axisPercentState.get(group.valueAxis) ?? { count: 0, percentCount: 0 };
+    state.count++;
+    if (group.grouping === 'percentStacked') state.percentCount++;
+    axisPercentState.set(group.valueAxis, state);
+  }
+  const axisUsesPercentSpace = (group: NonNullable<ChartModel['plotGroups']>[number]): boolean => {
+    const state = axisPercentState.get(group.valueAxis);
+    return state != null && state.count === state.percentCount;
+  };
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
 
   // Combo charts (bar + line) may bind the line series to a SECONDARY value
@@ -3144,13 +3268,61 @@ function renderBarChart(
   }
   const barGroupFor = (series: ChartSeries): ChartSeries[] =>
     barGroups.get(barGroupKey(series)) ?? [series];
+  const percentDenominators = new Map<string, number[]>();
+  for (const [key, members] of barGroups) {
+    const totals = new Array<number>(n).fill(0);
+    for (const member of members) {
+      for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+        totals[categoryIndex] += Math.abs(member.values[categoryIndex] ?? 0);
+      }
+    }
+    percentDenominators.set(key, totals);
+  }
   const percentDenominator = (series: ChartSeries, categoryIndex: number): number =>
-    barGroupFor(series).reduce(
-      (sum, member) => sum + Math.abs(member.values[categoryIndex] ?? 0),
-      0,
-    ) || 1;
-  const percentFactor = (series: ChartSeries, categoryIndex: number): number =>
-    groupIsPercent(series) ? 100 / percentDenominator(series, categoryIndex) : 1;
+    percentDenominators.get(barGroupKey(series))?.[categoryIndex] || 1;
+  const percentGroupMultiplier = (series: ChartSeries): number => {
+    const group = plotGroupBySeries.get(series);
+    return group == null || axisUsesPercentSpace(group) ? 100 : 1;
+  };
+  const percentFactor = (series: ChartSeries, categoryIndex: number): number => {
+    if (!groupIsPercent(series)) return 1;
+    return percentGroupMultiplier(series) / percentDenominator(series, categoryIndex);
+  };
+  const overlayPlottedValues = new Map<ChartSeries, number[]>();
+  const overlayBaseValues = new Map<ChartSeries, number[]>();
+  for (const series of [...lineSeries, ...areaSeries]) {
+    overlayPlottedValues.set(series, Array.from(
+      { length: n }, (_, index) => series.values[index] ?? 0,
+    ));
+    overlayBaseValues.set(series, new Array<number>(n).fill(0));
+  }
+  for (const group of chart.plotGroups ?? []) {
+    if (group.kind !== 'line' && group.kind !== 'area') continue;
+    const members = chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount);
+    const stackedGroup = group.grouping === 'stacked' || group.grouping === 'percentStacked';
+    const percentGroup = group.grouping === 'percentStacked';
+    const multiplier = percentGroup && axisUsesPercentSpace(group) ? 100 : 1;
+    for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+      const denominator = percentGroup
+        ? members.reduce((sum, series) => sum + Math.abs(series.values[categoryIndex] ?? 0), 0) || 1
+        : 1;
+      let running = 0;
+      for (const series of members) {
+        const raw = series.values[categoryIndex] ?? 0;
+        const contribution = percentGroup ? raw / denominator * multiplier : raw;
+        const baseValues = overlayBaseValues.get(series);
+        const plottedValues = overlayPlottedValues.get(series);
+        if (baseValues == null || plottedValues == null) continue;
+        baseValues[categoryIndex] = stackedGroup ? running : 0;
+        running = stackedGroup ? running + contribution : contribution;
+        plottedValues[categoryIndex] = running;
+      }
+    }
+  }
+  const overlayValue = (series: ChartSeries, categoryIndex: number): number =>
+    overlayPlottedValues.get(series)?.[categoryIndex] ?? series.values[categoryIndex] ?? 0;
+  const overlayBase = (series: ChartSeries, categoryIndex: number): number =>
+    overlayBaseValues.get(series)?.[categoryIndex] ?? 0;
   const effectiveBarErrorBars = (
     series: ChartSeries,
   ): NonNullable<ChartSeries['errBars']> => {
@@ -3347,12 +3519,13 @@ function renderBarChart(
         (sum, series) => sum + Math.abs(series.values[categoryIndex] ?? 0), 0,
       ) || 1;
     }
-    const value = percent ? raw / denominator * 100 : raw;
+    const percentMultiplier = percent ? percentFactor(owner, categoryIndex) * denominator : 1;
+    const value = percent ? raw / denominator * percentMultiplier : raw;
     let cumulative = 0;
     const ownerIndex = group.indexOf(owner);
     for (let index = 0; index <= ownerIndex; index++) {
       const candidateRaw = group[index]?.values[categoryIndex] ?? 0;
-      const candidate = percent ? candidateRaw / denominator * 100 : candidateRaw;
+      const candidate = percent ? candidateRaw / denominator * percentMultiplier : candidateRaw;
       if ((value < 0) === (candidate < 0)) cumulative += candidate;
     }
     return cumulative;
@@ -3366,7 +3539,12 @@ function renderBarChart(
   // and negative contributions on separate sides of the zero line (Excel stacks
   // opposite signs opposite ways), so `dataMax`/`dataMin` come from each
   // category's positive-sum and negative-sum.
-  const primaryPercentAxis = primaryBarSeries.some(groupIsPercent);
+  const primaryPlotGroups = (chart.plotGroups ?? []).filter(group =>
+    group.seriesCount > 0 && group.valueAxis !== 'secondary'
+  );
+  const primaryPercentAxis = primaryPlotGroups.length > 0
+    ? primaryPlotGroups.every(group => group.grouping === 'percentStacked')
+    : primaryBarSeries.some(groupIsPercent);
   let dataMax = 0;
   let dataMin = 0;
   for (let ci = 0; ci < n; ci++) {
@@ -3387,7 +3565,9 @@ function renderBarChart(
       let negSum = 0;
       for (const series of members) {
         const raw = series.values[ci] ?? 0;
-        const value = isPercentGroup ? raw / denominator * 100 : raw;
+        const value = isPercentGroup
+          ? raw / denominator * percentGroupMultiplier(series)
+          : raw;
         if (isStackedGroup) {
           if (value >= 0) posSum += value; else negSum += value;
         } else {
@@ -3412,9 +3592,8 @@ function renderBarChart(
   for (const s of [...lineSeries, ...areaSeries]) {
     if (sec && s.useSecondaryAxis === true) continue;
     for (let ci = 0; ci < n; ci++) {
-      const raw = s.values[ci];
-      if (raw == null) continue;
-      const value = primaryPercentAxis ? raw * 100 : raw;
+      if (s.values[ci] == null) continue;
+      const value = overlayValue(s, ci);
       dataMax = Math.max(dataMax, value);
       dataMin = Math.min(dataMin, value);
     }
@@ -3446,7 +3625,7 @@ function renderBarChart(
       'y',
       index => series.values[index] ?? null,
       value => {
-        const effective = primaryPercentAxis ? value * 100 : value;
+        const effective = value;
         dataMax = Math.max(dataMax, effective);
         dataMin = Math.min(dataMin, effective);
       },
@@ -3486,7 +3665,12 @@ function renderBarChart(
   // reuse); the fallback keeps the no-secondary path unchanged.
   const renderedBarSeries = new Set(barSeries);
   const allBarSeriesSet = new Set(allBarSeries);
-  const secondaryPercentAxis = secondaryBarSeries.some(groupIsPercent);
+  const secondaryPlotGroups = (chart.plotGroups ?? []).filter(group =>
+    group.seriesCount > 0 && group.valueAxis === 'secondary'
+  );
+  const secondaryPercentAxis = secondaryPlotGroups.length > 0
+    ? secondaryPlotGroups.every(group => group.grouping === 'percentStacked')
+    : secondaryBarSeries.some(groupIsPercent);
   const secondaryScaleSeries = chart.series
     .filter(series => !allBarSeriesSet.has(series) || renderedBarSeries.has(series))
     .map(series => {
@@ -3758,15 +3942,13 @@ function renderBarChart(
   const valX = (v: number): number => px0 + plan.frac(v) * pw;
   const zeroY = valY(0); // column zero line
   const zeroX = valX(0); // horizontal-bar zero line
-  const toYPrimaryLine = (value: number): number =>
-    valY(primaryPercentAxis ? value * 100 : value);
+  const toYPrimaryLine = (value: number): number => valY(value);
   // Secondary line series map through the shared scale's factory (identical to
   // the old inline `py0 + ph - ((v - sMin) / sRange) * ph`; `makeToY` uses the
   // same `(max - min) || 1` range). Falls back to the primary map when there is
   // no secondary axis so `toYSecondary` stays callable.
   const toYSecondary = secScale ? secScale.makeToY(py0, ph) : valY;
-  const toYSecondarySeries = (value: number): number =>
-    toYSecondary(secondaryPercentAxis ? value * 100 : value);
+  const toYSecondarySeries = (value: number): number => toYSecondary(value);
 
   // Resolved value-axis gridline stroke (`<c:majorGridlines><c:spPr><a:ln>` or
   // the faint `#e0e0e0`/0.5 px default). The vertical (horizontal-bar) path
@@ -3994,22 +4176,24 @@ function renderBarChart(
   //                = barW * (1 + (N-1) * (1 - overlap/100) + gapWidth/100)
   // Solving for barW gives the formula below. Stacked charts render one bar
   // per category so we treat them as N=1 and overlap=0.
-  const catGap = !isH ? pw / n : ph / n;
+  const categoryGap = (horizontal: boolean): number => horizontal ? ph / n : pw / n;
+  const catGap = categoryGap(isH);
   const catRev = catAxisReversed(chart);
-  const categorySlotIndex = (ci: number): number => isH
+  const categorySlotIndex = (ci: number, horizontal: boolean): number => horizontal
     ? (catRev ? ci : n - 1 - ci)
     : (catRev ? n - 1 - ci : ci);
-  const categoryBandSize = (ci: number): number => dateAxisPlan
-    ? dateAxisPlan.categoryBandFractions[ci]! * (isH ? ph : pw)
-    : catGap;
-  const categoryStart = (ci: number): number => dateAxisPlan
-    ? (isH ? py0 : px0)
-      + dateAxisPlan.positions[ci]! * (isH ? ph : pw)
-      - categoryBandSize(ci) / 2
-    : (!isH ? px0 : py0) + categorySlotIndex(ci) * catGap;
+  const categoryBandSize = (ci: number, horizontal = isH): number => dateAxisPlan
+    ? dateAxisPlan.categoryBandFractions[ci]! * (horizontal ? ph : pw)
+    : categoryGap(horizontal);
+  const categoryStart = (ci: number, horizontal = isH): number => dateAxisPlan
+    ? (horizontal ? py0 : px0)
+      + dateAxisPlan.positions[ci]! * (horizontal ? ph : pw)
+      - categoryBandSize(ci, horizontal) / 2
+    : (horizontal ? py0 : px0)
+      + categorySlotIndex(ci, horizontal) * categoryGap(horizontal);
   const categoryCenterX = (ci: number): number => dateAxisPlan
     ? px0 + dateAxisPlan.positions[ci]! * pw
-    : px0 + categorySlotIndex(ci) * catGap + catGap / 2;
+    : px0 + categorySlotIndex(ci, false) * categoryGap(false) + categoryGap(false) / 2;
   const clusterGeometry = (group: readonly ChartSeries[], categorySize: number) => {
     const owner = group[0];
     const isStackedGroup = owner ? groupIsStacked(owner) : stacked;
@@ -4054,9 +4238,8 @@ function renderBarChart(
     const yOf = sec && series.useSecondaryAxis === true
       ? toYSecondarySeries
       : toYPrimaryLine;
-    const baselineY = yOf(0);
     const dispBlanks = chart.dispBlanksAs ?? 'zero';
-    let run: Array<{ x: number; y: number }> = [];
+    let run: Array<{ x: number; y: number; baseY: number }> = [];
     const paintRun = (): void => {
       if (run.length === 0) return;
       if (dateAxisPlan) {
@@ -4066,10 +4249,12 @@ function renderBarChart(
         ctx.clip();
       }
       ctx.beginPath();
-      ctx.moveTo(run[0].x, baselineY);
+      ctx.moveTo(run[0].x, run[0].baseY);
       ctx.lineTo(run[0].x, run[0].y);
       appendCurve(ctx, run, false);
-      ctx.lineTo(run[run.length - 1].x, baselineY);
+      for (let index = run.length - 1; index >= 0; index--) {
+        ctx.lineTo(run[index].x, run[index].baseY);
+      }
       ctx.closePath();
       ctx.fillStyle = series.fillPattern
         ? (resolveFill(
@@ -4099,7 +4284,11 @@ function renderBarChart(
         if (dispBlanks === 'gap') paintRun();
         if (dispBlanks !== 'zero') continue;
       }
-      run.push({ x: categoryCenterX(ci), y: yOf(value ?? 0) });
+      run.push({
+        x: categoryCenterX(ci),
+        y: yOf(overlayValue(series, ci)),
+        baseY: yOf(overlayBase(series, ci)),
+      });
     }
     paintRun();
 
@@ -4114,7 +4303,7 @@ function renderBarChart(
         const symbol = effectiveMarkerSymbol(series, point, 'circle', seriesMarkersVisible);
         if (symbol === 'none') continue;
         const markerX = categoryCenterX(ci);
-        const markerY = yOf(value);
+        const markerY = yOf(overlayValue(series, ci));
         if (seriesHasMarkerDetail(series) || pointHasMarkerDetail(point)) {
           const lineWidthEmu = point?.markerLineWidthEmu ?? series.markerLineWidthEmu;
           drawMarker(
@@ -4142,9 +4331,10 @@ function renderBarChart(
     // sides of the zero line, so each category tracks two running offsets.
     const positiveOffsets = new Map<string, number>();
     const negativeOffsets = new Map<string, number>();
-    const categorySize = categoryBandSize(ci);
     for (let si = 0; si < barSeries.length; si++) {
       const s = barSeries[si];
+      const seriesIsHorizontal = groupIsHorizontal(s);
+      const categorySize = categoryBandSize(ci, seriesIsHorizontal);
       const secondary = sec != null && s.useSecondaryAxis === true;
       const group = barGroupFor(s);
       const groupKey = barGroupKey(s);
@@ -4176,7 +4366,9 @@ function renderBarChart(
       const raw = s.values[ci] ?? 0;
       // Signed value in axis units (percent keeps its sign — a negative slice of
       // a percentStacked chart reaches below the zero line).
-      const sv = isPercentGroup ? (raw / stackSum) * 100 : raw;
+      const sv = isPercentGroup
+        ? (raw / stackSum) * percentGroupMultiplier(s)
+        : raw;
       const negative = sv < 0;
       const plottedLabelValue = isStackedGroup
         ? (negative ? negOffset : posOffset) + sv
@@ -4257,10 +4449,10 @@ function renderBarChart(
         return true;
       };
 
-      if (!isH) {
+      if (!seriesIsHorizontal) {
         const bx = isStackedGroup
-          ? categoryStart(ci) + catStart
-          : categoryStart(ci) + catStart + groupIndex * clusterGap;
+          ? categoryStart(ci, false) + catStart
+          : categoryStart(ci, false) + catStart + groupIndex * clusterGap;
         // A date axis can explicitly crop categories through min/max. Marks
         // wholly outside that authored plot interval do not bleed into the
         // value-axis/title gutter.
@@ -4369,8 +4561,8 @@ function renderBarChart(
         // slot when preceding groups contain more series.
         const siVisual = groupIndex;
         const by = isStackedGroup
-          ? categoryStart(ci) + catStart
-          : categoryStart(ci) + catStart + siVisual * clusterGap;
+          ? categoryStart(ci, true) + catStart
+          : categoryStart(ci, true) + catStart + siVisual * clusterGap;
         const x0 = isStackedGroup ? valX(negative ? negOffset : posOffset) : zeroX;
         const x1 = isStackedGroup ? valX((negative ? negOffset : posOffset) + sv) : valX(sv);
         const bx = clamp(Math.min(x0, x1), px0, px0 + pw);
@@ -4495,6 +4687,7 @@ function renderBarChart(
       ctx.clip();
       for (const seriesIndex of barSeriesByGroup.get(decoration.groupIndex) ?? []) {
         const points = barSeriesLinePoints[seriesIndex];
+        const seriesIsHorizontal = groupIsHorizontal(barSeries[seriesIndex]);
         for (let categoryIndex = 0; categoryIndex + 1 < n; categoryIndex++) {
           const current = points[categoryIndex];
           const next = points[categoryIndex + 1];
@@ -4503,7 +4696,7 @@ function renderBarChart(
           const nextCenter = (next.categoryStart + next.categoryEnd) / 2;
           const forward = nextCenter >= currentCenter;
           ctx.beginPath();
-          if (!isH) {
+          if (!seriesIsHorizontal) {
             ctx.moveTo(
               forward ? current.categoryEnd : current.categoryStart,
               current.valueEnd,
@@ -4536,9 +4729,10 @@ function renderBarChart(
   const barCategoryCenter = (series: ChartSeries, categoryIndex: number): number => {
     const group = barGroupFor(series);
     const groupIndex = Math.max(0, group.indexOf(series));
-    const categorySize = categoryBandSize(categoryIndex);
+    const horizontal = groupIsHorizontal(series);
+    const categorySize = categoryBandSize(categoryIndex, horizontal);
     const geometry = clusterGeometry(group, categorySize);
-    const start = categoryStart(categoryIndex) + geometry.catStart;
+    const start = categoryStart(categoryIndex, horizontal) + geometry.catStart;
     if (groupIsStacked(series)) return start + geometry.barW / 2;
     return start + groupIndex * geometry.clusterGap + geometry.barW / 2;
   };
@@ -4548,43 +4742,47 @@ function renderBarChart(
     }
     const group = barGroupFor(series);
     const groupIndex = Math.max(0, group.indexOf(series));
-    const geometry = clusterGeometry(group, catGap);
-    const slot = isH
+    const horizontal = groupIsHorizontal(series);
+    const gap = categoryGap(horizontal);
+    const geometry = clusterGeometry(group, gap);
+    const slot = horizontal
       ? (catRev ? index : n - 1 - index)
       : (catRev ? n - 1 - index : index);
-    const start = (!isH ? px0 : py0) + slot * catGap + geometry.catStart;
+    const start = (horizontal ? py0 : px0) + slot * gap + geometry.catStart;
     const visualIndex = groupIsStacked(series) ? 0 : groupIndex;
     return start + visualIndex * geometry.clusterGap + geometry.barW / 2;
   };
   for (let seriesIndex = 0; seriesIndex < barSeries.length; seriesIndex++) {
     const series = barSeries[seriesIndex];
+    const seriesIsHorizontal = groupIsHorizontal(series);
     const secondary = sec != null && series.useSecondaryAxis === true;
-    const valueAt = secondary && secScale ? secScale.makeToY(py0, ph) : valY;
-    const horizontalValueAt = valX;
+    const valueAt = seriesIsHorizontal
+      ? valX
+      : secondary && secScale ? secScale.makeToY(py0, ph) : valY;
     const color = chartColor(seriesIndex, series);
     const plotted = (categoryIndex: number): number =>
       plottedBarValue(seriesIndex, categoryIndex);
     for (const errorBars of effectiveBarErrorBars(series)) {
       drawBarErrorBars(
-        ctx, series, chartStyleRoleErrorBar(chart, errorBars), n, isH,
+        ctx, series, chartStyleRoleErrorBar(chart, errorBars), n, seriesIsHorizontal,
         categoryIndex => barCategoryCenter(series, categoryIndex),
-        isH ? horizontalValueAt : valueAt,
+        valueAt,
         plotted, color, ptToPx,
       );
     }
     drawSeriesTrendlines(
       ctx, series, color,
       index => continuousBarCategoryCenter(series, index - 1),
-      isH ? horizontalValueAt : valueAt,
+      valueAt,
       ptToPx,
       series.values.map((_value, index) => index + 1),
       {
         chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph },
         shapeRotationDeg,
       },
-      (index, value) => isH
+      (index, value) => seriesIsHorizontal
         ? ({
-          x: horizontalValueAt(value),
+          x: valueAt(value),
           y: continuousBarCategoryCenter(series, index - 1),
         })
         : ({
@@ -4663,7 +4861,7 @@ function renderBarChart(
       } else {
         const ly = entry.fraction != null
           ? py0 + entry.fraction * ph
-          : py0 + categorySlotIndex(entry.categoryIndex) * catGap + catGap / 2;
+          : py0 + categorySlotIndex(entry.categoryIndex, true) * catGap + catGap / 2;
         const gap = categoryLabelOffsetPx(
           chart.catAxisFontSizeHpt != null
             ? valueTickLabelGapPx(drawnCatTickFontPx)
@@ -4786,7 +4984,7 @@ function renderBarChart(
       ctx, chart, n, categoryCenterX,
       series => sec && series.useSecondaryAxis === true ? toYSecondarySeries : toYPrimaryLine,
       () => primaryCatAxisY,
-      (series, index) => series.values[index] ?? null,
+      (series, index) => series.values[index] == null ? null : overlayValue(series, index),
       catGap, ptToPx, shapeRotationDeg,
     );
     if (dateAxisPlan) {
@@ -4844,7 +5042,7 @@ function renderBarChart(
           if (dispBlanks !== 'zero') continue;
         }
         const lx = categoryCenterX(ci);
-        run.push({ x: lx, y: yOf(v ?? 0) });
+        run.push({ x: lx, y: yOf(overlayValue(s, ci)) });
       }
       flushRun();
       if (paintLine) ctx.stroke();
@@ -4856,7 +5054,7 @@ function renderBarChart(
           const v = s.values[ci];
           if (v == null) continue;
           const lx = categoryCenterX(ci);
-          const ly = yOf(v);
+          const ly = yOf(overlayValue(s, ci));
           const point = pointOverrides.get(ci);
           const symbol = effectiveMarkerSymbol(s, point, 'circle', seriesMarkersVisible);
           if (symbol === 'none') continue;
@@ -5390,6 +5588,7 @@ function chartStyleRoleSeriesAxis(chart: ChartModel): ChartModel {
 }
 
 function isClassicMarkerSeries(chart: ChartModel, series: ChartSeries): boolean {
+  if (chart.chartType === 'bubble') return false;
   const family = series.seriesType ?? chart.chartType;
   return family === 'line'
     || family === 'stackedLine'
@@ -5775,7 +5974,12 @@ function chartStyleRoleLegend(chart: ChartModel): ChartModel {
 }
 
 function chartStyleRolePlotArea(chart: ChartModel): ChartModel {
-  const linked = chart.chartStyleRoles?.plotArea;
+  // MS-ODRAWXML defines plotArea and plotArea3D as separate required style
+  // entries. Do not infer one from the other in a malformed/partial sidecar;
+  // direct chart formatting stays authoritative below.
+  const linked = chart.threeD
+    ? chart.chartStyleRoles?.plotArea3D
+    : chart.chartStyleRoles?.plotArea;
   if (!linked) return chart;
   let plotAreaFill = chart.plotAreaFill;
   let plotAreaBg = chart.plotAreaBg;
@@ -5923,6 +6127,7 @@ function applyLinkedChartStyleRoles(chart: ChartModel): ChartModel {
     && !chart.chartStyleRoles?.dataPointMarker
     && !chart.chartStyleRoles?.legend
     && !chart.chartStyleRoles?.plotArea
+    && !chart.chartStyleRoles?.plotArea3D
     && !chart.chartStyleRoles?.chartArea
     && chart.chartStyleMarkerSizePt == null
     && chart.chartStyleMarkerSymbol == null) {
@@ -6329,45 +6534,72 @@ function renderLineChart(
   const n = cats.length; if (n === 0) return;
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
 
-  // stackedLine (`<c:grouping val="stacked">`) draws each series at the running
-  // sum of the series below it; stackedLinePct (`percentStacked`) normalizes
-  // each category to 100% (ECMA-376 §21.2.2.76 c:grouping / §21.2.3.17
-  // ST_Grouping). Plain `line` is unstacked.
-  const stacked = chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
-  const pct = chart.chartType === 'stackedLinePct';
-  // Per-category |Σ| denominator for percent normalization (matches the bar
-  // percentStacked convention). The spec only mandates scaling to a 100% total;
-  // the Σ|v| denominator (and stacking negatives on the opposite side) is the
-  // Excel/PowerPoint behavior we match. Only computed when needed.
-  const pctTotals = pct
-    ? cats.map((_, ci) => {
-        let t = 0;
-        for (const s of chart.series) t += Math.abs(s.values[ci] ?? 0);
-        return t || 1;
-      })
-    : null;
+  const legacyGrouping = chart.chartType === 'stackedLinePct'
+    ? 'percentStacked' : chart.chartType === 'stackedLine' ? 'stacked' : 'standard';
+  const lineGroups = chart.plotGroups?.filter(group => group.kind === 'line') ?? [{
+    kind: 'line' as const,
+    seriesStart: 0,
+    seriesCount: chart.series.length,
+    categoryAxis: 'primary' as const,
+    valueAxis: 'primary' as const,
+    seriesAxis: 'none' as const,
+    grouping: legacyGrouping,
+  }];
+  const stackedBySeries = new Array<boolean>(chart.series.length).fill(false);
+  const percentBySeries = new Array<boolean>(chart.series.length).fill(false);
+  const secondaryBySeries = new Array<boolean>(chart.series.length).fill(false);
+  const percentTotalsBySeries = new Array<number[] | null>(chart.series.length).fill(null);
+  const plottedValues = chart.series.map(() => new Array<number>(n).fill(0));
+  const allPercentByAxis = new Map<string, boolean>();
+  for (const group of lineGroups) {
+    const axis = group.valueAxis;
+    allPercentByAxis.set(
+      axis,
+      (allPercentByAxis.get(axis) ?? true) && group.grouping === 'percentStacked',
+    );
+  }
+  for (const group of lineGroups) {
+    const grouping = group.grouping ?? 'standard';
+    const stacked = grouping === 'stacked' || grouping === 'percentStacked';
+    const pct = grouping === 'percentStacked';
+    const members = chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount);
+    const percentMultiplier = pct && allPercentByAxis.get(group.valueAxis) === true ? 100 : 1;
+    const totals = pct
+      ? cats.map((_, categoryIndex) => members.reduce(
+          (sum, series) => sum + Math.abs(series.values[categoryIndex] ?? 0), 0,
+        ) || 1)
+      : null;
+    for (let offset = 0; offset < members.length; offset++) {
+      const seriesIndex = group.seriesStart + offset;
+      stackedBySeries[seriesIndex] = stacked;
+      percentBySeries[seriesIndex] = pct;
+      secondaryBySeries[seriesIndex] = group.valueAxis === 'secondary';
+      percentTotalsBySeries[seriesIndex] = totals;
+      for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+        const raw = members[offset].values[categoryIndex] ?? 0;
+        if (!stacked) {
+          plottedValues[seriesIndex][categoryIndex] = raw;
+          continue;
+        }
+        const prior = offset === 0 ? 0 : plottedValues[seriesIndex - 1][categoryIndex];
+        const contribution = pct && totals
+          ? raw / totals[categoryIndex] * percentMultiplier
+          : raw;
+        plottedValues[seriesIndex][categoryIndex] = prior + contribution;
+      }
+    }
+  }
+  const plotted = (seriesIndex: number, categoryIndex: number): number =>
+    plottedValues[seriesIndex]?.[categoryIndex] ?? 0;
+  const primaryGroups = lineGroups.filter(group => group.valueAxis !== 'secondary');
+  const axisIsPercent = primaryGroups.length > 0
+    && primaryGroups.every(group => group.grouping === 'percentStacked');
   // How null cells are plotted (`<c:dispBlanksAs>`, §21.2.2.42). Default "gap"
   // preserves the historical line break (byte-stable). "zero" treats a null as
   // 0; "span" bridges the neighbours with a straight line (skip the null but
   // keep the run going). Only unstacked charts see nulls — a stacked sum already
   // reads null as 0 — so the value only steers the unstacked path below.
   const dispBlanks = chart.dispBlanksAs ?? 'gap';
-
-  // The plotted (cumulative) value for series `si` at category `ci`: the running
-  // sum of series 0..si, percent-normalized when pct. Un-stacked charts return
-  // the raw value (with "zero"-mode nulls read as 0). Null cells contribute 0 to
-  // the stack (matching the area renderer's `?? 0`).
-  const plotted = (si: number, ci: number): number => {
-    if (!stacked) {
-      const v = chart.series[si].values[ci];
-      // "zero": a blank plots at value 0. gap/span never reach here for a null
-      // (the caller skips those indices), so the `?? 0` is only used by "zero".
-      return v == null ? 0 : v;
-    }
-    let sum = 0;
-    for (let k = 0; k <= si; k++) sum += chart.series[k].values[ci] ?? 0;
-    return pct && pctTotals ? (sum / pctTotals[ci]) * 100 : sum;
-  };
 
   // Combo line charts may bind some series to a SECONDARY value axis drawn on
   // the right (ECMA-376 §21.2.2.* — a second `<c:valAx>` with axPos="r"). `sec`
@@ -6377,10 +6609,22 @@ function renderLineChart(
   // axis (a percentStacked/stacked secondary combo is not an Office construct),
   // so the split only applies to plain (unstacked) line charts. When `sec` is
   // null every series stays on the primary axis, identical to the pre-CH7 path.
-  const sec = !stacked && chart.secondaryValAxis && chart.series.some(s => s.useSecondaryAxis === true)
+  const secondaryGroups = lineGroups.filter(group => group.valueAxis === 'secondary');
+  const secondaryAxisIsPercent = secondaryGroups.length > 0
+    && secondaryGroups.every(group => group.grouping === 'percentStacked');
+  const sec = chart.secondaryValAxis && chart.series.some(
+    (series, index) => secondaryBySeries[index] || (
+      chart.plotGroups == null && series.useSecondaryAxis === true
+    ),
+  )
     ? chart.secondaryValAxis
     : null;
-  const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
+  const seriesIndexByIdentity = new Map(chart.series.map((series, index) => [series, index]));
+  const isSecondarySeries = (series: ChartSeries): boolean => {
+    const index = seriesIndexByIdentity.get(series) ?? -1;
+    return sec != null && (secondaryBySeries[index]
+      || (chart.plotGroups == null && series.useSecondaryAxis === true));
+  };
 
   // Resolve the primary extent before frame placement. An authored
   // `layoutTarget="outer"` rectangle includes the value-axis labels, so its
@@ -6390,7 +6634,7 @@ function renderLineChart(
   for (let ci = 0; ci < n; ci++) {
     for (let si = 0; si < chart.series.length; si++) {
       if (isSecondarySeries(chart.series[si])) continue;
-      if (!stacked && chart.series[si].values[ci] == null) continue;
+      if (!stackedBySeries[si] && chart.series[si].values[ci] == null) continue;
       const v = plotted(si, ci);
       dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v);
     }
@@ -6410,10 +6654,10 @@ function renderLineChart(
   }
   if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
   const isLogAxis = chart.valAxisLogBase != null && chart.valAxisLogBase >= 2;
-  if (chart.valMin != null) dataMin = pct ? chart.valMin * 100 : chart.valMin;
-  else if (pct && dataMin > 0 && !isLogAxis) dataMin = 0;
-  if (chart.valMax != null) dataMax = pct ? chart.valMax * 100 : chart.valMax;
-  else if (pct && dataMax < 0) dataMax = 0;
+  if (chart.valMin != null) dataMin = axisIsPercent ? chart.valMin * 100 : chart.valMin;
+  else if (axisIsPercent && dataMin > 0 && !isLogAxis) dataMin = 0;
+  if (chart.valMax != null) dataMax = axisIsPercent ? chart.valMax * 100 : chart.valMax;
+  else if (axisIsPercent && dataMax < 0) dataMax = 0;
 
   // Shared frame bands. Title + category-label bands follow PowerPoint's chart
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
@@ -6454,7 +6698,19 @@ function renderLineChart(
 
   // Secondary value-axis scale (shared helper). Its axis is the vertical right
   // edge, so its length is the plot height. Null when there is no secondary axis.
-  const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
+  const secScale = computeSecondaryAxis(
+    sec,
+    chart.series,
+    phEst / ptToPx,
+    'y',
+    secondaryAxisIsPercent,
+    false,
+    (_series, index) => secondaryBySeries[index]
+      || (chart.plotGroups == null && chart.series[index].useSecondaryAxis === true),
+    (series, pointIndex, seriesIndex) => !stackedBySeries[seriesIndex]
+      && series.values[pointIndex] == null
+      ? null : plotted(seriesIndex, pointIndex),
+  );
   // Right-edge gutter for the secondary tick labels + rotated title. Measured
   // with the SAME font/format the axis is drawn with so the reserve matches the
   // painted labels (mirrors the bar renderer). Zero when there is no secondary
@@ -6487,7 +6743,7 @@ function renderLineChart(
   );
   const titleRightBandW = legRightW + w * 0.05 + secLabelBandW + secTitleBandW;
 
-  const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, pct);
+  const provisionalPlan = planValueAxis(chart, dataMin, dataMax, phEst / ptToPx, axisIsPercent);
   let primaryLabelWidth = 0;
   if (
     !chart.valAxisHidden
@@ -6505,7 +6761,7 @@ function renderLineChart(
     for (const value of provisionalPlan.majorLines) {
       primaryLabelWidth = Math.max(
         primaryLabelWidth,
-        ctx.measureText(formatPrimaryValueAxisTick(chart, value, pct)).width,
+        ctx.measureText(formatPrimaryValueAxisTick(chart, value, axisIsPercent)).width,
       );
     }
     ctx.font = previousFont;
@@ -6597,7 +6853,7 @@ function renderLineChart(
   // auto major unit, same model as the bar/column renderer). `planValueAxis`
   // folds in the CH6 major unit / logBase / orientation; with none set it is
   // byte-identical to the old `valueAxisScale` + linear `toY`.
-  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx, pct);
+  const plan = planValueAxis(chart, dataMin, dataMax, ph / ptToPx, axisIsPercent);
   if (plan.max - plan.min === 0) return;
 
   const toY = (v: number) => py0 + ph - plan.frac(v) * ph;
@@ -6663,7 +6919,7 @@ function renderLineChart(
         const gap = chart.valAxisFontSizeHpt != null
           ? valueTickLabelGapPx(valAxFontPx)
           : 6;
-        ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - gap, gy);
+        ctx.fillText(formatPrimaryValueAxisTick(chart, v, axisIsPercent), px0 - gap, gy);
       }
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
@@ -6749,6 +7005,8 @@ function renderLineChart(
   const deferredDataLabels: Array<() => void> = [];
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
+    const seriesStacked = stackedBySeries[si];
+    const seriesPercentTotals = percentTotalsBySeries[si];
     const pointOverrides = indexPointOverrides(s.dataPointOverrides);
     const color = chartColor(si, s);
     // Secondary series ride their own vertical scale; primary series (and every
@@ -6784,7 +7042,7 @@ function renderLineChart(
       // run (line breaks — the historical default); "span" skips the null but
       // keeps the run open (neighbours join directly); "zero" plots it at 0
       // (plotted() reads a null as 0). Stacked charts never have plotted nulls.
-      if (!stacked && s.values[ci] == null) {
+      if (!seriesStacked && s.values[ci] == null) {
         if (dispBlanks === 'gap') { flushRun(); continue; }
         if (dispBlanks === 'span') continue;
         // "zero": fall through and push a point at value 0.
@@ -6826,7 +7084,7 @@ function renderLineChart(
           // Mirror the marker loop's gate just below: stacked series never see a
           // plotted null (a stacked sum already reads null as 0), and unstacked
           // "zero" mode plots the null at 0 — both cases get a label too.
-          stacked || dispBlanks === 'zero',
+          seriesStacked || dispBlanks === 'zero',
           chartFontFamily(chart, chart.dataLabelFontFace, 'minor'),
           // §21.2.2.48 `<c:dLblPos>` precedence: per-point/series positions win,
           // else the chart-level position, else the line-chart default `'r'`.
@@ -6837,8 +7095,8 @@ function renderLineChart(
           // to the chart rectangle so `l`/`r` remain outside the end markers.
           { x, y: py0, w, h: ph },
           { x, y, w, h },
-          pct && pctTotals
-            ? ci => (s.values[ci] ?? 0) / pctTotals[ci]
+          percentBySeries[si] && seriesPercentTotals
+            ? ci => (s.values[ci] ?? 0) / seriesPercentTotals[ci]
             : undefined,
           ci => {
             if (!drawMarkers) return 0;
@@ -6862,7 +7120,7 @@ function renderLineChart(
     for (let ci = 0; ci < n; ci++) {
       // A null point gets a marker/label only in "zero" mode (plotted at 0);
       // "gap"/"span" leave the hole empty.
-      if (!stacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
+      if (!seriesStacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
       const pv = plotted(si, ci);
       if (drawMarkers) {
         const dpt = pointOverrides.get(ci);
@@ -6888,7 +7146,7 @@ function renderLineChart(
     if (chart.showDataLabels && !perPointLabels) {
       deferredDataLabels.push(() => {
         for (let ci = 0; ci < n; ci++) {
-          if (!stacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
+          if (!seriesStacked && s.values[ci] == null && dispBlanks !== 'zero') continue;
           const pv = plotted(si, ci);
           // §21.2.2.48 `<c:dLblPos>`: the family-level value dump honors the
           // chart-level position (else the line default `'r'`). The marker gap
@@ -7060,7 +7318,19 @@ function renderStockChart(
   // Fixed spec series roles by position. With 4 series the first is Open; the
   // last three are always High, Low, Close. Fewer than 3 series can't form a
   // hi-lo-close plot, so fall back to plotting each series' markers only.
-  const series = chart.series;
+  const stockGroup = chart.plotGroups?.find(group => group.kind === 'stock');
+  const series = stockGroup
+    ? chart.series.slice(stockGroup.seriesStart, stockGroup.seriesStart + stockGroup.seriesCount)
+    : chart.series;
+  const lineOverlaySeries = chart.plotGroups == null
+    ? []
+    : chart.plotGroups
+        .filter(group => group.kind === 'line')
+        .flatMap(group => chart.series.slice(
+          group.seriesStart, group.seriesStart + group.seriesCount,
+        ));
+  const scaleSeries = [...series, ...lineOverlaySeries];
+  const sourceSeriesIndices = new Map(chart.series.map((entry, index) => [entry, index]));
   const hasOpen = series.length >= 4;
   const openIdx = hasOpen ? 0 : -1;
   const highIdx = hasOpen ? 1 : 0;
@@ -7072,7 +7342,7 @@ function renderStockChart(
   const openS = openIdx >= 0 ? series[openIdx] : undefined;
   const upDownStartS = series[0] as ChartSeries | undefined;
   const upDownEndS = series.at(-1) as ChartSeries | undefined;
-  const sec = chart.secondaryValAxis && series.some(stockSeries =>
+  const sec = chart.secondaryValAxis && scaleSeries.some(stockSeries =>
     stockSeries.useSecondaryAxis === true
   ) ? chart.secondaryValAxis : null;
   const isSecondarySeries = (stockSeries: ChartSeries): boolean =>
@@ -7105,7 +7375,7 @@ function renderStockChart(
     + catTitleH + legBottomH;
 
   const phEst = h - padT - padB;
-  const secScale = computeSecondaryAxis(sec, series, phEst / ptToPx);
+  const secScale = computeSecondaryAxis(sec, scaleSeries, phEst / ptToPx);
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const secFontPx = chartTextFontSizePx(sec?.fontSizeHpt, ptToPx) ?? secTickFontPx;
   let secLabelBandW = 0;
@@ -7164,7 +7434,7 @@ function renderStockChart(
   // omitted bounds flow through the shared automatic planner. ──
   let dataMin = Infinity;
   let dataMax = -Infinity;
-  for (const s of series) {
+  for (const s of scaleSeries) {
     if (isSecondarySeries(s)) continue;
     for (let ci = 0; ci < n; ci++) {
       const v = s.values[ci];
@@ -7173,7 +7443,7 @@ function renderStockChart(
       dataMax = Math.max(dataMax, v);
     }
   }
-  for (const stockSeries of series) {
+  for (const stockSeries of scaleSeries) {
     if (isSecondarySeries(stockSeries)) continue;
     forEachErrorBarEndpoint(
       stockSeries,
@@ -7408,11 +7678,100 @@ function renderStockChart(
   }
   drawStockTick(closeS, closeIdx, 'right');
 
+  // Office accepts a line group after a stock group. Stock decorations retain
+  // ownership of the stock slice; the later line group is a normal category
+  // line overlay on its resolved value axis rather than becoming a fifth stock
+  // role.
+  for (const lineSeries of lineOverlaySeries) {
+    const chartIndex = sourceSeriesIndices.get(lineSeries) ?? 0;
+    const color = chartColor(Math.max(0, chartIndex), lineSeries);
+    const yOf = toYFor(lineSeries);
+    const pointOverrides = indexPointOverrides(lineSeries.dataPointOverrides);
+    if (lineSeries.lineHidden !== true) {
+      const structuredLine = chartExStyleLinePaintDecision(
+        chart, lineSeries.chartexStyle, chartIndex, chart.series.length,
+      );
+      const resolvedLine = structuredLine === undefined
+        ? lineSeries.lineColor ? `#${lineSeries.lineColor}` : color
+        : structuredLine == null
+          ? null
+          : resolveFill(structuredLine, ctx, px0, py0, pw, ph, shapeRotationDeg);
+      if (resolvedLine != null) {
+        ctx.save();
+        ctx.strokeStyle = resolvedLine;
+      ctx.lineWidth = lineSeries.lineWidthEmu != null
+        ? axisLineWidthPx(lineSeries.lineWidthEmu, ptToPx)
+        : Math.max(1, 2.25 * ptToPx);
+      ctx.setLineDash(drawingmlLineDashArray(
+        lineSeries.chartexStyle?.lineCustomDash,
+        lineSeries.chartexStyle?.lineDash,
+        ctx.lineWidth,
+      ));
+      ctx.lineCap = lineSeries.chartexStyle?.lineCap === 'rnd'
+        ? 'round' : lineSeries.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt';
+      ctx.lineJoin = lineSeries.chartexStyle?.lineJoin === 'round'
+        || lineSeries.chartexStyle?.lineJoin === 'bevel'
+        ? lineSeries.chartexStyle.lineJoin : 'miter';
+      ctx.beginPath();
+      let run: Array<{ x: number; y: number }> = [];
+      const flushRun = (): void => {
+        if (run.length === 0) return;
+        ctx.moveTo(run[0].x, run[0].y);
+        appendCurve(ctx, run, lineSeries.smooth === true);
+        run = [];
+      };
+      for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+        const value = lineSeries.values[categoryIndex];
+        if (value == null) { flushRun(); continue; }
+        run.push({ x: toX(categoryIndex), y: yOf(value) });
+      }
+      flushRun();
+      ctx.stroke();
+        ctx.restore();
+      }
+    }
+    const seriesMarkersVisible = lineSeries.showMarker !== false
+      && lineSeries.markerSymbol !== 'none';
+    if (seriesMarkersVisible || hasVisiblePointMarkerOverride(lineSeries)) {
+      for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+        const value = lineSeries.values[categoryIndex];
+        if (value == null) continue;
+        const point = pointOverrides.get(categoryIndex);
+        const symbol = effectiveMarkerSymbol(
+          lineSeries, point, 'circle', seriesMarkersVisible,
+        );
+        if (symbol === 'none') continue;
+        drawMarker(
+          ctx, toX(categoryIndex), yOf(value), symbol,
+          point?.markerSize ?? lineSeries.markerSize ?? 5,
+          markerFillColorFor(lineSeries, point, categoryIndex, color),
+          point?.markerLine ?? lineSeries.markerLine ?? null,
+          ptToPx,
+          (point?.markerLineWidthEmu ?? lineSeries.markerLineWidthEmu) != null
+            ? axisLineWidthPx(
+                (point?.markerLineWidthEmu ?? lineSeries.markerLineWidthEmu) as number,
+                ptToPx,
+              )
+            : undefined,
+          markerFillPaintFor(lineSeries, point, categoryIndex),
+          shapeRotationDeg,
+        );
+      }
+    }
+    drawSeriesTrendlines(
+      ctx, lineSeries, color, toX, yOf, ptToPx, undefined,
+      {
+        chart, chartRect: r, plotRect: { x: px0, y: py0, w: pw, h: ph },
+        shapeRotationDeg,
+      },
+    );
+  }
+
   // CT_LineSer error bars remain attached to their authored stock series.
   // Stock uses a category X axis, so only Y-direction bars have data-unit
   // geometry; the same shared category-series painter is used by line/area.
-  for (let seriesIndex = 0; seriesIndex < series.length; seriesIndex++) {
-    const stockSeries = series[seriesIndex];
+  for (const stockSeries of scaleSeries) {
+    const seriesIndex = sourceSeriesIndices.get(stockSeries) ?? 0;
     const color = chartColor(seriesIndex, stockSeries);
     for (const errorBars of stockSeries.errBars ?? []) {
       drawCategoryErrorBars(
@@ -7440,8 +7799,8 @@ function renderStockChart(
   // per-point dLbl contracts used by ordinary category-line charts apply here
   // as well. Paint labels after stock glyphs/error bars so their callout boxes
   // and text remain on top of the plot geometry.
-  for (let seriesIndex = 0; seriesIndex < series.length; seriesIndex++) {
-    const stockSeries = series[seriesIndex];
+  for (const stockSeries of scaleSeries) {
+    const seriesIndex = sourceSeriesIndices.get(stockSeries) ?? 0;
     drawSeriesDataLabels(
       ctx,
       stockSeries,
@@ -7719,6 +8078,97 @@ function renderSurfaceChart(
     ) ?? (rows[index]?.color ? `#${rows[index].color}` : chartColor(index, rows[index])),
   );
   const bandFormats = new Map((chart.surfaceBandFormats ?? []).map(format => [format.idx, format]));
+  const linkedBandStyle = chart.chartStyleRoles?.dataPoint3D;
+  const linkedWireframeStyle = chart.chartStyleRoles?.dataPointWireframe;
+  const styleHasLinePaint = (style: ChartSeries['chartexStyle']): boolean =>
+    style?.lineNoStyle !== true && (
+      style?.linePaintAuthored === true
+      || style?.lineHidden === true
+      || (style?.lineColors?.length ?? 0) > 0
+      || (style?.linePaints?.length ?? 0) > 0
+    );
+  const styleHasLineFormatting = (style: ChartSeries['chartexStyle']): boolean =>
+    styleHasLinePaint(style)
+    || style?.lineWidthEmu != null
+    || style?.lineDashAuthored === true
+    || style?.lineDash != null
+    || style?.lineCustomDash != null
+    || style?.lineCap != null
+    || style?.lineJoin != null
+    || style?.lineCompound != null;
+  const directWireframeLineAuthored = chart.surfaceWireframe === true && (
+    rows.some(row =>
+      row.lineColor != null
+      || row.lineWidthEmu != null
+      || row.lineHidden === true
+      || styleHasLineFormatting(row.chartexStyle)
+    )
+    || [...bandFormats.values()].some(format =>
+      format.lineColor != null
+      || format.lineWidthEmu != null
+      || format.lineHidden === true
+      || styleHasLineFormatting(format.style)
+    )
+  );
+  const bandFillRecipes = chart.surfaceWireframe === true ? [] : Array.from(
+    { length: bandCount }, (_, index) => {
+      const format = bandFormats.get(index);
+      let decision: Fill | null | undefined;
+      if (format?.fillHidden === true) decision = null;
+      else if (format?.fill) decision = format.fill;
+      else decision = chartStyleFillDecision(format?.style, index);
+      return decision === undefined
+        ? chartStyleFillDecision(linkedBandStyle, index)
+        : decision;
+    },
+  );
+  const bandLineRecipes = chart.surfaceWireframe === true ? [] : Array.from(
+    { length: bandCount }, (_, index) => {
+      const format = bandFormats.get(index);
+      let decision: ChartModel['plotAreaLineFill'] | null | undefined;
+      if (format?.lineHidden === true) decision = null;
+      else if (format?.lineColor) decision = { fillType: 'solid', color: format.lineColor };
+      else decision = chartStyleLineDecision(format?.style, index);
+      return decision === undefined
+        ? chartStyleLineDecision(linkedBandStyle, index)
+        : decision;
+    },
+  );
+  // MS-ODRAWXML scopes dataPointWireframe to Surface wireframes, but does not
+  // define how a relative Chart Colors palette or direct band/series outline
+  // is segmented across the connected mesh. Consume only a fixed linked line
+  // reference when no direct line layer needs that missing segmentation;
+  // otherwise fail closed instead of selecting palette entry zero by guess.
+  const fixedWireframeLineIndex = linkedWireframeStyle?.lineColorIndex;
+  const unsupportedWireframeCompound = linkedWireframeStyle?.lineCompound != null;
+  const wireframeLineRecipe = chart.surfaceWireframe !== true
+    ? undefined
+    : directWireframeLineAuthored || unsupportedWireframeCompound
+      ? null
+      : !styleHasLinePaint(linkedWireframeStyle)
+        ? undefined
+        : fixedWireframeLineIndex != null
+          ? chartStyleLineDecision(linkedWireframeStyle, fixedWireframeLineIndex)
+          : null;
+  const surfaceFacePaints = [
+    { surface: chart.threeD?.floor, role: 'floor' as const },
+    { surface: chart.threeD?.sideWall, role: 'wall' as const },
+    { surface: chart.threeD?.backWall, role: 'wall' as const },
+  ].map(({ surface, role }) => chartThreeDSurfacePaint(chart, surface, role));
+  let surfacePaintComponents = 0;
+  for (const recipe of [
+    ...bandFillRecipes,
+    ...bandLineRecipes,
+    wireframeLineRecipe,
+    ...surfaceFacePaints.flatMap(paint => [paint.fill, paint.line]),
+  ]) {
+    if (recipe == null) continue;
+    const components = markerPaintComponents(recipe);
+    if ((recipe.fillType === 'gradient'
+        && components > MAX_CANVAS_MARKER_GRADIENT_STOPS)
+      || components > MAX_CANVAS_MARKER_PAINT_COMPONENTS - surfacePaintComponents) return;
+    surfacePaintComponents += components;
+  }
   const bandLabels = Array.from({ length: bandCount }, (_, index) => {
     const lower = surfaceMin + index * step;
     const upper = Math.min(surfaceMax, lower + step);
@@ -7767,7 +8217,7 @@ function renderSurfaceChart(
   );
   paintPlotAreaFrame(ctx, chart, px0, py0, pw, ph, ptToPx, shapeRotationDeg);
 
-  const projection = planChartThreeDProjection(surfaceView, { x: px0, y: py0, w: pw, h: ph }, {
+  let projection = planChartThreeDProjection(surfaceView, { x: px0, y: py0, w: pw, h: ph }, {
     // Surface rows occupy a real series axis rather than the compact prism
     // slab used by 3-D columns. The boundary corpus fits that grid with the
     // same depth occupancy as standard (depth-arranged) cartesian series.
@@ -7775,6 +8225,11 @@ function renderSurfaceChart(
     perspectiveTangentGain,
   });
   if (!projection) return;
+  projection = fitChartThreeDProjectionToWallThickness(
+    projection,
+    chart.threeD ?? {},
+    { x: px0, y: py0, w: pw, h: ph },
+  );
   const useObservedAutomaticMaterial = observedAutomaticSurfaceCamera || (
     Math.abs(surfaceView.rotationX) === 90
     && surfaceView.rotationY === 0
@@ -7857,7 +8312,112 @@ function renderSurfaceChart(
   const farDepth = projection.topology.farDepth;
   const nearDepth = projection.topology.nearDepth;
   const floorY = front.y + front.h;
+  const wallTopY = front.y;
   const farX = projection.topology.farX === 'min' ? front.x : front.x + front.w;
+  const surfaceSlabs = (
+    ['floor', 'sideWall', 'backWall'] as const
+  ).map(kind => {
+    const surface = chart.threeD?.[kind];
+    return planChartThreeDSurfaceGeometry(projection, kind, surface?.thicknessPercent);
+  });
+  const surfaceKinds = ['floor', 'sideWall', 'backWall'] as const;
+  // Keep the pre-thickness Surface3D path byte-stable when all three values
+  // are omitted/zero. Its existing floor plane is family-owned; positive
+  // thickness opts into the shared camera-aware CT_Surface slabs.
+  const surfaceFaceGroups = surfaceSlabs.some(slab => slab.thickness > 0)
+    ? surfaceSlabs.map(slab => slab.faces
+      .filter(face => slab.thickness === 0 || projection.cameraFacing(face))
+      .map(face => face.map(point =>
+        projection.projectUnbounded(point.x, point.y, point.depth)
+      )))
+    : [
+      [
+        projection.project(front.x, floorY, nearDepth),
+        projection.project(front.x + front.w, floorY, nearDepth),
+        projection.project(front.x + front.w, floorY, farDepth),
+        projection.project(front.x, floorY, farDepth),
+      ],
+      [
+        projection.project(farX, floorY, nearDepth),
+        projection.project(farX, floorY, farDepth),
+        projection.project(farX, wallTopY, farDepth),
+        projection.project(farX, wallTopY, nearDepth),
+      ],
+      [
+        projection.project(front.x, floorY, farDepth),
+        projection.project(front.x + front.w, floorY, farDepth),
+        projection.project(front.x + front.w, wallTopY, farDepth),
+        projection.project(front.x, wallTopY, farDepth),
+      ],
+    ].map(face => [face]);
+  for (let index = 0; index < surfaceFaceGroups.length; index++) {
+    const faces = surfaceFaceGroups[index];
+    if (!faces.length) continue;
+    const points = faces.flat();
+    const effective = surfaceFacePaints[index];
+    const imageFill = effective.fill?.fillType === 'image' ? effective.fill : null;
+    if (imageFill) {
+      const image = chartImageFillSource(imageFill);
+      const surface = chart.threeD?.[surfaceKinds[index]];
+      if (image) {
+        const project = (point: ThreeDScenePoint) =>
+          projection.projectUnbounded(point.x, point.y, point.depth);
+        paintChartThreeDSurfacePicture(
+          ctx, imageFill, image, surface, surfaceKinds[index],
+          surfaceSlabs[index], surfaceSlabs[index].faces
+            .map((face, faceIndex) => ({ face, faceIndex }))
+            .filter(({ face }) => surfaceSlabs[index].thickness === 0
+              || projection.cameraFacing(face))
+            .map(({ faceIndex }) => faceIndex),
+          project, surfaceSpan,
+        );
+      }
+    }
+    const minX = Math.min(...points.map(point => point.x));
+    const maxX = Math.max(...points.map(point => point.x));
+    const minY = Math.min(...points.map(point => point.y));
+    const maxY = Math.max(...points.map(point => point.y));
+    const fill = imageFill
+      ? null
+      : effective.fill?.fillType === 'solid'
+      ? `#${effective.fill.color}`
+      : effective.fill
+        ? resolveFill(effective.fill, ctx, minX, minY, maxX - minX, maxY - minY)
+        : null;
+    const line = effective.line?.fillType === 'solid'
+      ? `#${effective.line.color}`
+      : effective.line
+        ? resolveFill(effective.line, ctx, minX, minY, maxX - minX, maxY - minY)
+        : null;
+    const width = effective.lineWidthEmu != null
+      ? axisLineWidthPx(effective.lineWidthEmu, ptToPx) : 1;
+    for (const face of faces) {
+      ctx.beginPath();
+      ctx.moveTo(face[0].x, face[0].y);
+      for (let pointIndex = 1; pointIndex < face.length; pointIndex++) {
+        ctx.lineTo(face[pointIndex].x, face[pointIndex].y);
+      }
+      ctx.closePath();
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill();
+      }
+      if (line) {
+        ctx.strokeStyle = line;
+        ctx.lineWidth = width;
+        ctx.setLineDash(drawingmlLineDashArray(
+          effective.lineCustomDash,
+          effective.lineDash,
+          width,
+        ));
+        ctx.lineCap = effective.lineCap === 'rnd'
+          ? 'round' : effective.lineCap === 'sq' ? 'square' : 'butt';
+        ctx.lineJoin = effective.lineJoin === 'round' || effective.lineJoin === 'bevel'
+          ? effective.lineJoin : 'miter';
+        ctx.stroke();
+      }
+    }
+  }
   if (drawValMajorGridlines(chart)) {
     const line = resolveGridline(
       chart.valAxisGridlineColor,
@@ -7936,6 +8496,45 @@ function renderSurfaceChart(
     }
   }
   paints.sort((left, right) => left.depth - right.depth);
+  const bandBounds = Array.from({ length: bandCount }, () => ({
+    minX: Number.POSITIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+  }));
+  for (const paint of paints) {
+    const bounds = bandBounds[paint.band];
+    for (const point of paint.points) {
+      bounds.minX = Math.min(bounds.minX, point.x);
+      bounds.minY = Math.min(bounds.minY, point.y);
+      bounds.maxX = Math.max(bounds.maxX, point.x);
+      bounds.maxY = Math.max(bounds.maxY, point.y);
+    }
+  }
+  type SurfaceCanvasPaint = string | CanvasGradient | CanvasPattern | null | undefined;
+  const resolveBandPaint = (
+    recipe: Fill | null | undefined,
+    band: number,
+  ): SurfaceCanvasPaint => {
+    if (recipe == null) return recipe;
+    if (recipe.fillType === 'solid') return `#${recipe.color}`;
+    const bounds = bandBounds[band];
+    if (!Number.isFinite(bounds.minX) || !Number.isFinite(bounds.minY)
+      || !Number.isFinite(bounds.maxX) || !Number.isFinite(bounds.maxY)) return null;
+    return resolveFill(
+      recipe,
+      ctx,
+      bounds.minX,
+      bounds.minY,
+      bounds.maxX - bounds.minX,
+      bounds.maxY - bounds.minY,
+    );
+  };
+  // A c:bandFmt styles one logical band. Resolve its DrawingML recipes once
+  // against the complete projected band bounds, then reuse the Canvas paint
+  // for every clipped polygon instead of replaying gradient stops per face.
+  const resolvedBandFills = bandFillRecipes.map(resolveBandPaint);
+  const resolvedBandLines = bandLineRecipes.map(resolveBandPaint);
   for (const paint of paints) {
     const format = bandFormats.get(paint.band);
     ctx.beginPath();
@@ -7944,15 +8543,9 @@ function renderSurfaceChart(
       ctx.lineTo(paint.points[index].x, paint.points[index].y);
     }
     ctx.closePath();
-    if (format?.fillHidden !== true) {
-      const minX = Math.min(...paint.points.map(point => point.x));
-      const maxX = Math.max(...paint.points.map(point => point.x));
-      const minY = Math.min(...paint.points.map(point => point.y));
-      const maxY = Math.max(...paint.points.map(point => point.y));
-      const authored = format?.fill
-        ? resolveFill(format.fill, ctx, minX, minY, maxX - minX, maxY - minY)
-        : null;
-      ctx.fillStyle = authored ?? scaleHexColor(
+    const bandFill = resolvedBandFills[paint.band];
+    if (bandFill !== null) {
+      ctx.fillStyle = bandFill ?? scaleHexColor(
         bandColors[paint.band],
         useObservedAutomaticMaterial
           ? surfaceMaterialFactor(projection.cameraNormal(paint.scenePoints))
@@ -7960,40 +8553,74 @@ function renderSurfaceChart(
       );
       ctx.fill();
     }
-    if (format && format.lineHidden !== true && format.lineColor) {
-      ctx.strokeStyle = `#${format.lineColor}`;
-      ctx.lineWidth = format.lineWidthEmu != null
-        ? axisLineWidthPx(format.lineWidthEmu, ptToPx)
+    const bandLine = resolvedBandLines[paint.band];
+    if (bandLine != null) {
+      const directGeometry = format?.style;
+      const linkedGeometry = linkedBandStyle?.lineNoStyle === true
+        ? undefined : linkedBandStyle;
+      ctx.strokeStyle = bandLine;
+      const widthEmu = format?.lineWidthEmu
+        ?? directGeometry?.lineWidthEmu ?? linkedGeometry?.lineWidthEmu;
+      ctx.lineWidth = widthEmu != null
+        ? axisLineWidthPx(widthEmu, ptToPx)
         : 1;
-      ctx.setLineDash([]);
+      ctx.setLineDash(drawingmlLineDashArray(
+        directGeometry?.lineCustomDash ?? linkedGeometry?.lineCustomDash,
+        directGeometry?.lineDash ?? linkedGeometry?.lineDash,
+        ctx.lineWidth,
+      ));
+      const cap = directGeometry?.lineCap ?? linkedGeometry?.lineCap;
+      const join = directGeometry?.lineJoin ?? linkedGeometry?.lineJoin;
+      ctx.lineCap = cap === 'rnd' ? 'round' : cap === 'sq' ? 'square' : 'butt';
+      ctx.lineJoin = join === 'round' || join === 'bevel' ? join : 'miter';
       ctx.stroke();
     }
   }
   if (chart.surfaceWireframe === true) {
-    ctx.strokeStyle = '#595959';
-    ctx.lineWidth = Math.max(1, 0.75 * ptToPx);
-    ctx.setLineDash([]);
-    for (let row = 0; row < rowCount; row++) {
-      ctx.beginPath();
-      for (let column = 0; column < columnCount; column++) {
-        const value = rows[row].values[column];
-        if (value == null || !Number.isFinite(value)) continue;
-        const point = projection.project(toX(column), toValueY(value), toDepth(row));
-        if (column === 0) ctx.moveTo(point.x, point.y);
-        else ctx.lineTo(point.x, point.y);
-      }
-      ctx.stroke();
-    }
-    for (let column = 0; column < columnCount; column++) {
-      ctx.beginPath();
+    const wireframeLine = wireframeLineRecipe?.fillType === 'solid'
+      ? `#${wireframeLineRecipe.color}`
+      : wireframeLineRecipe
+        ? resolveFill(wireframeLineRecipe, ctx, px0, py0, pw, ph)
+        : wireframeLineRecipe;
+    if (wireframeLine !== null) {
+      const geometry = directWireframeLineAuthored
+        || linkedWireframeStyle?.lineNoStyle === true
+        ? undefined : linkedWireframeStyle;
+      ctx.strokeStyle = wireframeLine ?? '#595959';
+      ctx.lineWidth = geometry?.lineWidthEmu != null
+        ? axisLineWidthPx(geometry.lineWidthEmu, ptToPx)
+        : Math.max(1, 0.75 * ptToPx);
+      ctx.setLineDash(drawingmlLineDashArray(
+        geometry?.lineCustomDash,
+        geometry?.lineDash,
+        ctx.lineWidth,
+      ));
+      const cap = geometry?.lineCap;
+      const join = geometry?.lineJoin;
+      ctx.lineCap = cap === 'rnd' ? 'round' : cap === 'sq' ? 'square' : 'butt';
+      ctx.lineJoin = join === 'round' || join === 'bevel' ? join : 'miter';
       for (let row = 0; row < rowCount; row++) {
-        const value = rows[row].values[column];
-        if (value == null || !Number.isFinite(value)) continue;
-        const point = projection.project(toX(column), toValueY(value), toDepth(row));
-        if (row === 0) ctx.moveTo(point.x, point.y);
-        else ctx.lineTo(point.x, point.y);
+        ctx.beginPath();
+        for (let column = 0; column < columnCount; column++) {
+          const value = rows[row].values[column];
+          if (value == null || !Number.isFinite(value)) continue;
+          const point = projection.project(toX(column), toValueY(value), toDepth(row));
+          if (column === 0) ctx.moveTo(point.x, point.y);
+          else ctx.lineTo(point.x, point.y);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
+      for (let column = 0; column < columnCount; column++) {
+        ctx.beginPath();
+        for (let row = 0; row < rowCount; row++) {
+          const value = rows[row].values[column];
+          if (value == null || !Number.isFinite(value)) continue;
+          const point = projection.project(toX(column), toValueY(value), toDepth(row));
+          if (row === 0) ctx.moveTo(point.x, point.y);
+          else ctx.lineTo(point.x, point.y);
+        }
+        ctx.stroke();
+      }
     }
   }
   ctx.restore();
@@ -8143,28 +8770,83 @@ function renderAreaChart(
     .map((series, chartIndex) => ({ series, chartIndex }))
     .filter(({ series }) => series.seriesType === 'line');
   if (areaSeries.length === 0 && lineSeries.length === 0) return;
-  const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
-  // stackedAreaPct (`<c:grouping val="percentStacked">`, ECMA-376 §21.2.2.76
-  // c:grouping / §21.2.3.17 ST_Grouping) normalizes each category so the stack
-  // tops out at 100%, matching the stackedLine/stackedLinePct (renderLineChart)
-  // and bar/column percentStacked convention. The spec only mandates scaling to
-  // a 100% total; the Σ|v| denominator (sign-preserving per-value normalization
-  // against the per-category |v| sum) is the Excel/PowerPoint behavior we match.
-  const pct = chart.chartType === 'stackedAreaPct';
-  const pctTotals = pct
-    ? cats.map((_, ci) => {
-        let t = 0;
-        for (const { series } of areaSeries) t += Math.abs(series.values[ci] ?? 0);
-        return t || 1;
-      })
-    : null;
-  // The stacked (normalized when pct) contribution of series `si` at category
-  // `ci` — what actually gets added to the running stack base/top. Un-stacked
-  // charts never call this (raw values are used directly below).
-  const stackedValue = (areaIndex: number, ci: number): number => {
-    const raw = areaSeries[areaIndex].series.values[ci] ?? 0;
-    return pct && pctTotals ? (raw / pctTotals[ci]) * 100 : raw;
-  };
+  const plotGroupBySeries = indexChartPlotGroups(chart);
+  const legacyGrouping = chart.chartType === 'stackedAreaPct'
+    ? 'percentStacked' : chart.chartType === 'stackedArea' ? 'stacked' : 'standard';
+  const sourceAreaGroups = chart.plotGroups?.filter(group => group.kind === 'area') ?? [{
+    kind: 'area' as const,
+    seriesStart: 0,
+    seriesCount: areaSeries.length,
+    categoryAxis: 'primary' as const,
+    valueAxis: 'primary' as const,
+    seriesAxis: 'none' as const,
+    grouping: legacyGrouping,
+  }];
+  const areaIndexAtChartIndex = new Array<number>(chart.series.length).fill(-1);
+  for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+    areaIndexAtChartIndex[areaSeries[areaIndex].chartIndex] = areaIndex;
+  }
+  const areaGroupMembers = sourceAreaGroups.map(group => {
+    const areaIndices: number[] = [];
+    const end = Math.min(chart.series.length, group.seriesStart + group.seriesCount);
+    for (let chartIndex = group.seriesStart; chartIndex < end; chartIndex++) {
+      const areaIndex = areaIndexAtChartIndex[chartIndex];
+      if (areaIndex >= 0) areaIndices.push(areaIndex);
+    }
+    return { group, areaIndices };
+  });
+  const stackedByArea = new Array<boolean>(areaSeries.length).fill(false);
+  const percentByArea = new Array<boolean>(areaSeries.length).fill(false);
+  const percentTotalsByArea = new Array<number[] | null>(areaSeries.length).fill(null);
+  const areaBaseValues = areaSeries.map(() => new Array<number>(n).fill(0));
+  const areaTopValues = areaSeries.map(() => new Array<number>(n).fill(0));
+  const axisPlanningGroups = chart.plotGroups?.filter(group =>
+    (group.kind === 'area' || group.kind === 'line') && group.seriesCount > 0
+  ) ?? sourceAreaGroups;
+  const allPercentByAreaAxis = new Map<string, boolean>();
+  for (const group of axisPlanningGroups) {
+    const axis = group.valueAxis;
+    allPercentByAreaAxis.set(
+      axis,
+      (allPercentByAreaAxis.get(axis) ?? true) && group.grouping === 'percentStacked',
+    );
+  }
+  for (const { group, areaIndices } of areaGroupMembers) {
+    const grouping = group.grouping ?? 'standard';
+    const stacked = grouping === 'stacked' || grouping === 'percentStacked';
+    const pct = grouping === 'percentStacked';
+    const multiplier = pct && allPercentByAreaAxis.get(group.valueAxis) === true ? 100 : 1;
+    const totals = pct
+      ? cats.map((_, categoryIndex) => areaIndices.reduce(
+          (sum, areaIndex) => sum + Math.abs(
+            areaSeries[areaIndex].series.values[categoryIndex] ?? 0,
+          ), 0,
+        ) || 1)
+      : null;
+    for (const areaIndex of areaIndices) {
+      stackedByArea[areaIndex] = stacked;
+      percentByArea[areaIndex] = pct;
+      percentTotalsByArea[areaIndex] = totals;
+    }
+    for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
+      let positive = 0;
+      let negative = 0;
+      for (const areaIndex of areaIndices) {
+        const raw = areaSeries[areaIndex].series.values[categoryIndex] ?? 0;
+        const contribution = pct && totals ? raw / totals[categoryIndex] * multiplier : raw;
+        const base = contribution >= 0 ? positive : negative;
+        areaBaseValues[areaIndex][categoryIndex] = stacked ? base : 0;
+        areaTopValues[areaIndex][categoryIndex] = stacked ? base + contribution : contribution;
+        if (stacked) {
+          if (contribution >= 0) positive += contribution;
+          else negative += contribution;
+        }
+      }
+    }
+  }
+  const primaryAxisGroups = axisPlanningGroups.filter(group => group.valueAxis !== 'secondary');
+  const axisIsPercent = primaryAxisGroups.length > 0
+    && primaryAxisGroups.every(group => group.grouping === 'percentStacked');
 
   // Combo area charts may bind some series to a SECONDARY value axis on the
   // right (ECMA-376 §21.2.2.*). As with line, this applies only to plain
@@ -8172,10 +8854,22 @@ function renderAreaChart(
   // construct. `sec` is null (single-axis, byte-identical to pre-CH7) unless the
   // axis is declared AND a series opts in; secondary series are then excluded
   // from the primary extent and mapped through the secondary scale.
-  const sec = !stacked && chart.secondaryValAxis && chart.series.some(s => s.useSecondaryAxis === true)
+  const areaIndexBySeries = new Map(areaSeries.map((entry, index) => [entry.series, index]));
+  const seriesChartIndex = new Map(chart.series.map((series, index) => [series, index]));
+  const seriesUsesSecondary = (series: ChartSeries): boolean => {
+    const chartIndex = seriesChartIndex.get(series) ?? -1;
+    return plotGroupBySeries[chartIndex]?.valueAxis === 'secondary'
+      || (chart.plotGroups == null && series.useSecondaryAxis === true);
+  };
+  const secondaryAxisGroups = axisPlanningGroups.filter(group => group.valueAxis === 'secondary');
+  const secondaryAxisIsPercent = secondaryAxisGroups.length > 0
+    && secondaryAxisGroups.every(group => group.grouping === 'percentStacked');
+  const sec = chart.secondaryValAxis && chart.series.some(series => seriesUsesSecondary(series))
     ? chart.secondaryValAxis
     : null;
-  const isSecondarySeries = (s: ChartSeries): boolean => sec != null && s.useSecondaryAxis === true;
+  const isSecondarySeries = (series: ChartSeries): boolean => {
+    return sec != null && seriesUsesSecondary(series);
+  };
 
   // Shared frame bands. Title + category-label bands follow PowerPoint's chart
   // auto-layout (font-proportional, pinned to the demo slide-5 line-chart PDF);
@@ -8211,7 +8905,21 @@ function renderAreaChart(
     + catTitleH + legBottomH;
   const phEst = h - padT - padB;
 
-  const secScale = computeSecondaryAxis(sec, chart.series, phEst / ptToPx);
+  const secScale = computeSecondaryAxis(
+    sec,
+    chart.series,
+    phEst / ptToPx,
+    'y',
+    secondaryAxisIsPercent,
+    false,
+    series => seriesUsesSecondary(series),
+    (series, pointIndex) => {
+      const areaIndex = areaIndexBySeries.get(series);
+      if (areaIndex == null) return series.values[pointIndex] ?? null;
+      return series.values[pointIndex] == null
+        ? null : areaTopValues[areaIndex][pointIndex] ?? null;
+    },
+  );
   const secTickFontPx = Math.max(8, Math.min(11, h / 20));
   const secFontPx = chartTextFontSizePx(sec?.fontSizeHpt, ptToPx) ?? secTickFontPx;
   let secLabelBandW = 0;
@@ -8238,24 +8946,11 @@ function renderAreaChart(
     let min = Infinity;
     let max = -Infinity;
     for (let ci = 0; ci < n; ci++) {
-      if (stacked) {
-        let positive = 0;
-        let negative = 0;
-        for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
-          const value = stackedValue(areaIndex, ci);
-          if (value >= 0) positive += value;
-          else negative += value;
-        }
-        min = Math.min(min, negative);
-        max = Math.max(max, positive);
-      } else {
-        for (const { series } of areaSeries) {
-          if (isSecondarySeries(series)) continue;
-          const value = series.values[ci];
-          if (value == null) continue;
-          min = Math.min(min, value);
-          max = Math.max(max, value);
-        }
+      for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
+        const { series } = areaSeries[areaIndex];
+        if (isSecondarySeries(series) || series.values[ci] == null) continue;
+        min = Math.min(min, areaBaseValues[areaIndex][ci], areaTopValues[areaIndex][ci]);
+        max = Math.max(max, areaBaseValues[areaIndex][ci], areaTopValues[areaIndex][ci]);
       }
       for (const { series } of lineSeries) {
         if (isSecondarySeries(series)) continue;
@@ -8266,11 +8961,11 @@ function renderAreaChart(
       }
     }
     if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 1 };
-    if (pct) return { min: min < 0 ? -100 : 0, max: max > 0 ? 100 : 0 };
+    if (axisIsPercent) return { min: min < 0 ? -100 : 0, max: max > 0 ? 100 : 0 };
     return { min, max };
   };
   let areaExtent = computeAreaDataExtent();
-  if (!pct) {
+  if (!axisIsPercent) {
     const includeEndpoint = (value: number): void => {
       areaExtent = {
         min: Math.min(areaExtent.min, value),
@@ -8285,12 +8980,7 @@ function renderAreaChart(
         'y',
         index => {
           if (series.values[index] == null) return null;
-          if (!stacked) return series.values[index];
-          let sum = 0;
-          for (let prior = 0; prior <= areaIndex; prior++) {
-            sum += stackedValue(prior, index);
-          }
-          return sum;
+          return areaTopValues[areaIndex][index];
         },
         includeEndpoint,
       );
@@ -8305,7 +8995,7 @@ function renderAreaChart(
     areaExtent.min,
     areaExtent.max,
     phEst / ptToPx,
-    pct,
+    axisIsPercent,
   );
   const manualValTickFontPx = chart.valAxisFontSizeHpt != null
     ? valAxFontPx
@@ -8326,7 +9016,7 @@ function renderAreaChart(
     for (const value of provisionalScale.majorLines) {
       primaryLabelWidth = Math.max(
         primaryLabelWidth,
-        ctx.measureText(formatPrimaryValueAxisTick(chart, value, pct)).width,
+        ctx.measureText(formatPrimaryValueAxisTick(chart, value, axisIsPercent)).width,
       );
     }
     ctx.font = prevFont;
@@ -8387,7 +9077,9 @@ function renderAreaChart(
   // the pre-CH7 path.
   // Value axis is vertical → length = plot height (axis-length-aware auto major unit). An
   // explicit `<c:valAx><c:majorUnit>` (§21.2.2.103) overrides the auto step.
-  const areaPlan = planValueAxis(chart, areaExtent.min, areaExtent.max, ph / ptToPx, pct);
+  const areaPlan = planValueAxis(
+    chart, areaExtent.min, areaExtent.max, ph / ptToPx, axisIsPercent,
+  );
 
   // crossBetween="between" (Office's default; ECMA-376 §21.2.2.32 leaves the
   // default application-defined) gives each category a band of width pw/n and
@@ -8482,30 +9174,17 @@ function renderAreaChart(
   }
 
   // Draw the series area fills ON TOP of the gridlines laid down above.
-  const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
   // In a stacked area chart, series order is the stacking order: series 0 is
   // adjacent to the category axis, then series 1, and so on (CT_AreaChart's
   // ordered `ser` sequence). Plain unstacked area retains the historical
   // back-to-front painting so the first series remains visually on top.
-  const seriesOrder = stacked
-    ? areaSeries.map((_, index) => index)
-    : areaSeries.map((_, index) => areaSeries.length - 1 - index);
-  const stackedTopValues = stacked
-    ? areaSeries.map(() => new Array<number>(n).fill(0))
-    : null;
-  if (stackedTopValues) {
-    for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
-      let running = 0;
-      for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
-        running += stackedValue(areaIndex, categoryIndex);
-        stackedTopValues[areaIndex][categoryIndex] = running;
-      }
-    }
-  }
-  const plottedAreaValue = (areaIndex: number, categoryIndex: number): number => {
-    if (!stacked) return areaSeries[areaIndex].series.values[categoryIndex] ?? 0;
-    return stackedTopValues?.[areaIndex]?.[categoryIndex] ?? 0;
-  };
+  const seriesOrder = areaGroupMembers.flatMap(({ group, areaIndices }) =>
+    group.grouping === 'stacked' || group.grouping === 'percentStacked'
+      ? areaIndices
+      : [...areaIndices].reverse()
+  );
+  const plottedAreaValue = (areaIndex: number, categoryIndex: number): number =>
+    areaTopValues[areaIndex]?.[categoryIndex] ?? 0;
   for (const areaIndex of seriesOrder) {
     const { series: s, chartIndex } = areaSeries[areaIndex];
     const color = chartColor(chartIndex, s);
@@ -8527,17 +9206,16 @@ function renderAreaChart(
     // Kept for symmetry with the line renderer above rather than dropped.
     const smooth = s.smooth === true;
     ctx.beginPath();
-    if (stacked && stackBase) {
+    if (stackedByArea[areaIndex]) {
       const topPts = [];
       for (let ci = 0; ci < n; ci++) {
-        topPts.push({ x: toX(ci), y: toY(stackedValue(areaIndex, ci) + stackBase[ci]) });
+        topPts.push({ x: toX(ci), y: toY(areaTopValues[areaIndex][ci]) });
       }
       ctx.moveTo(topPts[0].x, topPts[0].y);
       appendCurve(ctx, topPts, smooth);
       for (let ci = n - 1; ci >= 0; ci--) {
-        ctx.lineTo(toX(ci), toY(stackBase[ci]));
+        ctx.lineTo(toX(ci), toY(areaBaseValues[areaIndex][ci]));
       }
-      for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(areaIndex, ci);
     } else {
       const topPts = [];
       for (let ci = 0; ci < n; ci++) topPts.push({ x: toX(ci), y: yOf(s.values[ci] ?? 0) });
@@ -8568,13 +9246,13 @@ function renderAreaChart(
   // for an interior crossing (the line spans points on both sides). Paint after
   // the opaque area fills so the authored geometry remains visible, but before
   // point markers and labels.
-  const areaGroupMembers = new Map<number, Array<{ series: ChartSeries; areaIndex: number }>>();
+  const decorationAreaGroupMembers = new Map<number, Array<{ series: ChartSeries; areaIndex: number }>>();
   for (let areaIndex = 0; areaIndex < areaSeries.length; areaIndex++) {
     const series = areaSeries[areaIndex].series;
     const groupIndex = series.areaGroupIndex ?? 0;
-    const members = areaGroupMembers.get(groupIndex) ?? [];
+    const members = decorationAreaGroupMembers.get(groupIndex) ?? [];
     members.push({ series, areaIndex });
-    areaGroupMembers.set(groupIndex, members);
+    decorationAreaGroupMembers.set(groupIndex, members);
   }
   for (const decoration of chart.areaGroupDecorations ?? []) {
     if (!decoration.dropLines) {
@@ -8584,7 +9262,7 @@ function renderAreaChart(
     if (!applyDecorationLineStyle(ctx, dropLineStyle, ptToPx)) {
       continue;
     }
-    const members = areaGroupMembers.get(decoration.groupIndex) ?? [];
+    const members = decorationAreaGroupMembers.get(decoration.groupIndex) ?? [];
     for (let categoryIndex = 0; categoryIndex < n; categoryIndex++) {
       let minY = Infinity;
       let maxY = -Infinity;
@@ -8631,6 +9309,7 @@ function renderAreaChart(
       const color = chartColor(chartIndex, s);
       const yOf = yMapFor(s);
       const plottedOf = (ci: number): number => plottedAreaValue(areaIndex, ci);
+      const seriesPercentTotals = percentTotalsByArea[areaIndex];
       // Error bars first (markers overlay their tips).
       for (const eb of s.errBars ?? []) {
         drawCategoryErrorBars(
@@ -8678,8 +9357,8 @@ function renderAreaChart(
         chart.dataLabelPosition ?? 'ctr',
         { x: px0, y: py0, w: pw, h: ph },
         { x, y, w, h },
-        pct && pctTotals
-          ? ci => (s.values[ci] ?? 0) / pctTotals[ci]
+        percentByArea[areaIndex] && seriesPercentTotals
+          ? ci => (s.values[ci] ?? 0) / seriesPercentTotals[ci]
           : undefined,
         undefined,
         face => chartFontFamily(chart, face, 'minor'),
@@ -8799,7 +9478,7 @@ function renderAreaChart(
       const gap = chart.valAxisFontSizeHpt != null
         ? valueTickLabelGapPx(drawnValTickFontPx)
         : 6;
-      ctx.fillText(formatPrimaryValueAxisTick(chart, v, pct), px0 - gap, gy);
+      ctx.fillText(formatPrimaryValueAxisTick(chart, v, axisIsPercent), px0 - gap, gy);
     }
     if (chart.valAxisMinorTickMark && chart.valAxisMinorTickMark !== 'none') {
       for (const value of areaPlan.minorTicks) {
@@ -8962,41 +9641,6 @@ interface OfPiePoint {
   value: number;
 }
 
-function ofPieSecondaryIndices(chart: ChartModel, values: number[]): Set<number> {
-  const options = chart.ofPie;
-  const finitePositive = values
-    .map((value, sourceIndex) => ({ value, sourceIndex }))
-    .filter(point => Number.isFinite(point.value) && point.value > 0);
-  const selected = new Set<number>();
-  if (finitePositive.length < 2) return selected;
-  const splitType = options?.splitType ?? 'auto';
-  const splitPos = options?.splitPos;
-  if (splitType === 'cust') {
-    for (const index of options?.customSplitIndices ?? []) {
-      if (finitePositive.some(point => point.sourceIndex === index)) selected.add(index);
-    }
-  } else if (splitType === 'val' && splitPos != null && Number.isFinite(splitPos)) {
-    for (const point of finitePositive) if (point.value <= splitPos) selected.add(point.sourceIndex);
-  } else if (splitType === 'percent' && splitPos != null && Number.isFinite(splitPos)) {
-    const total = finitePositive.reduce((sum, point) => sum + point.value, 0);
-    for (const point of finitePositive) {
-      if (total > 0 && (point.value / total) * 100 <= splitPos) selected.add(point.sourceIndex);
-    }
-  } else {
-    // Position is a count from the end. Excel's omitted `auto` currently uses
-    // the same tail split with three detail points; the boundary corpus keeps
-    // this compatibility default observable rather than hiding it in paint.
-    const count = splitType === 'pos' && splitPos != null && Number.isFinite(splitPos)
-      ? Math.max(0, Math.floor(splitPos))
-      : 3;
-    for (const point of finitePositive.slice(-count)) selected.add(point.sourceIndex);
-  }
-  // Both plots must remain non-empty. Malformed/all-point custom splits degrade
-  // deterministically by retaining the first finite point in the primary plot.
-  if (selected.size >= finitePositive.length) selected.delete(finitePositive[0].sourceIndex);
-  return selected;
-}
-
 /** ECMA-376 §21.2.2.126 pie-of-pie / bar-of-pie. Source point identity stays
  * attached to every detail item; only the primary plot receives one aggregate
  * slice. Automatic geometry is deliberately compact and parameterized solely
@@ -9010,9 +9654,8 @@ function renderOfPieChart(
 ): void {
   const source = chart.series[0];
   if (!source) return;
-  const values = source.values.map(value => value == null ? 0 : Math.abs(value));
-  const secondarySet = ofPieSecondaryIndices(chart, values);
-  if (secondarySet.size === 0) {
+  const secondarySet = planOfPieSecondaryIndices(chart.ofPie, source.values);
+  if (secondarySet == null || secondarySet.size === 0) {
     renderPieChart(
       ctx, { ...chart, chartType: 'pie' }, r, false, ptToPx, shapeRotationDeg,
     );
@@ -9020,12 +9663,18 @@ function renderOfPieChart(
   }
   const primary: OfPiePoint[] = [];
   const secondary: OfPiePoint[] = [];
-  for (let sourceIndex = 0; sourceIndex < values.length; sourceIndex++) {
-    const value = values[sourceIndex];
+  for (let sourceIndex = 0; sourceIndex < source.values.length; sourceIndex++) {
+    const sourceValue = source.values[sourceIndex];
+    const value = sourceValue == null ? 0 : Math.abs(sourceValue);
     if (!(value > 0) || !Number.isFinite(value)) continue;
     (secondarySet.has(sourceIndex) ? secondary : primary).push({ sourceIndex, value });
   }
-  if (primary.length === 0 || secondary.length === 0) return;
+  if (secondary.length === 0) {
+    renderPieChart(
+      ctx, { ...chart, chartType: 'pie' }, r, false, ptToPx, shapeRotationDeg,
+    );
+    return;
+  }
 
   const legendChart: ChartModel = { ...chart, chartType: 'pie' };
   const legend = measuredLegendReserve(ctx, legendChart, r.w, r.h, 0.28, ptToPx);
@@ -10750,7 +11399,9 @@ function renderRadarChart(
 // family). So `computeSecondaryAxis` is never called here — the CH7 helper is
 // wired only into the category-axis families (bar already; line + area now).
 function scatterXValue(cats: string[], index: number, useIndexX: boolean): number | null {
-  if (useIndexX) return index;
+  // A string-backed `<c:xVal>` is plotted by Office as the one-based ordinal
+  // sequence 1..N. Zero-based array indices remain an implementation detail.
+  if (useIndexX) return index + 1;
   const raw = cats[index];
   if (raw == null) return null;
   const value = parseFloat(raw);
@@ -10759,15 +11410,12 @@ function scatterXValue(cats: string[], index: number, useIndexX: boolean): numbe
 
 /** Return the linear bubble magnitude prescribed by ST_SizeRepresents.
  * `area` is the schema default, hence sqrt(value); `w` makes radius linear. */
-function bubbleSizeMagnitude(chart: ChartModel, value: number): number {
-  return chart.bubbleSizeRepresents === 'w' ? value : Math.sqrt(value);
-}
+type BubbleGroupSettings = Pick<
+  ChartModel, 'bubbleScale' | 'bubbleSizeRepresents' | 'showNegativeBubbles'
+>;
 
-/** Apply CT_BubbleChart.showNegBubbles before chart-wide normalization. */
-function visibleBubbleSize(chart: ChartModel, value: number | null | undefined): number | null {
-  if (value == null || !Number.isFinite(value) || value === 0) return null;
-  if (value < 0 && chart.showNegativeBubbles !== true) return null;
-  return Math.abs(value);
+function bubbleSizeMagnitude(chart: BubbleGroupSettings, value: number): number {
+  return chart.bubbleSizeRepresents === 'w' ? value : Math.sqrt(value);
 }
 
 type ScatterSeriesLayer = {
@@ -10787,6 +11435,168 @@ function scatterPointFill(
   return markerFillColorFor(series, point, index, fallbackColor);
 }
 
+/** Resolve the classic bubble shape fill without collapsing DrawingML
+ * provenance into the marker fallback. CT_DPt shape paint wins over CT_Ser
+ * shape paint, which wins over the linked dataPoint role. */
+function bubblePointFill(
+  chart: ChartModel,
+  series: ChartSeries,
+  point: NonNullable<ChartSeries['dataPointOverrides']>[number] | undefined,
+  index: number,
+  fallbackColor: string,
+  bubble3D = bubblePointIsThreeD(series, point),
+): { color: string; paint: Fill | null | undefined } {
+  const bubbleSize = series.bubbleSizes?.[index];
+  if (bubbleSize != null && Number.isFinite(bubbleSize) && bubbleSize < 0) {
+    // MS-OE376 §2.1.1504(b): Office always inverts a negative bubble,
+    // regardless of `<c:invertIfNegative>`. The application-generated default
+    // is outline-only for a flat bubble and white material for a 3-D bubble;
+    // an authored c14 alternate fill remains authoritative.
+    if (series.invertedFillHidden === true) return { color: '00000000', paint: null };
+    if (series.invertedFill) {
+      return {
+        color: series.invertedFill.fillType === 'solid'
+          ? series.invertedFill.color : fallbackColor,
+        paint: series.invertedFill,
+      };
+    }
+    return bubble3D
+      ? { color: 'FFFFFF', paint: undefined }
+      : { color: '00000000', paint: null };
+  }
+  const directPoint = chartExStylePaintDecision(
+    chart, point?.chartexStyle, index, series.values.length,
+  );
+  if (directPoint !== undefined) {
+    return {
+      color: directPoint?.fillType === 'solid' ? directPoint.color : fallbackColor,
+      paint: directPoint,
+    };
+  }
+  if (point?.fillHidden === true) return { color: '00000000', paint: null };
+  if (point?.color != null) return { color: point.color, paint: undefined };
+  const pointColor = series.dataPointColors?.[index];
+  if (pointColor != null) return { color: pointColor, paint: undefined };
+
+  const directSeries = chartExStylePaintDecision(
+    chart, series.chartexStyle, index, series.values.length,
+  );
+  if (directSeries !== undefined) {
+    return {
+      color: directSeries?.fillType === 'solid' ? directSeries.color : fallbackColor,
+      paint: directSeries,
+    };
+  }
+  if (series.color != null) return { color: series.color, paint: undefined };
+  const linkedPoint = chartExStylePaintDecision(
+    chart, chart.chartStyleRoles?.dataPoint, index, series.values.length,
+  );
+  if (linkedPoint !== undefined) {
+    return {
+      color: linkedPoint?.fillType === 'solid' ? linkedPoint.color : fallbackColor,
+      paint: linkedPoint,
+    };
+  }
+  return {
+    color: scatterPointFill(series, point, index, fallbackColor),
+    paint: markerFillPaintFor(series, point, index),
+  };
+}
+
+function bubblePointLine(
+  chart: ChartModel,
+  series: ChartSeries,
+  point: NonNullable<ChartSeries['dataPointOverrides']>[number] | undefined,
+  index: number,
+): {
+  color: string | null;
+  paint: ChartModel['plotAreaLineFill'] | null | undefined;
+  widthEmu: number | null | undefined;
+  dash: string | null | undefined;
+  customDash: ChartModel['plotAreaLineCustomDash'];
+  cap: string | null | undefined;
+  join: string | null | undefined;
+} {
+  const pointStyle = point?.chartexStyle;
+  const seriesStyle = series.chartexStyle;
+  const linkedStyle = chart.chartStyleRoles?.dataPoint;
+  const linkedGeometry = linkedStyle?.lineNoStyle === true ? undefined : linkedStyle;
+  const dashLayers = [pointStyle, seriesStyle, linkedGeometry];
+  let dash: string | null | undefined = point?.lineDash;
+  let customDash: ChartModel['plotAreaLineCustomDash'];
+  if (dash == null) {
+    for (const layer of dashLayers) {
+      if (layer?.lineDash != null || layer?.lineCustomDash != null
+        || layer?.lineDashAuthored === true) {
+        dash = layer.lineDash;
+        customDash = layer.lineCustomDash ?? undefined;
+        break;
+      }
+    }
+  }
+  const geometry = {
+    widthEmu: point?.lineWidthEmu
+      ?? pointStyle?.lineWidthEmu
+      ?? series.lineWidthEmu
+      ?? seriesStyle?.lineWidthEmu
+      ?? linkedGeometry?.lineWidthEmu
+      ?? point?.markerLineWidthEmu
+      ?? series.markerLineWidthEmu,
+    dash,
+    customDash,
+    cap: pointStyle?.lineCap ?? seriesStyle?.lineCap ?? linkedGeometry?.lineCap,
+    join: pointStyle?.lineJoin ?? seriesStyle?.lineJoin ?? linkedGeometry?.lineJoin,
+  };
+  const pointPaint = chartExStyleLinePaintDecision(
+    chart, pointStyle, index, series.values.length,
+  );
+  if (pointPaint !== undefined) {
+    return {
+      color: pointPaint?.fillType === 'solid' ? pointPaint.color : point?.lineColor ?? null,
+      paint: pointPaint,
+      ...geometry,
+    };
+  }
+  if (point?.lineHidden === true) {
+    return { color: null, paint: null, ...geometry };
+  }
+  if (point?.lineColor != null) {
+    return { color: point.lineColor, paint: undefined, ...geometry };
+  }
+
+  const seriesPaint = chartExStyleLinePaintDecision(
+    chart, seriesStyle, index, series.values.length,
+  );
+  if (seriesPaint !== undefined) {
+    return {
+      color: seriesPaint?.fillType === 'solid' ? seriesPaint.color : series.lineColor ?? null,
+      paint: seriesPaint,
+      ...geometry,
+    };
+  }
+  if (series.lineHidden === true) {
+    return { color: null, paint: null, ...geometry };
+  }
+  if (series.lineColor != null) {
+    return { color: series.lineColor, paint: undefined, ...geometry };
+  }
+  const linkedPoint = chartExStyleLinePaintDecision(
+    chart, linkedStyle, index, series.values.length,
+  );
+  if (linkedPoint !== undefined) {
+    return {
+      color: linkedPoint?.fillType === 'solid' ? linkedPoint.color : null,
+      paint: linkedPoint,
+      ...geometry,
+    };
+  }
+  return {
+    color: point?.markerLine ?? series.markerLine ?? series.lineColor ?? null,
+    paint: undefined,
+    ...geometry,
+  };
+}
+
 function makeScatterSeriesLayer(
   chart: ChartModel,
   series: ChartSeries,
@@ -10804,7 +11614,7 @@ function makeScatterSeriesLayer(
 /** One `<c:bubbleChart>` group has one size scale: every series must therefore
  * be normalized against the same maximum bubble magnitude. */
 function bubbleSizeToDiameterScale(
-  chart: ChartModel,
+  chart: BubbleGroupSettings,
   layers: readonly ScatterSeriesLayer[],
   useIndexX: boolean,
   pw: number,
@@ -10859,6 +11669,7 @@ function drawScatterSeriesLayer(
   valueAxisMaximum: number,
   valueDisplayUnits?: ChartDisplayUnits | null,
   shapeRotationDeg = 0,
+  bubbleSettings?: BubbleGroupSettings,
 ): void {
   const drawLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
   const drawSmooth = style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
@@ -10867,8 +11678,9 @@ function drawScatterSeriesLayer(
   );
   const layers = entries.map(({ series, index }) => makeScatterSeriesLayer(chart, series, index));
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(chart, ptToPx);
+  const effectiveBubbleSettings = bubbleSettings ?? chart;
   const bubbleScale = isBubble
-    ? bubbleSizeToDiameterScale(chart, layers, useIndexX, pw, ph)
+    ? bubbleSizeToDiameterScale(effectiveBubbleSettings, layers, useIndexX, pw, ph)
     : 0;
 
   // Excel paints a scatter group by geometry phase, not one complete series at
@@ -10941,24 +11753,36 @@ function drawScatterSeriesLayer(
         let sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
         if (isBubble) {
           if (bubbleScale <= 0) continue;
-          const bubbleSize = visibleBubbleSize(chart, s.bubbleSizes?.[ci]);
+          const bubbleSize = visibleBubbleSize(effectiveBubbleSettings, s.bubbleSizes?.[ci]);
           if (bubbleSize == null) continue;
-          sizePt = (bubbleSizeMagnitude(chart, bubbleSize) * bubbleScale) / ptToPx;
+          sizePt = (bubbleSizeMagnitude(effectiveBubbleSettings, bubbleSize) * bubbleScale) / ptToPx;
         }
-        const fill = scatterPointFill(s, dpt, ci, fallbackColor);
+        const bubbleFill = isBubble
+          ? bubblePointFill(chart, s, dpt, ci, fallbackColor)
+          : null;
+        const fill = bubbleFill?.color ?? scatterPointFill(s, dpt, ci, fallbackColor);
         // Bubble geometry is the series shape itself, so its outline comes from
         // `<c:ser><c:spPr><a:ln>` rather than a `<c:marker>` block. Ordinary
         // scatter markers continue to use markerLine only.
-        const line = dpt?.markerLine ?? s.markerLine ?? (isBubble ? s.lineColor : null) ?? null;
+        const bubbleLine = isBubble ? bubblePointLine(chart, s, dpt, ci) : null;
+        const line = isBubble
+          ? bubbleLine!.color
+          : dpt?.markerLine ?? s.markerLine ?? null;
         const markerLineWidthEmu = dpt?.markerLineWidthEmu ?? s.markerLineWidthEmu;
-        const bubbleLineWidthEmu = dpt?.lineWidthEmu ?? s.lineWidthEmu;
+        const bubbleLineWidthEmu = bubbleLine?.widthEmu;
         const lineWidthEmu = isBubble ? bubbleLineWidthEmu : markerLineWidthEmu;
         const lineWidthPx = lineWidthEmu != null
           ? axisLineWidthPx(lineWidthEmu, ptToPx)
           : undefined;
         drawMarker(
           ctx, toX(xv), toY(yv), symbol, sizePt, fill, line, ptToPx, lineWidthPx,
-          markerFillPaintFor(s, dpt, ci), shapeRotationDeg,
+          isBubble ? bubbleFill!.paint : markerFillPaintFor(s, dpt, ci), shapeRotationDeg,
+          isBubble ? bubbleLine!.paint : undefined,
+          isBubble ? bubbleLine!.dash : undefined,
+          isBubble ? bubbleLine!.customDash : undefined,
+          isBubble ? bubbleLine!.cap : undefined,
+          isBubble ? bubbleLine!.join : undefined,
+          isBubble ? bubblePointIsThreeD(s, dpt) : false,
         );
       }
     }
@@ -11010,14 +11834,22 @@ function renderScatterChart(
   shapeRotationDeg = 0,
 ): void {
   const { x, y, w, h } = r;
-  const primaryEntries = chart.series
-    .map((series, index) => ({ series, index }))
-    .filter(({ series }) => series.useSecondaryAxis !== true);
-  const secondaryEntries = chart.series
-    .map((series, index) => ({ series, index }))
-    .filter(({ series }) => series.useSecondaryAxis === true);
-  const secondaryX = secondaryEntries.length > 0 ? chart.secondaryCatAxis : null;
-  const secondaryY = secondaryEntries.length > 0 ? chart.secondaryValAxis : null;
+  const entries = chart.series.map((series, index) => ({ series, index }));
+  const plotGroupBySeries = indexChartPlotGroups(chart);
+  const usesSecondaryX = ({ series, index }: (typeof entries)[number]): boolean =>
+    plotGroupBySeries[index]?.categoryAxis === 'secondary'
+      || (chart.plotGroups == null && series.useSecondaryAxis === true);
+  const usesSecondaryY = ({ series, index }: (typeof entries)[number]): boolean =>
+    plotGroupBySeries[index]?.valueAxis === 'secondary'
+      || (chart.plotGroups == null && series.useSecondaryAxis === true);
+  const primaryXEntries = entries.filter(entry => !usesSecondaryX(entry));
+  const secondaryXEntries = entries.filter(usesSecondaryX);
+  const primaryYEntries = entries.filter(entry => !usesSecondaryY(entry));
+  const secondaryYEntries = entries.filter(usesSecondaryY);
+  const primaryEntries = entries.filter(entry => !usesSecondaryX(entry) && !usesSecondaryY(entry));
+  const secondaryEntries = entries.filter(entry => usesSecondaryX(entry) && usesSecondaryY(entry));
+  const secondaryX = secondaryXEntries.length > 0 ? chart.secondaryCatAxis : null;
+  const secondaryY = secondaryYEntries.length > 0 ? chart.secondaryValAxis : null;
 
   const numericXValues = (entries: Array<{ series: ChartSeries; index: number }>): number[] => {
     const values: number[] = [];
@@ -11030,8 +11862,12 @@ function renderScatterChart(
     }
     return values;
   };
-  const allNumericX = numericXValues(chart.series.map((series, index) => ({ series, index })));
+  const allNumericX = numericXValues(entries);
   const useIndexX = allNumericX.length === 0;
+  const textBubbleOrdinalMax = entries.length === 1
+    && entries[0].series.bubbleXSourceIsString === true
+    ? entries[0].series.values.length + 1
+    : null;
   const pairedExtents = (
     entries: Array<{ series: ChartSeries; index: number }>,
   ): { x: { min: number; max: number }; y: { min: number; max: number } } => {
@@ -11070,8 +11906,14 @@ function renderScatterChart(
     }
     return { x: finiteDataExtent(xs), y: finiteDataExtent(ys) };
   };
-  const primaryExtent = pairedExtents(primaryEntries.length > 0 ? primaryEntries : secondaryEntries);
-  const secondaryExtent = pairedExtents(secondaryEntries);
+  const primaryExtent = {
+    x: pairedExtents(primaryXEntries.length > 0 ? primaryXEntries : secondaryXEntries).x,
+    y: pairedExtents(primaryYEntries.length > 0 ? primaryYEntries : secondaryYEntries).y,
+  };
+  const secondaryExtent = {
+    x: pairedExtents(secondaryXEntries).x,
+    y: pairedExtents(secondaryYEntries).y,
+  };
   // Shared frame bands. Title + bottom axis-label bands follow PowerPoint's
   // chart auto-layout (font-proportional, pinned to the demo slide-5 line-chart
   // PDF); see cartesianTitleBand / catAxisLabelBandH in layout.ts. Scatter's X
@@ -11186,8 +12028,10 @@ function renderScatterChart(
   const xAxisPlan = planNumericValueAxis({
     dataMin: xMin,
     dataMax: xMax,
-    explicitMin: chart.catAxisMin,
-    explicitMax: chart.catAxisMax,
+    // Office gives a string-backed lone bubble series one empty ordinal slot
+    // on each side (four points => 0..5). Authored axis bounds still win.
+    explicitMin: chart.catAxisMin ?? (textBubbleOrdinalMax == null ? null : 0),
+    explicitMax: chart.catAxisMax ?? textBubbleOrdinalMax,
     axisLenPt: pw / ptToPx,
     axisOrientation: 'horizontal',
     majorUnit: chart.catAxisMajorUnit,
@@ -11424,26 +12268,65 @@ function renderScatterChart(
     }
   }
 
-  // ECMA-376 §21.2.2.42 `<c:scatterStyle>`. Drives whether scatter points
-  // are connected (line / smooth) and whether markers are also drawn.
-  // For bubble charts the value is ignored (always markers, sized by data).
-  const isBubble = chart.chartType === 'bubble';
-  const style = isBubble ? 'marker' : (chart.scatterStyle ?? 'marker');
-  drawScatterSeriesLayer(
-    ctx, chart, primaryEntries, useIndexX, toX, toY, r,
-    px0, py0, pw, ph, ptToPx, isBubble, style, { x, y, w, h },
-    yAxisPlan.max,
-    chart.valAxisDisplayUnits,
-    shapeRotationDeg,
-  );
-  if (secondaryEntries.length > 0 && secondaryXPlan && secondaryYPlan) {
+  // Office preserves scatter/bubble group order for overlapping geometry. A
+  // group still paints its own line/error/marker/label phases, but the next
+  // source group is composited after it. This differs from bar/area/line,
+  // whose cross-family layering is application-defined and handled by their
+  // dedicated combo path.
+  const drawNumericEntries = (
+    entries: Array<{ series: ChartSeries; index: number }>,
+    isBubble: boolean,
+    style: string,
+    xMap: (value: number) => number,
+    yMap: (value: number) => number,
+    maximum: number,
+    displayUnits?: ChartDisplayUnits | null,
+    bubbleSettings?: BubbleGroupSettings,
+  ): void => {
+    if (entries.length === 0) return;
     drawScatterSeriesLayer(
-      ctx, chart, secondaryEntries, useIndexX, toSecondaryX, toSecondaryY, r,
-      px0, py0, pw, ph, ptToPx, isBubble, style, { x, y, w, h },
-      secondaryYPlan.max,
-      secondaryY?.displayUnits,
-      shapeRotationDeg,
+      ctx, chart, entries, useIndexX, xMap, yMap, r,
+      px0, py0, pw, ph, ptToPx, isBubble, style,
+      { x, y, w, h }, maximum, displayUnits, shapeRotationDeg, bubbleSettings,
     );
+  };
+  if (chart.plotGroups == null) {
+    const isBubble = chart.chartType === 'bubble';
+    const style = isBubble ? 'marker' : (chart.scatterStyle ?? 'marker');
+    drawNumericEntries(
+      primaryEntries, isBubble, style, toX, toY,
+      yAxisPlan.max, chart.valAxisDisplayUnits,
+    );
+    if (secondaryEntries.length > 0 && secondaryXPlan && secondaryYPlan) {
+      drawNumericEntries(
+        secondaryEntries, isBubble, style, toSecondaryX, toSecondaryY,
+        secondaryYPlan.max, secondaryY?.displayUnits,
+      );
+    }
+  } else {
+    for (const group of chart.plotGroups) {
+      if (group.kind !== 'scatter' && group.kind !== 'bubble') continue;
+      const entries = chart.series
+        .slice(group.seriesStart, group.seriesStart + group.seriesCount)
+        .map((series, offset) => ({ series, index: group.seriesStart + offset }));
+      if (entries.length === 0) continue;
+      const isBubble = group.kind === 'bubble';
+      const usesSecondaryX = group.categoryAxis === 'secondary';
+      const usesSecondaryY = group.valueAxis === 'secondary';
+      drawNumericEntries(
+        entries, isBubble,
+        isBubble ? 'marker' : (group.scatterStyle ?? chart.scatterStyle ?? 'marker'),
+        usesSecondaryX ? toSecondaryX : toX,
+        usesSecondaryY ? toSecondaryY : toY,
+        usesSecondaryY && secondaryYPlan ? secondaryYPlan.max : yAxisPlan.max,
+        usesSecondaryY ? secondaryY?.displayUnits : chart.valAxisDisplayUnits,
+        isBubble ? {
+          bubbleScale: group.bubbleScale ?? chart.bubbleScale,
+          bubbleSizeRepresents: group.bubbleSizeRepresents ?? chart.bubbleSizeRepresents,
+          showNegativeBubbles: group.showNegativeBubbles ?? chart.showNegativeBubbles,
+        } : undefined,
+      );
+    }
   }
 
   // The second CT_ScatterChart group owns an independent top X and right Y
@@ -11517,6 +12400,43 @@ function renderScatterChart(
   drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
+const BUBBLE_3D_MATERIAL_COMPONENTS = 5;
+
+/** Paint the bounded application-defined material observed in current Excel
+ * vector output for `bubble3D`. The highlight remains in shape-local
+ * coordinates, so a PPTX host transform rotates the complete bubble without a
+ * second lighting model. `source-atop` preserves the authored fill alpha. */
+function paintBubble3DMaterial(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  sizePx: number,
+): void {
+  const highlightX = cx - sizePx * 0.08;
+  const highlightY = cy - sizePx * 0.17;
+  const material = ctx.createRadialGradient(
+    highlightX, highlightY, 0,
+    highlightX, highlightY, sizePx * 0.72,
+  );
+  material.addColorStop(0, 'rgba(255,255,255,0.78)');
+  material.addColorStop(0.2, 'rgba(255,255,255,0.48)');
+  material.addColorStop(0.48, 'rgba(255,255,255,0)');
+  material.addColorStop(0.78, 'rgba(0,0,0,0.18)');
+  material.addColorStop(1, 'rgba(0,0,0,0.5)');
+  const previousComposite = ctx.globalCompositeOperation;
+  const previousFill = ctx.fillStyle;
+  ctx.save();
+  ctx.clip();
+  ctx.globalCompositeOperation = 'source-atop';
+  ctx.fillStyle = material;
+  ctx.fillRect(cx - sizePx / 2, cy - sizePx / 2, sizePx, sizePx);
+  // Recording contexts used by hosts/tests do not necessarily model a full
+  // Canvas state stack, so restore the property explicitly as well.
+  ctx.globalCompositeOperation = previousComposite;
+  ctx.fillStyle = previousFill;
+  ctx.restore();
+}
+
 /** Draw a single ECMA-376 §21.2.2.32 marker shape centered at `(cx, cy)`.
  *  `sizePt` is the spec's marker side length in points (Excel's default
  *  is 5). `fill` and `line` are hex strings; a leading `#` is tolerated so
@@ -11536,6 +12456,13 @@ function drawMarker(
   /** undefined uses `fill`; null is authored noFill. */
   fillPaint: Fill | null | undefined = undefined,
   shapeRotationDeg = 0,
+  /** undefined uses `line`; null is authored line noFill. */
+  linePaint: ChartModel['plotAreaLineFill'] | null | undefined = undefined,
+  lineDash: string | null | undefined = undefined,
+  lineCustomDash: ChartModel['plotAreaLineCustomDash'] = undefined,
+  lineCap: string | null | undefined = undefined,
+  lineJoin: string | null | undefined = undefined,
+  bubble3D = false,
 ): void {
   const sizePx = Math.max(2, sizePt * ptToPx);
   const half = sizePx / 2;
@@ -11549,9 +12476,20 @@ function drawMarker(
         : resolveFill(
             fillPaint, ctx, cx - half, cy - half, sizePx, sizePx, shapeRotationDeg,
           ) ?? 'rgba(0,0,0,0)');
-  if (lineCss) {
-    ctx.strokeStyle = lineCss;
+  const resolvedLineStyle = linePaint === undefined
+    ? lineCss
+    : linePaint == null
+      ? null
+      : resolveFill(
+          linePaint, ctx, cx - half, cy - half, sizePx, sizePx, shapeRotationDeg,
+        );
+  const hasLine = resolvedLineStyle != null;
+  if (resolvedLineStyle) {
+    ctx.strokeStyle = resolvedLineStyle;
     ctx.lineWidth = lineWidthPx;
+    ctx.setLineDash(dashPatternForLine(lineCustomDash, lineDash, lineWidthPx));
+    ctx.lineCap = lineCap === 'rnd' ? 'round' : lineCap === 'sq' ? 'square' : 'butt';
+    ctx.lineJoin = lineJoin === 'round' || lineJoin === 'bevel' ? lineJoin : 'miter';
   }
   const imageFill = fillPaint?.fillType === 'image' ? fillPaint : undefined;
   const fillCurrentPath = () => {
@@ -11566,16 +12504,20 @@ function drawMarker(
     );
     ctx.restore();
   };
+  const paintMaterial = () => {
+    if (bubble3D && fillPaint !== null) paintBubble3DMaterial(ctx, cx, cy, sizePx);
+  };
   switch (symbol) {
     case 'square': {
-      if (imageFill) {
+      if (imageFill || bubble3D) {
         ctx.beginPath();
         ctx.rect(cx - half, cy - half, sizePx, sizePx);
         fillCurrentPath();
+        paintMaterial();
       } else if (fillPaint !== null) {
         ctx.fillRect(cx - half, cy - half, sizePx, sizePx);
       }
-      if (line) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
+      if (hasLine) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
       break;
     }
     case 'diamond': {
@@ -11586,7 +12528,8 @@ function drawMarker(
       ctx.lineTo(cx - half, cy);
       ctx.closePath();
       fillCurrentPath();
-      if (line) ctx.stroke();
+      paintMaterial();
+      if (hasLine) ctx.stroke();
       break;
     }
     case 'triangle': {
@@ -11596,11 +12539,12 @@ function drawMarker(
       ctx.lineTo(cx - half, cy + half);
       ctx.closePath();
       fillCurrentPath();
-      if (line) ctx.stroke();
+      paintMaterial();
+      if (hasLine) ctx.stroke();
       break;
     }
     case 'x': {
-      ctx.strokeStyle = lineCss ?? ctx.fillStyle;
+      ctx.strokeStyle = resolvedLineStyle ?? ctx.fillStyle;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy - half); ctx.lineTo(cx + half, cy + half);
@@ -11609,7 +12553,7 @@ function drawMarker(
       break;
     }
     case 'plus': {
-      ctx.strokeStyle = lineCss ?? ctx.fillStyle;
+      ctx.strokeStyle = resolvedLineStyle ?? ctx.fillStyle;
       ctx.lineWidth = Math.max(1, sizePx * 0.18);
       ctx.beginPath();
       ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
@@ -11629,7 +12573,8 @@ function drawMarker(
       }
       ctx.closePath();
       fillCurrentPath();
-      if (line) ctx.stroke();
+      paintMaterial();
+      if (hasLine) ctx.stroke();
       break;
     }
     case 'dot': {
@@ -11637,29 +12582,34 @@ function drawMarker(
       ctx.beginPath();
       ctx.ellipse(cx, cy, sizePx * 0.25, sizePx * 0.1, 0, 0, Math.PI * 2);
       fillCurrentPath();
-      if (line) ctx.stroke();
+      paintMaterial();
+      if (hasLine) ctx.stroke();
       break;
     }
     case 'dash': {
       // ECMA-376 §21.2.3.27: height=1/5 of marker size.
       const dh = sizePx * 0.2;
-      if (imageFill) {
+      if (imageFill || bubble3D) {
         ctx.beginPath(); ctx.rect(cx - half, cy - dh / 2, sizePx, dh); fillCurrentPath();
+        paintMaterial();
       } else if (fillPaint !== null) {
         ctx.fillRect(cx - half, cy - dh / 2, sizePx, dh);
       }
-      if (line) ctx.strokeRect(cx - half, cy - dh / 2, sizePx, dh);
+      if (hasLine) ctx.strokeRect(cx - half, cy - dh / 2, sizePx, dh);
       break;
     }
     case 'picture': {
+      ctx.beginPath();
+      ctx.rect(cx - half, cy - half, sizePx, sizePx);
       if (imageFill) {
         paintChartImageFill(
           ctx, imageFill, cx - half, cy - half, sizePx, sizePx, ptToPx, shapeRotationDeg,
         );
       }
+      paintMaterial();
       // Fill and line are independent CT_ShapeProperties components. An
       // authored noFill/unresolved blip must not suppress the picture outline.
-      if (line) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
+      if (hasLine) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
       ctx.restore();
       return;
     }
@@ -11668,7 +12618,8 @@ function drawMarker(
       ctx.beginPath();
       ctx.arc(cx, cy, half, 0, Math.PI * 2);
       fillCurrentPath();
-      if (line) ctx.stroke();
+      paintMaterial();
+      if (hasLine) ctx.stroke();
       break;
     }
   }
@@ -12596,12 +13547,7 @@ function chartExStyleColor(
   index: number,
   _count: number,
 ): string | null {
-  const colors = kind === 'fill' ? style?.fillColors : style?.lineColors;
-  if (!colors?.length) return null;
-  const fixedIndex = kind === 'fill' ? style?.fillColorIndex : style?.lineColorIndex;
-  // Style-role colors are already effective: ooxml-common applies the Chart
-  // Colors base mapping before CT_StyleColor and style-matrix transforms.
-  return colors[(fixedIndex ?? index) % colors.length] ?? null;
+  return chartStyleColor(style, kind, index);
 }
 
 function chartExPaletteColor(
@@ -12650,18 +13596,28 @@ function chartExStyleFillPaint(
   style: ChartExStyle | null | undefined,
   index: number,
 ): Fill | null {
-  const paints = style?.fillPaints;
-  if (!paints?.length) return null;
-  return paints[(style?.fillColorIndex ?? index) % paints.length] ?? null;
+  return chartStyleFillPaint(style, index);
 }
 
 function chartExStyleLinePaint(
   style: ChartExStyle | null | undefined,
   index: number,
 ): ChartModel['plotAreaLineFill'] {
-  const paints = style?.linePaints;
-  if (!paints?.length) return null;
-  return paints[(style?.lineColorIndex ?? index) % paints.length] ?? null;
+  return chartStyleLinePaint(style, index);
+}
+
+/** Line-paint counterpart of chartExStylePaintDecision. `undefined` means the
+ * layer did not author a line paint, while `null` is an authored noFill or an
+ * authored-but-unresolved paint that must suppress lower-precedence color. */
+function chartExStyleLinePaintDecision(
+  chart: ChartModel,
+  style: ChartExStyle | null | undefined,
+  index: number,
+  count: number,
+): ChartModel['plotAreaLineFill'] | null | undefined {
+  void chart;
+  void count;
+  return chartStyleLineDecision(style, index);
 }
 
 /** Resolve one ChartEx style paint layer. `undefined` means this layer supplied
@@ -12673,13 +13629,9 @@ function chartExStylePaintDecision(
   index: number,
   count: number,
 ): Fill | null | undefined {
-  if (!style) return undefined;
-  if (style.fillHidden) return style.fillNoStyle ? undefined : null;
-  const paint = chartExStyleFillPaint(style, index);
-  if (paint) return paint;
-  const color = chartExStyleColor(chart, style, 'fill', index, count);
-  if (color) return { fillType: 'solid', color };
-  return style.fillPaintAuthored === true ? null : undefined;
+  void chart;
+  void count;
+  return chartStyleFillDecision(style, index);
 }
 
 function chartExMarkerPaint(
@@ -12900,8 +13852,8 @@ function chartExLegendSeries(
 // Marker gradients are resolved for each painted marker. Bound both one
 // recipe and the chart-wide stop registrations so a valid public model cannot
 // turn a bounded point count into unbounded synchronous Canvas work.
-const MAX_CANVAS_MARKER_GRADIENT_STOPS = 4_096;
-const MAX_CANVAS_MARKER_PAINT_COMPONENTS = 1_048_576;
+const MAX_CANVAS_MARKER_GRADIENT_STOPS = MAX_CHART_PAINT_RECIPE_COMPONENTS;
+const MAX_CANVAS_MARKER_PAINT_COMPONENTS = MAX_CHART_PAINT_COMPONENTS;
 const MAX_CANVAS_LABEL_GRADIENT_STOPS = MAX_CANVAS_MARKER_GRADIENT_STOPS;
 const MAX_CANVAS_LABEL_PAINT_COMPONENTS = MAX_CANVAS_MARKER_PAINT_COMPONENTS;
 // The package parser already applies its XML-depth ceiling. Keep the same kind
@@ -12987,8 +13939,12 @@ export function classicMarkerPaintWorkCount(
   const hasClassicMarkers = classicCanvasPointFamilyIsPainted(chart.chartType);
   const hasBoxMarkers = chart.chartexBox != null;
   if (!hasClassicMarkers && !hasBoxMarkers) return null;
-  const scatterHasNumericX = chart.series.some(series => {
-    const family = series.seriesType ?? chart.chartType;
+  const plotGroupBySeries = indexChartPlotGroups(chart);
+  const scatterHasNumericX = chart.series.some((series, seriesIndex) => {
+    const group = plotGroupBySeries[seriesIndex];
+    const family = group?.kind === 'bubble' || group?.kind === 'scatter'
+      ? 'scatter'
+      : series.seriesType ?? (chart.chartType === 'bubble' ? 'scatter' : chart.chartType);
     if (family !== 'scatter') return false;
     return (series.categories ?? chart.categories).some(category =>
       Number.isFinite(Number.parseFloat(category))
@@ -12998,7 +13954,7 @@ export function classicMarkerPaintWorkCount(
     && chartCategories(chart).length > 0
     && chart.dataTable?.showKeys === true;
   const deletedLegendEntries = deletedLegendEntryIndices(chart);
-  const bubbleScale = chart.chartType === 'bubble' && chartRect
+  const legacyBubbleScale = chart.chartType === 'bubble' && chartRect
     ? bubbleSizeToDiameterScale(
         chart,
         chart.series.map((series, index) => makeScatterSeriesLayer(chart, series, index)),
@@ -13007,7 +13963,28 @@ export function classicMarkerPaintWorkCount(
         chartRect.h,
       )
     : 0;
+  const bubbleScaleByGroup = new Map<NonNullable<ChartModel['plotGroups']>[number], number>();
+  if (chartRect) for (const group of chart.plotGroups ?? []) {
+    if (group.kind !== 'bubble' || group.seriesCount === 0) continue;
+    const layers = chart.series
+      .slice(group.seriesStart, group.seriesStart + group.seriesCount)
+      .map((series, offset) => makeScatterSeriesLayer(chart, series, group.seriesStart + offset));
+    bubbleScaleByGroup.set(group, bubbleSizeToDiameterScale({
+      bubbleScale: group.bubbleScale ?? chart.bubbleScale,
+      bubbleSizeRepresents: group.bubbleSizeRepresents ?? chart.bubbleSizeRepresents,
+      showNegativeBubbles: group.showNegativeBubbles ?? chart.showNegativeBubbles,
+    }, layers, !scatterHasNumericX, chartRect.w, chartRect.h));
+  }
   let total = 0;
+  const chargeComponents = (components: number, repetitions = 1): boolean => {
+    if (repetitions <= 0 || components <= 0) return true;
+    if (!Number.isSafeInteger(repetitions)
+      || components > Math.floor((MAX_CANVAS_MARKER_PAINT_COMPONENTS - total) / repetitions)) {
+      return false;
+    }
+    total += components * repetitions;
+    return true;
+  };
   const chargePaint = (
     paint: Fill | null | undefined,
     repetitions = 1,
@@ -13020,16 +13997,32 @@ export function classicMarkerPaintWorkCount(
     if (paint.fillType === 'gradient' && components > MAX_CANVAS_MARKER_GRADIENT_STOPS) {
       return false;
     }
-    if (!Number.isSafeInteger(repetitions)
-      || components > Math.floor((MAX_CANVAS_MARKER_PAINT_COMPONENTS - total) / repetitions)) {
-      return false;
-    }
-    total += components * repetitions;
-    return true;
+    return chargeComponents(components, repetitions);
   };
   if (hasClassicMarkers) for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
     const series = chart.series[seriesIndex];
-    const family = series.seriesType ?? chart.chartType;
+    const group = plotGroupBySeries[seriesIndex];
+    const isBubble = group?.kind === 'bubble'
+      || (group == null && chart.chartType === 'bubble');
+    const family = group?.kind === 'bubble' || group?.kind === 'scatter'
+      ? 'scatter'
+      : series.seriesType ?? (chart.chartType === 'bubble' ? 'scatter' : chart.chartType);
+    const effectiveChartType = markerChartTypeForPlotGroup(chart.chartType, group);
+    const effectiveScatterStyle = group?.scatterStyle ?? chart.scatterStyle;
+    const effectiveRadarStyle = group?.radarStyle ?? chart.radarStyle;
+    const markerContext = {
+      chartType: effectiveChartType,
+      bubbleScale: group?.bubbleScale ?? chart.bubbleScale,
+      showNegativeBubbles: group?.showNegativeBubbles ?? chart.showNegativeBubbles,
+    };
+    const bubbleSettings = isBubble ? {
+      bubbleScale: markerContext.bubbleScale,
+      bubbleSizeRepresents: group?.bubbleSizeRepresents ?? chart.bubbleSizeRepresents,
+      showNegativeBubbles: markerContext.showNegativeBubbles,
+    } : undefined;
+    const bubbleScale = group?.kind === 'bubble'
+      ? bubbleScaleByGroup.get(group) ?? 0
+      : legacyBubbleScale;
     const markerFamily = family === 'line' || family === 'stackedLine'
       || family === 'stackedLinePct' || family === 'area'
       || family === 'stackedArea' || family === 'stackedAreaPct'
@@ -13041,7 +14034,7 @@ export function classicMarkerPaintWorkCount(
     // point-local marker overrides. Bubble geometry is unaffected by the
     // scatter style token and therefore remains chargeable.
     if (markersSuppressedByChartStyle(
-      family, chart.chartType, chart.scatterStyle, chart.radarStyle,
+      family, effectiveChartType, effectiveScatterStyle, effectiveRadarStyle,
     )) continue;
     const areaFamily = family === 'area' || family === 'stackedArea'
       || family === 'stackedAreaPct';
@@ -13060,37 +14053,65 @@ export function classicMarkerPaintWorkCount(
     const overrides = indexPointOverrides(series.dataPointOverrides);
     for (let index = 0; index < pointCount; index++) {
       if (!classicMarkerPointIsPainted(
-        chart, series, family, index, scatterHasNumericX,
+        chart, series, family, index, scatterHasNumericX, markerContext,
       )) continue;
+      if (isBubble
+        && (bubbleScale <= 0
+          || visibleBubbleSize(bubbleSettings!, series.bubbleSizes?.[index]) == null)) continue;
       const point = overrides.get(index);
       const symbol = effectiveMarkerSymbol(series, point, 'circle', seriesVisible);
       if (!markerSymbolConsumesFill(symbol)) continue;
-      const paint = markerFillPaintFor(series, point, index);
+      const bubblePaint = isBubble
+        ? bubblePointFill(chart, series, point, index, chartColor(seriesIndex, series))
+        : null;
+      const paint = isBubble
+        ? bubblePaint!.paint
+        : markerFillPaintFor(series, point, index);
       let sizePx = Math.max(2, (point?.markerSize ?? series.markerSize ?? 5) * ptToPx);
-      if (family === 'scatter' && chart.chartType === 'bubble') {
-        const size = visibleBubbleSize(chart, series.bubbleSizes?.[index]);
-        sizePx = size == null ? 0 : bubbleSizeMagnitude(chart, size) * bubbleScale;
+      if (family === 'scatter' && isBubble) {
+        const size = visibleBubbleSize(bubbleSettings!, series.bubbleSizes?.[index]);
+        sizePx = size == null ? 0 : bubbleSizeMagnitude(bubbleSettings!, size) * bubbleScale;
       } else if (family === 'radar' && point?.markerSize == null && series.markerSize == null
         && chartRect) {
         sizePx = Math.max(4 * ptToPx, Math.min(chartRect.w, chartRect.h) * 0.025);
       }
       if (!chargePaint(paint, 1, sizePx)) return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+      if (isBubble) {
+        const linePaint = bubblePointLine(chart, series, point, index).paint;
+        if (!chargePaint(linePaint, 1, sizePx)) {
+          return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+        }
+        if (bubblePointIsThreeD(series, point) && bubblePaint!.paint !== null
+          && !chargeComponents(BUBBLE_3D_MATERIAL_COMPONENTS)) {
+          return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
+        }
+      }
     }
 
     const seriesKeySymbol = series.markerSymbol ?? (family === 'stock' ? 'none' : 'circle');
     if (markerSymbolConsumesFill(seriesKeySymbol) && seriesLegendMarkerIsVisible(
-      chart.chartType, chart.scatterStyle, series, chart.radarStyle,
+      effectiveChartType, effectiveScatterStyle, series, effectiveRadarStyle,
     )) {
       const legendEntryDeleted = deletedLegendEntries.has(seriesIndex);
       const labelKeys = dataLabelLegendKeyCount(
-        chart, series, family, pointCount, scatterHasNumericX,
+        chart, series, family, pointCount, scatterHasNumericX, markerContext,
       );
       const keySizes = markerKeyPaintSizesPx(chart, series, ptToPx);
-      const keyPaint = seriesMarkerFillPaint(series);
+      const bubbleKeyFill = isBubble
+        ? bubblePointFill(chart, series, undefined, seriesIndex, chartColor(seriesIndex, series))
+        : null;
+      const keyPaint = isBubble ? bubbleKeyFill!.paint : seriesMarkerFillPaint(series);
+      const bubbleKeyLine = isBubble ? bubblePointLine(chart, series, undefined, seriesIndex) : null;
+      const chargeKey = (repetitions: number, sizePx: number): boolean =>
+        chargePaint(keyPaint, repetitions, sizePx)
+        && (!isBubble || chargePaint(bubbleKeyLine!.paint, repetitions, sizePx))
+        && (!isBubble || !bubblePointIsThreeD(series, undefined)
+          || bubbleKeyFill!.paint === null
+          || chargeComponents(BUBBLE_3D_MATERIAL_COMPONENTS, repetitions));
       if ((chart.showLegend && !legendEntryDeleted
-          && !chargePaint(keyPaint, 1, keySizes.legend))
-        || (dataTableMarkerKeysVisible && !chargePaint(keyPaint, 1, keySizes.table))
-        || !chargePaint(keyPaint, labelKeys, keySizes.labels)) {
+          && !chargeKey(1, keySizes.legend))
+        || (dataTableMarkerKeysVisible && !chargeKey(1, keySizes.table))
+        || !chargeKey(labelKeys, keySizes.labels)) {
         return MAX_CANVAS_MARKER_PAINT_COMPONENTS + 1;
       }
     }
@@ -15793,6 +16814,40 @@ function renderChartImpl(
       return;
     }
 
+    const plotDispatch = classicPlotDispatch(chart);
+    if (plotDispatch === 'unsupported') {
+      ctx.fillStyle = '#888';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Unsupported chart', x + w / 2, y + h / 2);
+      drawChartTextBoxes(ctx, chart, rect, ptToPx);
+      return;
+    }
+
+    if (plotDispatch !== 'legacy') {
+      switch (plotDispatch) {
+        case 'bar-combo':
+          renderBarChart(ctx, chart, rect, ptToPx, {}, shapeRotationDeg);
+          break;
+        case 'line-groups':
+          renderLineChart(ctx, chart, rect, ptToPx, shapeRotationDeg);
+          break;
+        case 'area-groups':
+          renderAreaChart(ctx, chart, rect, ptToPx, shapeRotationDeg);
+          break;
+        case 'scatter-bubble':
+          renderScatterChart(ctx, chart, rect, ptToPx, shapeRotationDeg);
+          break;
+        case 'stock-line':
+          renderStockChart(ctx, chart, rect, ptToPx, shapeRotationDeg);
+          break;
+      }
+      drawChartDisplayUnitLabels(ctx, chart, rect, ptToPx);
+      drawChartTextBoxes(ctx, chart, rect, ptToPx);
+      return;
+    }
+
     // Classic 3-D groups keep their canonical 2-D family name in the shared
     // model, while `threeD` carries the authored view/depth contract.  Consume
     // that contract before ordinary dispatch; 2-D charts return false and keep
@@ -15856,6 +16911,7 @@ function renderChartImpl(
       case 'stock':
         renderStockChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'surface':
+      case 'surface3D':
         renderSurfaceChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
       case 'boxWhisker':
         renderBoxWhiskerChart(ctx, chart, rect, ptToPx, shapeRotationDeg); break;
@@ -15868,7 +16924,11 @@ function renderChartImpl(
         ctx.font = '11px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`Chart: ${chart.chartType}`, x + w / 2, y + h / 2);
+        // The public model can carry a future layout identifier of arbitrary
+        // length. Preserve that identifier in the model, but keep the
+        // fail-closed paint path constant-work instead of shaping attacker-
+        // controlled text that is not part of the rendered document.
+        ctx.fillText('Unsupported chart', x + w / 2, y + h / 2);
     }
     drawChartDisplayUnitLabels(ctx, chart, rect, ptToPx);
     drawChartTextBoxes(ctx, chart, rect, ptToPx);

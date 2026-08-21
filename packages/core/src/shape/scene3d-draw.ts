@@ -18,6 +18,13 @@ import { createAuxCanvas } from './effects';
 type AnyCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 type AnyImage = CanvasImageSource;
 
+export interface ProjectedSourceRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
 /** 3×3 homography in row-major order. */
 type H = [number, number, number, number, number, number, number, number, number];
 
@@ -233,6 +240,7 @@ function warpRecursive(
   base: Affine,
   bleedDevScale: number,
   h: H,
+  source: ProjectedSourceRect,
   u0: number,
   v0: number,
   u1: number,
@@ -266,10 +274,12 @@ function warpRecursive(
     // Draw as two affine triangles' worth via a single parallelogram derived
     // from the TL/TR/BL corners. The mesh is fine enough that the BR corner's
     // residual is within tol, so one affine cell suffices.
-    const sx0 = u0 * imgW;
-    const sy0 = v0 * imgH;
-    const sx1 = u1 * imgW;
-    const sy1 = v1 * imgH;
+    const sourceW = source.x1 - source.x0;
+    const sourceH = source.y1 - source.y0;
+    const sx0 = source.x0 + u0 * sourceW;
+    const sy0 = source.y0 + v0 * sourceH;
+    const sx1 = source.x0 + u1 * sourceW;
+    const sy1 = source.y0 + v1 * sourceH;
     drawCell(ctx, img, imgW, imgH, base, bleedDevScale, sx0, sy0, sx1, sy1, c00, c10, c01);
     return;
   }
@@ -278,11 +288,15 @@ function warpRecursive(
   const du = u1 - u0;
   const dv = v1 - v0;
   if (du >= dv) {
-    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, u0, v0, um, v1, tol, depth - 1);
-    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, um, v0, u1, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, source,
+      u0, v0, um, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, source,
+      um, v0, u1, v1, tol, depth - 1);
   } else {
-    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, u0, v0, u1, vm, tol, depth - 1);
-    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, u0, vm, u1, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, source,
+      u0, v0, u1, vm, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, source,
+      u0, vm, u1, v1, tol, depth - 1);
   }
 }
 
@@ -297,6 +311,8 @@ function warpRecursive(
  *                 mesh subdivides until every cell is within this. Default 0.5px
  *                 (sub-pixel — invisible at 1× and most HiDPI ratios). Not a
  *                 magic cell count: the subdivision is error-driven.
+ * @param sourceRect optional bounded source-pixel rectangle mapped across the
+ *                   full destination quad. Omitted maps the complete source.
  *
  * ## Seam removal (mesh continuity)
  * Two artefacts produce a visible grid of cell seams in flat / textured regions:
@@ -326,8 +342,13 @@ export function drawProjected(
   srcH: number,
   corners: [Vec2, Vec2, Vec2, Vec2],
   tol = 0.5,
+  sourceRect?: ProjectedSourceRect,
 ): void {
   if (srcW <= 0 || srcH <= 0) return;
+  const source = sourceRect ?? { x0: 0, y0: 0, x1: srcW, y1: srcH };
+  if (![source.x0, source.y0, source.x1, source.y1].every(Number.isFinite)
+    || source.x0 < 0 || source.y0 < 0 || source.x1 > srcW || source.y1 > srcH
+    || source.x1 <= source.x0 || source.y1 <= source.y0) return;
   // Reject a degenerate (near-zero-area) destination quad. The signed area of
   // the polygon TL,TR,BR,BL via the shoelace formula; |area| ~ 0 means the quad
   // collapsed to a line / point and there is nothing to draw.
@@ -357,7 +378,9 @@ export function drawProjected(
   // ── Supersampled path ────────────────────────────────────────────────────
   // Render the mesh into an intermediate buffer at SUPERSAMPLE× the device
   // resolution of the quad's bounding box, then blit it down in one go.
-  if (drawProjectedSupersampled(src, dst, srcW, srcH, corners, base, dstDevScale, h, tol, MAX_DEPTH)) {
+  if (drawProjectedSupersampled(
+    src, dst, srcW, srcH, corners, base, dstDevScale, h, source, tol, MAX_DEPTH,
+  )) {
     return;
   }
 
@@ -379,7 +402,8 @@ export function drawProjected(
   dst.lineTo(corners[3].x, corners[3].y);
   dst.closePath();
   dst.clip();
-  warpRecursive(dst, src, srcW, srcH, base, dstDevScale, h, 0, 0, 1, 1, tol, MAX_DEPTH);
+  warpRecursive(dst, src, srcW, srcH, base, dstDevScale, h, source,
+    0, 0, 1, 1, tol, MAX_DEPTH);
   dst.restore();
 }
 
@@ -480,6 +504,7 @@ function drawProjectedSupersampled(
   base: Affine,
   dstDevScale: number,
   h: H,
+  source: ProjectedSourceRect,
   tol: number,
   maxDepth: number,
 ): boolean {
@@ -553,7 +578,8 @@ function drawProjectedSupersampled(
   // NOT auxBase's scale — auxBase is S× larger, and sizing the bleed off it would
   // leave only BLEED_DEVICE_PX/S device px of overlap after the downscale, which
   // reopens the transparent cell-seam cracks at large shape sizes.
-  warpRecursive(actx, dstSrc, srcW, srcH, auxBase, dstDevScale, h, 0, 0, 1, 1, tol * s, maxDepth);
+  warpRecursive(actx, dstSrc, srcW, srcH, auxBase, dstDevScale, h, source,
+    0, 0, 1, 1, tol * s, maxDepth);
   actx.restore();
 
   // Blit the intermediate down onto dst. The intermediate covers device-px box

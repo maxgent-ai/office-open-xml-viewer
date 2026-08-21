@@ -23,6 +23,7 @@ export class PptxEditorViewBinding {
   #pending: 'all' | Set<number> | undefined;
   #requestedRevision = 0;
   #renderedRevision = 0;
+  #slideCount: number;
   #running = false;
   #disposed = false;
 
@@ -30,6 +31,7 @@ export class PptxEditorViewBinding {
     this.#session = options.session;
     this.#host = options.host;
     this.#onRenderError = options.onRenderError ?? reportRenderError;
+    this.#slideCount = this.#session.getSnapshot().presentation.slides.length;
     this.#unsubscribeSession = this.#session.subscribe((change) => {
       this.#handleSessionChange(change);
     });
@@ -61,7 +63,15 @@ export class PptxEditorViewBinding {
   }
 
   #handleSessionChange(change: PptxEditorSessionChange): void {
-    if (this.#disposed || change.changedSlideIds.length === 0) return;
+    if (this.#disposed) return;
+    const nextSlideCount = change.snapshot.presentation.slides.length;
+    const slideListChanged = nextSlideCount !== this.#slideCount;
+    this.#slideCount = nextSlideCount;
+    if (slideListChanged) {
+      this.#queueApply('all');
+      return;
+    }
+    if (change.changedSlideIds.length === 0) return;
     const changed = new Set(change.changedSlideIds);
     const indexes: number[] = [];
     for (const [index, slide] of change.snapshot.presentation.slides.entries()) {

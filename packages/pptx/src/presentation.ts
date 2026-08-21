@@ -886,6 +886,41 @@ export class PptxPresentation {
     }
   }
 
+  /**
+   * Replace the complete in-memory slide list used by subsequent main-thread renders.
+   *
+   * @internal Used by `@maxgent/ooxml-pptx-editor` for optimistic slide insertion
+   * and rollback; not part of the public `@maxgent/ooxml/pptx` API.
+   */
+  replaceSlideList(slides: readonly Slide[]): void {
+    this._assertResourceHealthy();
+    if (this._mode === 'worker') {
+      throw new Error(
+        "replaceSlideList is unavailable in mode: 'worker'; use mode: 'main' for editor-driven slide updates",
+      );
+    }
+    const current = this._preflight;
+    const repository = this._slides;
+    if (!current || !repository) throw new Error('Presentation not loaded');
+
+    const nextSlides = [...slides];
+    const nextPreflight = normalizePresentationPreflight({
+      ...current,
+      slideCount: nextSlides.length,
+      slides: nextSlides.map((slide, index) => ({
+        index,
+        ...(slide.partName === undefined ? {} : { partName: slide.partName }),
+        notes: slide.notes ?? null,
+        hidden: slide.hidden ?? false,
+        mediaElements: slide.elements.filter((element) => element.type === 'media'),
+      })),
+    });
+
+    repository.replaceAll(nextSlides);
+    this._preflight = nextPreflight;
+    this._slidePartIndex = null;
+  }
+
   /** Terminate the worker and release all resources. */
   destroy(): void {
     this._slidePullClient?.cancelAll();

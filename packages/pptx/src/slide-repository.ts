@@ -31,7 +31,7 @@ export interface PptxSlideRepositoryOptions {
  * mutating one after admission would invalidate its recorded structural weight.
  */
 export class PptxSlideRepository {
-  readonly #slideCount: number;
+  #slideCount: number;
   readonly #loadSlide: (slideIndex: number) => Slide | PromiseLike<Slide>;
   readonly #cache: BoundedAsyncLruCache<number, Slide>;
   /** Editor / in-memory replacements that win over {@link #loadSlide}. */
@@ -109,6 +109,17 @@ export class PptxSlideRepository {
     this.#assertSlideIndex(slideIndex);
     this.#overrides.set(slideIndex, slide);
     this.#cache.delete(slideIndex);
+  }
+
+  /** Replace the complete logical slide list while preserving consumer serialization. */
+  replaceAll(slides: readonly Slide[]): void {
+    this.#generation += 1;
+    this.#resourceFailure = undefined;
+    this.#resourceFailureGeneration = undefined;
+    this.#slideCount = slides.length;
+    this.#overrides.clear();
+    for (const [index, slide] of slides.entries()) this.#overrides.set(index, slide);
+    this.#cache.clear();
   }
 
   async #load(slideIndex: number, generation: number): Promise<Slide> {

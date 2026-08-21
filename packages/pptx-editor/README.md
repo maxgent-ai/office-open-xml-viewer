@@ -362,8 +362,8 @@ if (syncState.status === EDITOR_SYNC_STATUSES.HALTED) {
 }
 ```
 
-`resync` requires the same slide **count** as the viewer if a view binding is
-attached (see limitations below).
+If `resync` changes the slide count, the standard view binding replaces the
+in-memory slide list without reloading the PPTX package.
 
 ## View binding
 
@@ -400,7 +400,7 @@ binding.dispose();
 
 Behavior:
 
-- Subscribes to session changes with non-empty `changedSlideIds`.
+- Subscribes to slide changes and slide-count changes.
 - Coalesces rapid mutations: while one apply is in flight, later changes merge
   into the next revision (latest snapshot wins).
 - Passes `changedSlideIndexes` for incremental patches; uses a full apply when
@@ -415,7 +415,8 @@ Behavior:
   JSON used by the next paint.
 - Invalidates find geometry; clears leftover highlight overlays even when the
   visible slide is not redrawn.
-- Throws if slide counts differ, or if the presentation is in `mode: 'worker'`.
+- Replaces the complete in-memory slide list when the slide count changes.
+- Throws if the presentation is in `mode: 'worker'`.
 - Does not own resources. Dispose the binding, viewer, and presentation
   explicitly.
 
@@ -507,12 +508,9 @@ Document these in product code rather than papering over them:
 
 1. **Main-thread presentation only.** The internal slide replacement hook throws
    in `mode: 'worker'`. Load `PptxPresentation` with `{ mode: 'main' }`.
-2. **Fixed viewer slide count.** `InsertSlideMutation` and `RemoveSlideMutation`
-   update the editor model and OfficeCLI file. The current binding and viewer
-   still require a full reload after the slide count changes.
-3. **Slide content only.** The host installs slide models; presentation theme /
+2. **Slide content only.** The host installs slide models; presentation theme /
    size fields on the session snapshot are not pushed into the viewer.
-4. **Slide-origin shapes only.** Master/layout elements are not editable.
+3. **Slide-origin shapes only.** Master/layout elements are not editable.
    OfficeCLI `zorder` is derived from `origin: 'slide'` ordinals before
    `presentationElementIndex`; this matches spTree position for top-level 1:1
    shapes, not for groups / hidden nodes that expand or skip.
@@ -524,8 +522,8 @@ Document these in product code rather than papering over them:
    resolve-then-set for OfficeCLI using paragraph/body/presentation defaults
    (explicit values, not true OOXML attribute removal).
    Character offsets use run-concatenated plain text (OfficeCLI `range` rules).
-5. **Complete `elementSources` required** for any editable slide.
-6. **Bootstrap via `toEditorPresentation()`.** Prefer
+4. **Complete `elementSources` required** for any editable slide.
+5. **Bootstrap via `toEditorPresentation()`.** Prefer
    `await loadedPresentation.toEditorPresentation()` (`mode: 'main'` only) so
    the session JSON comes from the same loaded package the viewer paints.
    Passing a separately parsed `Presentation` remains possible for tests, but

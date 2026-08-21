@@ -5,6 +5,7 @@ import type { Presentation, ShapeElement } from '@maxgent/ooxml/pptx';
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
 import type { ElementRef } from '../../src/domain/mutation';
+import { InsertSlideMutation } from '../../src/mutations/insert-slide';
 import { UpdateTextMutation } from '../../src/mutations/update-text';
 import { PptxEditorViewBindingError } from '../../src/rendering/errors';
 import { PptxEditorViewBinding } from '../../src/rendering/pptx-editor-view-binding';
@@ -178,14 +179,64 @@ describe('PptxEditorViewBinding', () => {
     expect(hostApply).not.toHaveBeenCalled();
     binding.dispose();
   });
+
+  it('full-syncs an optimistic slide insertion and its undo', async () => {
+    const firstSend = deferred<OfficeCliBatchSendResult>();
+    const sendBatch = vi.fn<(
+      batch: OfficeCliBatch,
+    ) => Promise<OfficeCliBatchSendResult>>()
+      .mockReturnValueOnce(firstSend.promise)
+      .mockResolvedValue({ status: OFFICECLI_BATCH_SEND_STATUSES.CONFIRMED });
+    const session = createSession(deck([shape('7', 'first')]), sendBatch);
+    const applies: Array<{
+      readonly slideCount: number;
+      readonly changedSlideIndexes: readonly number[] | undefined;
+    }> = [];
+    const binding = new PptxEditorViewBinding({
+      session,
+      host: createHost(async (presentation, options) => {
+        applies.push({
+          slideCount: presentation.slides.length,
+          changedSlideIndexes: options?.changedSlideIndexes,
+        });
+      }),
+    });
+    await binding.whenIdle();
+
+    const insert = session.submit({
+      id: 'insert-slide',
+      mutations: [new InsertSlideMutation({
+        index: 1,
+        target: { slideId: 'client:slide-2' },
+      })],
+    });
+    await binding.whenIdle();
+    expect(applies).toEqual([
+      { slideCount: 1, changedSlideIndexes: undefined },
+      { slideCount: 2, changedSlideIndexes: undefined },
+    ]);
+
+    const undo = session.undo();
+    await binding.whenIdle();
+    expect(applies).toEqual([
+      { slideCount: 1, changedSlideIndexes: undefined },
+      { slideCount: 2, changedSlideIndexes: undefined },
+      { slideCount: 1, changedSlideIndexes: undefined },
+    ]);
+
+    firstSend.resolve({ status: OFFICECLI_BATCH_SEND_STATUSES.CONFIRMED });
+    await Promise.all([insert.settled, undo.settled]);
+  });
 });
 
-function createSession(presentation: Presentation): PptxEditorSession {
-  const sendBatch = vi.fn<(
+function createSession(
+  presentation: Presentation,
+  sendBatch = vi.fn<(
     batch: OfficeCliBatch,
   ) => Promise<OfficeCliBatchSendResult>>().mockResolvedValue({
     status: OFFICECLI_BATCH_SEND_STATUSES.CONFIRMED,
-  });
+  }),
+): PptxEditorSession {
   return new PptxEditorSession({
     presentation,
     sendBatch,

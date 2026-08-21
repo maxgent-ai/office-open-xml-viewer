@@ -20,6 +20,7 @@ interface MutablePptxPresentation extends PptxEditorLoadedPresentation {
   replaceSlides(
     replacements: ReadonlyArray<{ readonly index: number; readonly slide: Slide }>,
   ): void;
+  replaceSlideList(slides: readonly Slide[]): void;
 }
 
 /**
@@ -36,10 +37,13 @@ export class PptxEditorViewerHost implements PptxEditorViewHost {
     presentation: PptxEditorLoadedPresentation,
   ) {
     const mutablePresentation = presentation as Partial<MutablePptxPresentation>;
-    if (typeof mutablePresentation.replaceSlides !== 'function') {
+    if (
+      typeof mutablePresentation.replaceSlides !== 'function'
+      || typeof mutablePresentation.replaceSlideList !== 'function'
+    ) {
       throw new TypeError(
         'PptxEditorViewerHost requires a compatible @maxgent/ooxml '
-        + 'PptxPresentation with the internal replaceSlides hook',
+        + 'PptxPresentation with the internal slide replacement hooks',
       );
     }
 
@@ -52,16 +56,10 @@ export class PptxEditorViewerHost implements PptxEditorViewHost {
     options: { readonly changedSlideIndexes?: readonly number[] } = {},
   ): Promise<void> {
     const slideCount = presentation.slides.length;
-    if (
+    const slideListChanged = (
       slideCount !== this.#presentation.slideCount
       || slideCount !== this.#viewer.slideCount
-    ) {
-      throw new Error(
-        'PPTX editor view host slide count mismatch: '
-        + `snapshot=${slideCount}, presentation=${this.#presentation.slideCount}, `
-        + `viewer=${this.#viewer.slideCount}`,
-      );
-    }
+    );
 
     const indexes = options.changedSlideIndexes
       ? [...new Set(options.changedSlideIndexes)]
@@ -76,10 +74,15 @@ export class PptxEditorViewerHost implements PptxEditorViewHost {
     });
     const visibleSlideIndex = this.#viewer.slideIndex;
 
-    this.#presentation.replaceSlides(replacements);
+    if (slideListChanged) {
+      this.#presentation.replaceSlideList(presentation.slides);
+    } else {
+      this.#presentation.replaceSlides(replacements);
+    }
     this.#viewer.clearFind();
-    if (indexes.includes(visibleSlideIndex)) {
-      await this.#viewer.goToSlide(visibleSlideIndex);
+    if (slideCount === 0) return;
+    if (slideListChanged || indexes.includes(visibleSlideIndex)) {
+      await this.#viewer.goToSlide(Math.min(visibleSlideIndex, slideCount - 1));
     }
   }
 }

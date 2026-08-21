@@ -19,7 +19,7 @@ describe('PptxEditorViewerHost', () => {
     };
 
     expect(() => new PptxEditorViewerHost(viewer, { slideCount: 1 })).toThrow(
-      'internal replaceSlides hook',
+      'internal slide replacement hooks',
     );
   });
 
@@ -61,23 +61,44 @@ describe('PptxEditorViewerHost', () => {
     expect(clearFind).not.toHaveBeenCalled();
   });
 
-  it('rejects snapshots that do not match the loaded viewer and presentation', async () => {
-    const { host, replaceSlides } = createHost(1, 0);
+  it('replaces the slide list and redraws after inserting a slide', async () => {
+    const presentation = twoSlideDeck();
+    const {
+      host,
+      replaceSlides,
+      replaceSlideList,
+      clearFind,
+      goToSlide,
+    } = createHost(1, 0);
 
-    await expect(host.applyPresentation(twoSlideDeck())).rejects.toThrow(
-      'snapshot=2, presentation=1, viewer=1',
-    );
+    await host.applyPresentation(presentation);
+
+    expect(replaceSlideList).toHaveBeenCalledWith(presentation.slides);
     expect(replaceSlides).not.toHaveBeenCalled();
+    expect(clearFind).toHaveBeenCalledOnce();
+    expect(goToSlide).toHaveBeenCalledWith(0);
+  });
+
+  it('clamps the visible index after undo removes the last slide', async () => {
+    const presentation = deck([shape('7', 'first')]);
+    const { host, replaceSlideList, goToSlide } = createHost(2, 1);
+
+    await host.applyPresentation(presentation);
+
+    expect(replaceSlideList).toHaveBeenCalledWith(presentation.slides);
+    expect(goToSlide).toHaveBeenCalledWith(0);
   });
 });
 
 function createHost(slideCount: number, slideIndex: number): {
   readonly host: PptxEditorViewerHost;
   readonly replaceSlides: ReturnType<typeof vi.fn>;
+  readonly replaceSlideList: ReturnType<typeof vi.fn>;
   readonly clearFind: ReturnType<typeof vi.fn>;
   readonly goToSlide: ReturnType<typeof vi.fn>;
 } {
   const replaceSlides = vi.fn();
+  const replaceSlideList = vi.fn();
   const clearFind = vi.fn();
   const goToSlide = vi.fn().mockResolvedValue(undefined);
   const viewer: PptxEditorBorrowedViewer = {
@@ -89,12 +110,15 @@ function createHost(slideCount: number, slideIndex: number): {
   const presentation = {
     slideCount,
     replaceSlides,
+    replaceSlideList,
   } satisfies PptxEditorLoadedPresentation & {
     replaceSlides: typeof replaceSlides;
+    replaceSlideList: typeof replaceSlideList;
   };
   return {
     host: new PptxEditorViewerHost(viewer, presentation),
     replaceSlides,
+    replaceSlideList,
     clearFind,
     goToSlide,
   };

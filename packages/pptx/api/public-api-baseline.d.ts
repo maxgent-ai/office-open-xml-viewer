@@ -101,6 +101,7 @@ export interface ChartDataPointOverride {
     idx: number;
     color?: string;
     fillHidden?: boolean;
+    chartexStyle?: ChartExElementStyle | null;
     lineColor?: string;
     lineWidthEmu?: number;
     lineDash?: string;
@@ -112,6 +113,7 @@ export interface ChartDataPointOverride {
     markerFillPaintAuthored?: boolean | null;
     markerLine?: string;
     markerLineWidthEmu?: number;
+    bubble3D?: boolean | null;
     explosion?: number;
 }
 export interface ChartDataTable {
@@ -337,6 +339,7 @@ export interface ChartModel {
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
     series: ChartSeries[];
+    plotGroups?: ChartPlotGroup[] | null;
     chartTextBoxes?: ChartTextBox[] | null;
     varyColors?: boolean | null;
     showDataLabels: boolean;
@@ -562,7 +565,9 @@ export interface ChartModel {
 export interface ChartOfPie {
     type: 'pie' | 'bar';
     splitType: 'auto' | 'cust' | 'percent' | 'pos' | 'val';
+    splitTypeAuthored?: boolean | null;
     splitPos?: number | null;
+    splitPosAuthored?: boolean | null;
     customSplitIndices?: number[] | null;
     secondPieSizePercent: number;
     gapWidthPercent: number;
@@ -609,6 +614,10 @@ export interface ChartSeries {
     barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
+    /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
+     * exposes such a lone bubble series as one legend entry per point while a
+     * numeric X source keeps the ordinary one-entry-per-series legend. */
+    bubbleXSourceIsString?: boolean | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
     catFormatCode?: string | null;
@@ -626,6 +635,8 @@ export interface ChartSeries {
     seriesDataLabels?: ChartSeriesDataLabels | null;
     errBars?: ChartErrBars[] | null;
     bubbleSizes?: (number | null)[] | null;
+    bubble3DGroupDefault?: boolean | null;
+    bubble3D?: boolean | null;
     smooth?: boolean | null;
     trendLines?: ChartTrendline[] | null;
     lineHidden?: boolean | null;
@@ -688,6 +699,7 @@ export interface ChartStockUpDownBarStyle {
 type ChartStyleRole = 'axisTitle' | 'categoryAxis' | 'chartArea' | 'dataLabel' | 'dataLabelCallout' | 'dataPoint' | 'dataPoint3D' | 'dataPointLine' | 'dataPointMarker' | 'dataPointWireframe' | 'dataTable' | 'downBar' | 'dropLine' | 'errorBar' | 'floor' | 'gridlineMajor' | 'gridlineMinor' | 'hiLoLine' | 'leaderLine' | 'legend' | 'plotArea' | 'plotArea3D' | 'seriesAxis' | 'seriesLine' | 'title' | 'trendline' | 'trendlineLabel' | 'upBar' | 'valueAxis' | 'wall';
 export interface ChartSurfaceBandFormat {
     idx: number;
+    style?: ChartExElementStyle | null;
     fill?: SolidFill | GradientFill | PatternFill | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
@@ -725,19 +737,38 @@ export interface ChartTextRun {
     paragraphAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
 }
 export interface ChartThreeD {
+    view3DPresent?: boolean | null;
     rotationX?: number | null;
+    rotationXAuthored?: boolean | null;
     rotationY?: number | null;
+    rotationYAuthored?: boolean | null;
     heightPercent?: number | null;
+    heightPercentAuthored?: boolean | null;
     depthPercent?: number | null;
+    depthPercentAuthored?: boolean | null;
     perspective?: number | null;
+    perspectiveAuthored?: boolean | null;
     rightAngleAxes?: boolean | null;
+    rightAngleAxesAuthored?: boolean | null;
     gapDepthPercent?: number | null;
+    gapDepthPercentAuthored?: boolean | null;
     shape?: string | null;
     barGrouping?: 'standard' | 'clustered' | 'stacked' | 'percentStacked' | string | null;
     seriesAxis?: ChartThreeDSeriesAxis | null;
     floor?: ChartThreeDSurface | null;
     sideWall?: ChartThreeDSurface | null;
     backWall?: ChartThreeDSurface | null;
+}
+export interface ChartThreeDPictureOptions {
+    applyToFront?: boolean | null;
+    applyToSides?: boolean | null;
+    applyToEnd?: boolean | null;
+    pictureFormat?: 'stretch' | 'stack' | 'stackScale' | string | null;
+    /** Whether `<c:pictureFormat>` was authored, including an unsupported value. */
+    pictureFormatAuthored?: boolean | null;
+    pictureStackUnit?: number | null;
+    /** Whether `<c:pictureStackUnit>` was authored, including an invalid value. */
+    pictureStackUnitAuthored?: boolean | null;
 }
 export interface ChartThreeDRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
@@ -769,12 +800,15 @@ export interface ChartThreeDSeriesAxis {
     titleManualLayout?: ChartManualLayout | null;
 }
 export interface ChartThreeDSurface {
+    style?: ChartExElementStyle | null;
     fillColor?: string | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
     lineHidden?: boolean | null;
+    thicknessPercent?: number | null;
+    pictureOptions?: ChartThreeDPictureOptions | null;
 }
 export interface ChartTrendline {
     name?: string | null;
@@ -817,6 +851,26 @@ export interface ChartTrendline {
     lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
+export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
+export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
+export interface ChartPlotGroup {
+    kind: ChartPlotGroupKind;
+    seriesStart: number;
+    seriesCount: number;
+    categoryAxis: ChartPlotGroupAxisSlot;
+    valueAxis: ChartPlotGroupAxisSlot;
+    seriesAxis: ChartPlotGroupAxisSlot;
+    axisIds?: string[] | null;
+    grouping?: string | null;
+    barDirection?: string | null;
+    scatterStyle?: string | null;
+    radarStyle?: string | null;
+    gapWidth?: number | null;
+    overlap?: number | null;
+    bubbleScale?: number | null;
+    bubbleSizeRepresents?: 'area' | 'w' | null;
+    showNegativeBubbles?: boolean | null;
+}
 export interface DimOptions {
     color: string;
     opacity: number;

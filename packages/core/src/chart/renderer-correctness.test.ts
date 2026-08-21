@@ -7,8 +7,13 @@
 // captured through a lightweight recording context, complementing the
 // draw-call-signature characterization test.
 
-import { describe, it, expect } from 'vitest';
-import type { ChartModel, ChartSeries, ChartRect } from '../types/chart';
+import { describe, it, expect, vi } from 'vitest';
+import type {
+  ChartModel,
+  ChartRect,
+  ChartSeries,
+  ChartThreeDPictureOptions,
+} from '../types/chart';
 import {
   chartLabelPaintWorkCount,
   classicMarkerPaintWorkCount,
@@ -23,6 +28,7 @@ import {
   collectChartMarkerImageFills,
   collectChartMarkerImageFillsForCharts,
 } from './image-fill.js';
+import { MAX_CANVAS_CHART_POINTS, sourceChartStructureCount } from './resource-limits.js';
 
 const testThreeD = { render: renderSimpleThreeDChart };
 
@@ -33,6 +39,143 @@ it('uses collision-free tuple keys for decoded chart image sources', () => {
     fillType: 'image', stretch: true, imagePath: 'a', svgImagePath: 'b',
     mimeType: 'image/png',
   }));
+});
+
+it('collects only the effective direct bubble point picture', () => {
+  const seriesPicture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/series.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const pointPicture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/point.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const fills = collectChartMarkerImageFills(baseModel({
+    chartType: 'bubble',
+    categories: ['0', '1'],
+    series: [series({
+      values: [0.25, 0.75],
+      bubbleSizes: [100, 100],
+      chartexStyle: { fillPaints: [seriesPicture], fillPaintAuthored: true },
+      dataPointOverrides: [
+        { idx: 0, chartexStyle: { fillPaints: [pointPicture], fillPaintAuthored: true } },
+        { idx: 1, chartexStyle: { fillHidden: true, fillPaintAuthored: true } },
+      ],
+    })],
+  }));
+  expect(fills.map(fill => fill.imagePath)).toEqual(['xl/media/point.png']);
+});
+
+it('collects the linked bubble picture selected by point index after direct colors', () => {
+  const linkedPictures = [0, 1].map(index => ({
+    fillType: 'image' as const,
+    imagePath: `xl/media/linked-${index}.png`,
+    mimeType: 'image/png',
+    stretch: true,
+  }));
+  const fills = collectChartMarkerImageFills(baseModel({
+    chartType: 'bubble',
+    categories: ['0', '1'],
+    chartStyleRoles: {
+      dataPoint: { fillPaints: linkedPictures, fillPaintAuthored: true },
+    },
+    series: [series({
+      values: [0.25, 0.75],
+      bubbleSizes: [100, 100],
+      dataPointColors: ['FF0000', null],
+    })],
+  }));
+  expect(fills.map(fill => fill.imagePath)).toEqual(['xl/media/linked-1.png']);
+});
+
+it('does not prefetch bubble pictures for points whose sizes cannot paint', () => {
+  const picture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/invisible.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const model = baseModel({
+    chartType: 'bubble',
+    categories: ['0', '1', '2'],
+    chartStyleRoles: {
+      dataPoint: { fillPaints: [picture], fillPaintAuthored: true },
+    },
+    series: [series({ values: [1, 2, 3], bubbleSizes: [0, null, -1] })],
+  });
+  expect(collectChartMarkerImageFills(model)).toEqual([]);
+  expect(collectChartMarkerImageFills({ ...model, bubbleScale: 0 })).toEqual([]);
+  expect(collectChartMarkerImageFills({ ...model, showNegativeBubbles: true })).toEqual([]);
+});
+
+it('uses the owning bubble group settings for prefetch and paint work', () => {
+  const picture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/group-bubble.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const model = baseModel({
+    chartType: 'scatter',
+    categories: ['1'],
+    chartStyleRoles: {
+      dataPoint: { fillPaints: [picture], fillPaintAuthored: true },
+    },
+    series: [
+      series({ values: [1], seriesType: 'scatter', markerSymbol: 'none' }),
+      series({ values: [2], seriesType: 'scatter', bubbleSizes: [25] }),
+    ],
+    plotGroups: [
+      plotGroup('scatter', 0, 1, { scatterStyle: 'line' }),
+      plotGroup('bubble', 1, 1, { bubbleScale: 0, showNegativeBubbles: true }),
+    ],
+  });
+  const bitmap = { width: 8, height: 8 } as unknown as CanvasImageSource;
+  expect(collectChartMarkerImageFills(model)).toEqual([]);
+  expect(classicMarkerPaintWorkCount(model, () => bitmap, 1, RECT)).toBe(0);
+
+  const visible = {
+    ...model,
+    plotGroups: [
+      plotGroup('scatter', 0, 1, { scatterStyle: 'line' }),
+      plotGroup('bubble', 1, 1, { bubbleScale: 100, showNegativeBubbles: true }),
+    ],
+  };
+  expect(collectChartMarkerImageFills(visible)).toEqual([picture]);
+  expect(classicMarkerPaintWorkCount(visible, () => bitmap, 1, RECT)).toBe(1);
+  const rec = recordingCtx();
+  renderChartCore(rec.ctx, visible, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+  expect(rec.drawImages).toHaveLength(1);
+});
+
+it('prefetches and paints one bubble picture for both plot and 3-D legend key', () => {
+  const picture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/bubble-key.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const model = baseModel({
+    chartType: 'bubble', showLegend: true, categories: ['0'],
+    series: [series({
+      values: [1], bubbleSizes: [100], bubble3D: true,
+      chartexStyle: {
+        fillPaints: [picture], fillPaintAuthored: true,
+      },
+    })],
+    catAxisMin: 0, catAxisMax: 1, valMin: 0, valMax: 2,
+  });
+  const bitmap = { width: 8, height: 8 } as unknown as CanvasImageSource;
+  expect(collectChartMarkerImageFills(model)).toEqual([picture]);
+  expect(classicMarkerPaintWorkCount(model, () => bitmap, 1, RECT)).toBe(12);
+  const rec = recordingCtx();
+  renderChartCore(rec.ctx, model, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+  expect(rec.drawImages).toHaveLength(2);
+  expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(2);
 });
 const renderChart: typeof renderChartCore = (
   ctx, chart, rect, ptToPx, shapeRotationDeg, threeD = testThreeD,
@@ -62,16 +205,26 @@ interface Recorded {
   clips: Array<{ x: number; y: number; w: number; h: number }>;
   clipCalls: number;
   quadratics: Array<{ cpx: number; cpy: number; x: number; y: number }>;
-  gradients: Array<{ args: number[]; stops: Array<{ position: number; color: string }> }>;
+  gradients: Array<{
+    kind: 'linear' | 'radial';
+    args: number[];
+    stops: Array<{ position: number; color: string }>;
+  }>;
+  compositeModes: string[];
   arcs: Array<{ x: number; y: number; r: number }>;
   ellipses: Array<{ x: number; y: number; rx: number; ry: number }>;
   rotations: number[];
   translations: Array<{ x: number; y: number }>;
   drawImages: unknown[][];
   filledPaths: Array<{ points: Array<{ x: number; y: number }>; fillStyle: string }>;
+  strokedPaths: Array<{ points: Array<{ x: number; y: number }>; strokeStyle: string }>;
+  strokeDetails: Array<{
+    strokeStyle: string; lineWidth: number; dash: number[]; cap: string; join: string;
+  }>;
   paintEvents: Array<
     | { kind: 'stroke'; strokeStyle: string }
     | { kind: 'fill'; fillStyle: string }
+    | { kind: 'rect'; fillStyle: string }
     | { kind: 'text'; text: string }
   >;
 }
@@ -133,12 +286,15 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
   let clipCalls = 0;
   const quadratics: Recorded['quadratics'] = [];
   const gradients: Recorded['gradients'] = [];
+  const compositeModes: string[] = [];
   const arcs: Recorded['arcs'] = [];
   const ellipses: Recorded['ellipses'] = [];
   const rotations: number[] = [];
   const translations: Recorded['translations'] = [];
   const drawImages: unknown[][] = [];
   const filledPaths: Recorded['filledPaths'] = [];
+  const strokedPaths: Recorded['strokedPaths'] = [];
+  const strokeDetails: Recorded['strokeDetails'] = [];
   const paintEvents: Recorded['paintEvents'] = [];
   let dash: number[] = [];
   let pathRect: { x: number; y: number; w: number; h: number } | null = null;
@@ -153,6 +309,7 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
     lineCap: 'butt',
     lineJoin: 'miter',
     globalAlpha: 1,
+    globalCompositeOperation: 'source-over',
   };
   const fontPx = (font: string): number => {
     const m = /(\d+(?:\.\d+)?)px/.exec(font);
@@ -173,8 +330,10 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
         case 'measureText':
           return (t: string) => ({ width: textWidth(t) });
         case 'fillRect':
-          return (x: number, y: number, w: number, h: number) =>
+          return (x: number, y: number, w: number, h: number) => {
+            paintEvents.push({ kind: 'rect', fillStyle: String(state.fillStyle) });
             rects.push({ x, y, w, h, fs: String(state.fillStyle) });
+          };
         case 'fillText':
           return (text: string, x: number, y: number) => {
             paintEvents.push({ kind: 'text', text: String(text) });
@@ -200,7 +359,11 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
         case 'createLinearGradient':
         case 'createRadialGradient':
           return (...args: number[]) => {
-            const gradient = { args, stops: [] as Array<{ position: number; color: string }> };
+            const gradient = {
+              kind: prop === 'createRadialGradient' ? 'radial' as const : 'linear' as const,
+              args,
+              stops: [] as Array<{ position: number; color: string }>,
+            };
             gradients.push(gradient);
             return {
               addColorStop(position: number, color: string) {
@@ -221,8 +384,27 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
             ellipses.push({ x, y, rx, ry });
           };
         case 'save': case 'restore': case 'closePath':
+          return () => paintEvents.push({
+            kind: 'stroke', strokeStyle: String(state.strokeStyle),
+          });
         case 'stroke':
-          return () => paintEvents.push({ kind: 'stroke', strokeStyle: String(state.strokeStyle) });
+          return () => {
+            const strokeStyle = String(state.strokeStyle);
+            paintEvents.push({ kind: 'stroke', strokeStyle });
+            if (pathPoints.length > 0) {
+              strokedPaths.push({
+                points: pathPoints.map(point => ({ ...point })),
+                strokeStyle,
+              });
+            }
+            strokeDetails.push({
+              strokeStyle,
+              lineWidth: Number(state.lineWidth),
+              dash: [...dash],
+              cap: String(state.lineCap),
+              join: String(state.lineJoin),
+            });
+          };
         case 'fill':
           return () => {
             paintEvents.push({ kind: 'fill', fillStyle: String(state.fillStyle) });
@@ -251,13 +433,19 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
           return (angle: number) => { rotations.push(angle); };
         case 'clearRect': case 'strokeText':
         case 'scale':
-        case 'setTransform': case 'resetTransform': case 'getTransform':
+        case 'setTransform': case 'resetTransform':
           return () => undefined;
+        case 'getTransform':
+          return () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
         default:
           return undefined;
       }
     },
-    set(_t, prop: string, value) { state[prop] = value; return true; },
+    set(_t, prop: string, value) {
+      state[prop] = value;
+      if (prop === 'globalCompositeOperation') compositeModes.push(String(value));
+      return true;
+    },
   };
   return {
     ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
@@ -268,12 +456,15 @@ function recordingCtx(measureOverride?: (text: string, fontPx: number) => number
     get clipCalls() { return clipCalls; },
     quadratics,
     gradients,
+    compositeModes,
     arcs,
     ellipses,
     rotations,
     translations,
     drawImages,
     filledPaths,
+    strokedPaths,
+    strokeDetails,
     paintEvents,
   };
 }
@@ -315,7 +506,451 @@ function series(over: Partial<ChartSeries>): ChartSeries {
   return { name: '', color: null, values: [], ...over };
 }
 
+function plotGroup(
+  kind: NonNullable<ChartModel['plotGroups']>[number]['kind'],
+  seriesStart: number,
+  seriesCount: number,
+  over: Partial<NonNullable<ChartModel['plotGroups']>[number]> = {},
+): NonNullable<ChartModel['plotGroups']>[number] {
+  return {
+    kind,
+    seriesStart,
+    seriesCount,
+    categoryAxis: 'primary',
+    valueAxis: 'primary',
+    seriesAxis: 'none',
+    ...over,
+  };
+}
+
 const RECT: ChartRect = { x: 0, y: 0, w: 640, h: 360 };
+
+describe('ordered classic plot groups', () => {
+  it.each([
+    {
+      kind: 'line' as const,
+      chartType: 'line',
+      group: { grouping: 'standard' },
+      seriesType: 'line',
+    },
+    {
+      kind: 'area' as const,
+      chartType: 'area',
+      group: { grouping: 'standard' },
+      seriesType: 'area',
+    },
+    {
+      kind: 'bar' as const,
+      chartType: 'clusteredBar',
+      group: { grouping: 'clustered', barDirection: 'col' },
+      seriesType: 'bar',
+    },
+    {
+      kind: 'scatter' as const,
+      chartType: 'scatter',
+      group: { scatterStyle: 'lineMarker' },
+      seriesType: 'scatter',
+    },
+  ])('keeps a single $kind group byte-equivalent to the legacy projection', entry => {
+    const base = baseModel({
+      chartType: entry.chartType,
+      scatterStyle: entry.kind === 'scatter' ? 'lineMarker' : null,
+      categories: entry.kind === 'scatter' ? ['1', '2'] : ['A', 'B'],
+      series: [series({
+        values: [1, 2], seriesType: entry.seriesType,
+        showMarker: true, markerSymbol: 'circle',
+      })],
+    });
+    const signature = (model: ChartModel) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, model, RECT, 1);
+      return {
+        rects: rec.rects,
+        strokes: rec.strokeDetails,
+        paths: rec.strokedPaths,
+        fills: rec.filledPaths,
+        arcs: rec.arcs,
+        texts: rec.texts,
+      };
+    };
+    expect(signature({
+      ...base,
+      plotGroups: [plotGroup(entry.kind, 0, 1, entry.group)],
+    })).toEqual(signature(base));
+  });
+
+  it('keeps a single negative column group byte-equivalent to the legacy projection', () => {
+    const base = baseModel({
+      chartType: 'clusteredBar',
+      categories: ['Jan', 'Feb', 'Mar', 'Apr'],
+      series: [series({
+        values: [150, -300, 450, -120],
+        seriesType: 'bar',
+        invertIfNegative: true,
+      })],
+    });
+    const signature = (model: ChartModel) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, model, RECT, 1);
+      return {
+        rects: rec.rects,
+        strokes: rec.strokeDetails,
+        paths: rec.strokedPaths,
+        fills: rec.filledPaths,
+        texts: rec.texts,
+      };
+    };
+    expect(signature({
+      ...base,
+      series: base.series.map(entry => ({
+        ...entry,
+        barGroupIndex: 0,
+        barGroupGrouping: 'clustered',
+        barGroupDirection: 'col',
+      })),
+      plotGroups: [plotGroup('bar', 0, 1, {
+        grouping: 'clustered', barDirection: 'col',
+      })],
+    })).toEqual(signature(base));
+  });
+
+  it('fails closed before painting a mixed 2-D and 3-D plot', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: [
+        series({ color: 'FF0000', values: [2], seriesType: 'bar' }),
+        series({ color: '0000FF', values: [3], seriesType: 'bar' }),
+      ],
+      plotGroups: [plotGroup('bar', 0, 1), plotGroup('bar3D', 1, 1)],
+    }), RECT, 1);
+    expect(rec.texts.map(item => item.text)).toContain('Unsupported chart');
+    expect(rec.rects).toEqual([]);
+    expect(rec.filledPaths).toEqual([]);
+  });
+
+  it('composites scatter and bubble groups in source order', () => {
+    const render = (bubbleFirst: boolean): Recorded => {
+      const scatter = series({
+        color: '0066CC', values: [1, 3], categories: ['0', '2'],
+        seriesType: 'scatter', showMarker: false,
+      });
+      const bubble = series({
+        color: 'FF8800', values: [2], categories: ['1'], bubbleSizes: [100],
+        seriesType: 'scatter', markerSymbol: 'circle',
+      });
+      const ordered = bubbleFirst ? [bubble, scatter] : [scatter, bubble];
+      const groups = bubbleFirst
+        ? [
+            plotGroup('bubble', 0, 1, { categoryAxis: 'secondary', valueAxis: 'secondary' }),
+            plotGroup('scatter', 1, 1, { scatterStyle: 'line' }),
+          ]
+        : [
+            plotGroup('scatter', 0, 1, { scatterStyle: 'line' }),
+            plotGroup('bubble', 1, 1, { categoryAxis: 'secondary', valueAxis: 'secondary' }),
+          ];
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'scatter', categories: ['0', '2'], series: ordered, plotGroups: groups,
+        secondaryCatAxis: {
+          min: 0, max: 2, title: null, hidden: false, lineHidden: true,
+          majorTickMark: 'none',
+        },
+        secondaryValAxis: {
+          min: 0, max: 4, title: null, hidden: false, lineHidden: true,
+          majorTickMark: 'none',
+        },
+      }), RECT, 1);
+      return rec;
+    };
+    const eventOrder = (rec: Recorded): [number, number] => [
+      rec.paintEvents.findIndex(event => event.kind === 'stroke' && event.strokeStyle === '#0066CC'),
+      rec.paintEvents.findIndex(event => event.kind === 'fill' && event.fillStyle === '#FF8800'),
+    ];
+    const scatterFirst = eventOrder(render(false));
+    const bubbleFirst = eventOrder(render(true));
+    expect(scatterFirst[0]).toBeGreaterThanOrEqual(0);
+    expect(scatterFirst[1]).toBeGreaterThan(scatterFirst[0]);
+    expect(bubbleFirst[1]).toBeGreaterThanOrEqual(0);
+    expect(bubbleFirst[0]).toBeGreaterThan(bubbleFirst[1]);
+  });
+
+  it('isolates stacked values between separate line groups', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedLine',
+      categories: ['A'],
+      valMin: 0,
+      valMax: 30,
+      series: [
+        series({ values: [10], markerSymbol: 'circle', seriesType: 'line' }),
+        series({ values: [10], markerSymbol: 'circle', seriesType: 'line' }),
+        series({ values: [2], markerSymbol: 'circle', seriesType: 'line' }),
+      ],
+      plotGroups: [
+        plotGroup('line', 0, 2, { grouping: 'stacked' }),
+        plotGroup('line', 2, 1, { grouping: 'standard' }),
+      ],
+    }), RECT, 1);
+    expect(rec.arcs).toHaveLength(3);
+    expect(rec.arcs[1].y).toBeLessThan(rec.arcs[0].y);
+    expect(rec.arcs[2].y).toBeGreaterThan(rec.arcs[0].y);
+    expect(rec.arcs[2].y).toBeGreaterThan(rec.arcs[1].y);
+  });
+
+  it.each(['line', 'area'] as const)(
+    'keeps a secondary percent-stacked %s group on its own normalized axis',
+    kind => {
+      const renderSecondary = (values: [number, number], grouping: string): Recorded => {
+        const rec = recordingCtx();
+        renderChart(rec.ctx, baseModel({
+          chartType: kind,
+          categories: ['A'],
+          valMin: 0,
+          valMax: 100,
+          secondaryValAxis: {
+            min: 0, max: 1, title: null, hidden: false, lineHidden: false,
+            majorTickMark: 'none', formatCode: '0%',
+          },
+          series: [
+            series({ values: [100], markerSymbol: 'none', seriesType: kind }),
+            series({ values: [values[0]], markerSymbol: 'circle', seriesType: kind }),
+            series({ values: [values[1]], markerSymbol: 'circle', seriesType: kind }),
+          ],
+          plotGroups: [
+            plotGroup(kind, 0, 1, { grouping: 'standard' }),
+            plotGroup(kind, 1, 2, { grouping, valueAxis: 'secondary' }),
+          ],
+        }), RECT, 1);
+        return rec;
+      };
+      const percent = renderSecondary([60, 40], 'percentStacked');
+      const normalized = renderSecondary([0.6, 1], 'standard');
+      expect(percent.arcs).toHaveLength(2);
+      expect(percent.arcs.map(arc => arc.y)).toEqual(normalized.arcs.map(arc => arc.y));
+    },
+  );
+
+  it('keeps a percent-stacked area group in ratio space on a raw shared axis', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      valMin: 0,
+      valMax: 100,
+      series: [
+        series({ color: '666666', values: [100], seriesType: 'bar', barGroupIndex: 0 }),
+        series({ color: 'FF0000', values: [60], seriesType: 'area', showMarker: true }),
+        series({ color: '00AA00', values: [40], seriesType: 'area', showMarker: true }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, { grouping: 'clustered', barDirection: 'col' }),
+        plotGroup('area', 1, 2, { grouping: 'percentStacked' }),
+      ],
+    }), RECT, 1);
+    expect(rec.arcs).toHaveLength(2);
+    expect(rec.arcs.every(arc => arc.y > RECT.h * 0.65)).toBe(true);
+    expect(rec.arcs[1].y).toBeLessThan(rec.arcs[0].y);
+  });
+
+  it.each([
+    { chartType: 'clusteredBar', firstDirection: 'col', secondDirection: 'bar' },
+    { chartType: 'clusteredBarH', firstDirection: 'bar', secondDirection: 'col' },
+  ] as const)('retains mixed bar directions over the first group axes ($chartType)', ({
+    chartType, firstDirection, secondDirection,
+  }) => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType,
+      categories: ['A', 'B', 'C', 'D', 'E', 'F'],
+      valMin: 0,
+      valMax: 5,
+      series: [
+        series({ color: 'FF0000', values: [4, 4, 4, 4, 4, 4], seriesType: 'bar', barGroupIndex: 0, barGroupDirection: firstDirection }),
+        series({ color: '0000FF', values: [3, 3, 3, 3, 3, 3], seriesType: 'bar', barGroupIndex: 1, barGroupDirection: secondDirection }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, { grouping: 'clustered', barDirection: firstDirection }),
+        plotGroup('bar', 1, 1, { grouping: 'clustered', barDirection: secondDirection }),
+      ],
+    }), RECT, 1);
+    const red = rec.rects.find(rect => rect.fs === '#FF0000');
+    const blue = rec.rects.find(rect => rect.fs === '#0000FF');
+    expect(red).toBeDefined();
+    expect(blue).toBeDefined();
+    const first = red as NonNullable<typeof red>;
+    const second = blue as NonNullable<typeof blue>;
+    expect(firstDirection === 'bar' ? first.w > first.h : first.h > first.w).toBe(true);
+    expect(secondDirection === 'bar' ? second.w > second.h : second.h > second.w).toBe(true);
+    expect(rec.texts.map(item => item.text)).not.toContain('Unsupported chart');
+  });
+
+  it('does not extrapolate mixed bar-direction ownership beyond the observed pair', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      series: [
+        series({ values: [1], seriesType: 'bar' }),
+        series({ values: [2], seriesType: 'bar' }),
+        series({ values: [3], seriesType: 'bar' }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, { barDirection: 'col' }),
+        plotGroup('bar', 1, 1, { barDirection: 'bar' }),
+        plotGroup('bar', 2, 1, { barDirection: 'col' }),
+      ],
+    }), RECT, 1);
+    expect(rec.texts.map(item => item.text)).toContain('Unsupported chart');
+    expect(rec.rects).toEqual([]);
+  });
+
+  it.each([
+    { overlayKind: 'line' as const, overlayEvent: 'stroke' as const },
+    { overlayKind: 'area' as const, overlayEvent: 'fill' as const },
+  ])('keeps the observed fixed bar/$overlayKind family layer after reversed XML order', ({
+    overlayKind, overlayEvent,
+  }) => {
+    const rec = recordingCtx();
+    const overlay = series({
+      color: 'FF0000', lineColor: 'FF0000', values: [2, 3],
+      seriesType: overlayKind, showMarker: false,
+    });
+    const bar = series({
+      color: '0000FF', values: [1, 2], seriesType: 'bar', barGroupIndex: 1,
+    });
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar', categories: ['A', 'B'],
+      // The overlay precedes the bar in XML/model order. Office nevertheless
+      // keeps line above bars and area behind bars for these observed pairs.
+      series: [overlay, bar],
+      plotGroups: [
+        plotGroup(overlayKind, 0, 1, { grouping: 'standard' }),
+        plotGroup('bar', 1, 1, { grouping: 'clustered', barDirection: 'col' }),
+      ],
+    }), RECT, 1);
+    const overlayIndex = rec.paintEvents.findIndex(event => overlayEvent === 'fill'
+      ? event.kind === 'fill' && event.fillStyle === '#FF0000'
+      : event.kind === 'stroke' && event.strokeStyle === '#FF0000');
+    const barIndex = rec.paintEvents.findIndex(event =>
+      event.kind === 'rect' && event.fillStyle === '#0000FF'
+    );
+    expect(overlayIndex).toBeGreaterThanOrEqual(0);
+    expect(barIndex).toBeGreaterThanOrEqual(0);
+    if (overlayKind === 'line') expect(overlayIndex).toBeGreaterThan(barIndex);
+    else expect(overlayIndex).toBeLessThan(barIndex);
+  });
+
+  it.each(['line', 'area'] as const)(
+    'fails closed for an unimplemented secondary category-axis %s group',
+    kind => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: kind,
+        categories: ['A'],
+        secondaryCatAxis: {
+          min: null, max: null, title: null, hidden: false, lineHidden: false,
+          majorTickMark: 'none',
+        },
+        secondaryValAxis: {
+          min: 0, max: 2, title: null, hidden: false, lineHidden: false,
+          majorTickMark: 'none',
+        },
+        series: [
+          series({ values: [1], seriesType: kind }),
+          series({ values: [1], seriesType: kind, useSecondaryAxis: true }),
+        ],
+        plotGroups: [
+          plotGroup(kind, 0, 1, { grouping: 'standard' }),
+          plotGroup(kind, 1, 1, {
+            categoryAxis: 'secondary', valueAxis: 'secondary', grouping: 'standard',
+          }),
+        ],
+      }), RECT, 1);
+      expect(rec.texts.map(item => item.text)).toContain('Unsupported chart');
+      expect(rec.strokedPaths).toEqual([]);
+      expect(rec.rects).toEqual([]);
+    },
+  );
+
+  it('fails closed when public empty-group metadata disagrees with the visible family', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      series: [series({ values: [1] })],
+      plotGroups: [plotGroup('bar', 0, 0), plotGroup('pie', 0, 1)],
+    }), RECT, 1);
+    expect(rec.texts.map(item => item.text)).toContain('Unsupported chart');
+  });
+
+  it('keeps stock role ownership and paints a later line group', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      stockHiLowLines: true,
+      stockHiLowLineColor: '123456',
+      series: [
+        series({ values: [5, 6], seriesType: 'stock' }),
+        series({ values: [1, 2], seriesType: 'stock' }),
+        series({ values: [3, 4], seriesType: 'stock' }),
+        series({
+          color: 'FF0000', lineColor: 'FF0000', values: [2, 5],
+          seriesType: 'line', showMarker: false,
+          chartexStyle: { lineDash: 'dash', lineCap: 'rnd', lineJoin: 'bevel' },
+        }),
+      ],
+      plotGroups: [plotGroup('stock', 0, 3), plotGroup('line', 3, 1)],
+    }), RECT, 1);
+    expect(rec.paintEvents).toContainEqual({ kind: 'stroke', strokeStyle: '#123456' });
+    expect(rec.paintEvents).toContainEqual({ kind: 'stroke', strokeStyle: '#FF0000' });
+    const hiLow = rec.strokedPaths.find(path => path.strokeStyle === '#123456'
+      && path.points.length === 2 && path.points[0].x === path.points[1].x);
+    const overlay = rec.strokedPaths.find(path => path.strokeStyle === '#FF0000'
+      && path.points.length >= 2 && path.points[0].x !== path.points.at(-1)?.x);
+    expect(hiLow).toBeDefined();
+    expect(overlay).toBeDefined();
+    expect(rec.strokeDetails.some(detail => detail.strokeStyle === '#FF0000'
+      && detail.dash.length > 0 && detail.cap === 'round' && detail.join === 'bevel')).toBe(true);
+  });
+
+  it('bounds group metadata and rejects malformed public ranges', () => {
+    const emptyGroups = Array.from(
+      { length: MAX_CANVAS_CHART_POINTS + 1 },
+      () => plotGroup('pie', 0, 0),
+    );
+    expect(sourceChartStructureCount(baseModel({ plotGroups: emptyGroups })))
+      .toBe(MAX_CANVAS_CHART_POINTS + 1);
+    expect(sourceChartStructureCount(baseModel({
+      series: [series({ values: [1] })],
+      plotGroups: [plotGroup('line', 1, 1)],
+    }))).toBe(MAX_CANVAS_CHART_POINTS + 1);
+  });
+
+  it('plans many line groups without rescanning every group per group', () => {
+    let axisReads = 0;
+    const groupCount = 200;
+    const groups = Array.from({ length: groupCount }, (_, index) => ({
+      kind: 'line' as const,
+      seriesStart: index,
+      seriesCount: 1,
+      categoryAxis: 'primary' as const,
+      get valueAxis() { axisReads++; return 'primary' as const; },
+      seriesAxis: 'none' as const,
+      grouping: index % 2 === 0 ? 'standard' : 'stacked',
+    }));
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A'], plotGroups: groups,
+      series: Array.from({ length: groupCount }, (_, index) => series({
+        values: [index + 1], seriesType: 'line', lineHidden: true,
+        showMarker: false, markerSymbol: 'none',
+      })),
+    }), RECT, 1);
+    expect(axisReads).toBeLessThan(groupCount * 12);
+  });
+});
 
 describe('chart-space background', () => {
   it('fills the complete chart rectangle, including the axis-label gutters', () => {
@@ -782,6 +1417,876 @@ describe('classic 3-D compatibility projection', () => {
     expect(authored.filledPaths.some(path => path.fillStyle === '#F2F2F2')).toBe(true);
   });
 
+  it('paints authored CT_Surface thickness as projected slabs without leaving the chart bounds', () => {
+    const render = (thicknessPercent: number | undefined) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line',
+        categories: ['A', 'B', 'C'],
+        valAxisMajorGridlines: false,
+        threeD: {
+          rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30,
+          floor: { fillColor: 'FF0000', thicknessPercent },
+          sideWall: { fillColor: '00B050', thicknessPercent },
+          backWall: { fillColor: 'AA00FF', thicknessPercent },
+        },
+        series: [series({ values: [2, 8, 4], showMarker: false })],
+      }), RECT, 1);
+      return rec;
+    };
+    const omitted = render(undefined);
+    const planar = render(0);
+    const thick = render(25);
+    expect(planar.filledPaths).toEqual(omitted.filledPaths);
+    expect(planar.strokedPaths).toEqual(omitted.strokedPaths);
+    for (const color of ['#FF0000', '#00B050', '#AA00FF']) {
+      expect(planar.filledPaths.filter(path => path.fillStyle === color)).toHaveLength(1);
+      expect(thick.filledPaths.filter(path => path.fillStyle === color).length).toBeGreaterThan(1);
+    }
+    const points = thick.filledPaths.flatMap(path => path.points);
+    expect(Math.min(...points.map(point => point.x))).toBeGreaterThanOrEqual(RECT.x - 1e-9);
+    expect(Math.max(...points.map(point => point.x))).toBeLessThanOrEqual(RECT.x + RECT.w + 1e-9);
+    expect(Math.min(...points.map(point => point.y))).toBeGreaterThanOrEqual(RECT.y - 1e-9);
+    expect(Math.max(...points.map(point => point.y))).toBeLessThanOrEqual(RECT.y + RECT.h + 1e-9);
+  });
+
+  it('prefetches and projects only applicable flat CT_Surface stretch pictures', () => {
+    const picture = {
+      fillType: 'image' as const,
+      imagePath: 'xl/media/wall.png',
+      mimeType: 'image/png',
+      stretch: true,
+    };
+    const model = (applyToFront: boolean) => baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorGridlines: false,
+      threeD: {
+        rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30,
+        backWall: {
+          thicknessPercent: 0,
+          style: { fillPaints: [picture], fillPaintAuthored: true },
+          pictureOptions: { applyToFront, pictureFormat: 'stretch' },
+        },
+      },
+      series: [series({ values: [2, 8, 4], showMarker: false })],
+    });
+    const bitmap = { width: 80, height: 40 } as unknown as CanvasImageSource;
+    expect(collectChartMarkerImageFills(model(true))).toEqual([picture]);
+    expect(collectChartMarkerImageFills(model(false))).toEqual([]);
+
+    const visible = recordingCtx();
+    renderChartCore(visible.ctx, model(true), RECT, 1, 0, testThreeD, undefined, () => bitmap);
+    expect(visible.drawImages.length).toBeGreaterThan(0);
+    const hidden = recordingCtx();
+    renderChartCore(hidden.ctx, model(false), RECT, 1, 0, testThreeD, undefined, () => bitmap);
+    expect(hidden.drawImages).toHaveLength(0);
+
+    const linked = baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorGridlines: false,
+      threeD: { rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30 },
+      chartStyleRoles: {
+        wall: { fillPaints: [picture], fillPaintAuthored: true },
+      },
+      series: [series({ values: [2, 8], showMarker: false })],
+    });
+    expect(collectChartMarkerImageFills(linked)).toEqual([picture]);
+    const linkedRec = recordingCtx();
+    renderChartCore(linkedRec.ctx, linked, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+    expect(linkedRec.drawImages.length).toBeGreaterThan(0);
+  });
+
+  it.each(['line', 'surface3D'] as const)(
+    'projects independently selected positive-thickness CT_Surface stretch faces for %s',
+    chartType => {
+      const picture = {
+        fillType: 'image' as const,
+        imagePath: 'xl/media/thick-surface.png',
+        mimeType: 'image/png',
+        stretch: true,
+      };
+      const model = (
+        kind: 'floor' | 'sideWall' | 'backWall',
+        pictureOptions: ChartThreeDPictureOptions,
+      ) => baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        valMin: 0,
+        valMax: 10,
+        valAxisMajorGridlines: false,
+        threeD: {
+          rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30,
+          [kind]: {
+            thicknessPercent: 25,
+            lineColor: 'FF0000',
+            style: { fillPaints: [picture], fillPaintAuthored: true },
+            pictureOptions: { ...pictureOptions, pictureFormat: 'stretch' },
+          },
+        },
+        series: chartType === 'surface3D'
+          ? [series({ values: [2, 8, 4] }), series({ values: [4, 6, 7] })]
+          : [series({ values: [2, 8, 4], showMarker: false })],
+      });
+      const bitmap = { width: 80, height: 40 } as unknown as CanvasImageSource;
+      const draws = (
+        kind: 'floor' | 'sideWall' | 'backWall',
+        pictureOptions: ChartThreeDPictureOptions,
+        reversed = false,
+      ) => {
+        const chart = {
+          ...model(kind, pictureOptions),
+          valAxisOrientation: reversed ? 'maxMin' as const : undefined,
+        };
+        expect(collectChartMarkerImageFills(chart)).toEqual([picture]);
+        const rec = recordingCtx();
+        renderChartCore(rec.ctx, chart, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+        expect(rec.paintEvents).toContainEqual({ kind: 'stroke', strokeStyle: '#FF0000' });
+        return rec.drawImages.length;
+      };
+      for (const [kind, pictureOptions] of [
+        ['backWall', { applyToFront: true, applyToSides: false, applyToEnd: false }],
+        ['sideWall', { applyToFront: false, applyToSides: true, applyToEnd: false }],
+        ['floor', { applyToFront: false, applyToSides: false, applyToEnd: true }],
+      ] as const) {
+        const normal = draws(kind, pictureOptions);
+        expect(normal, kind).toBeGreaterThan(0);
+        expect(draws(kind, pictureOptions, true), `${kind} reversed`).toBe(normal);
+      }
+      expect(collectChartMarkerImageFills(model('backWall', {
+        applyToFront: false, applyToSides: false, applyToEnd: false,
+      }))).toEqual([]);
+    },
+  );
+
+  it('repeats stackScale pictures by value units but keeps the Office floor exception', () => {
+    const picture = {
+      fillType: 'image' as const,
+      imagePath: 'xl/media/stack-scale.png',
+      mimeType: 'image/png',
+      stretch: true,
+    };
+    const model = (
+      kind: 'backWall' | 'sideWall' | 'floor',
+      pictureFormat: 'stretch' | 'stackScale' | 'stack',
+      thicknessPercent = 0,
+    ) => baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorGridlines: false,
+      threeD: {
+        rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30,
+        [kind]: {
+          thicknessPercent,
+          style: { fillPaints: [picture], fillPaintAuthored: true },
+          pictureOptions: {
+            ...(kind === 'backWall' ? { applyToFront: true } : { applyToSides: true }),
+            pictureFormat,
+            pictureStackUnit: pictureFormat === 'stackScale' ? 2 : undefined,
+          },
+        },
+      },
+      series: [series({ values: [2, 8, 4], showMarker: false })],
+    });
+    const bitmap = { width: 80, height: 40 } as unknown as CanvasImageSource;
+    const draws = (chart: ChartModel) => {
+      const rec = recordingCtx();
+      renderChartCore(rec.ctx, chart, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+      return rec.drawImages.length;
+    };
+    const backStretch = draws(model('backWall', 'stretch'));
+    const backStack = draws(model('backWall', 'stack'));
+    const backStackScale = draws(model('backWall', 'stackScale'));
+    expect(backStretch).toBeGreaterThan(0);
+    expect(backStack).toBeGreaterThan(0);
+    expect(backStackScale).toBeGreaterThan(backStretch);
+    expect(draws(model('floor', 'stackScale'))).toBe(draws(model('floor', 'stretch')));
+    expect(collectChartMarkerImageFills(model('backWall', 'stack'))).toEqual([picture]);
+    const reversedStack = {
+      ...model('backWall', 'stack'),
+      valAxisOrientation: 'maxMin' as const,
+    } satisfies ChartModel;
+    expect(collectChartMarkerImageFills(reversedStack)).toEqual([picture]);
+    expect(draws(reversedStack)).toBe(backStack);
+    const thickStack = model('backWall', 'stack', 25);
+    expect(collectChartMarkerImageFills(thickStack)).toEqual([picture]);
+    expect(draws(thickStack)).toBeGreaterThan(0);
+    expect(collectChartMarkerImageFills(model('backWall', 'stretch', 25))).toEqual([picture]);
+    for (const kind of ['backWall', 'sideWall'] as const) {
+      const thickStretch = model(kind, 'stretch', 25);
+      const thickStackScale = model(kind, 'stackScale', 25);
+      expect(collectChartMarkerImageFills(thickStackScale)).toEqual([picture]);
+      expect(draws(thickStackScale)).toBeGreaterThan(draws(thickStretch));
+    }
+    const thickFloorStretch = model('floor', 'stretch', 25);
+    const thickFloorStackScale = model('floor', 'stackScale', 25);
+    expect(collectChartMarkerImageFills(thickFloorStackScale)).toEqual([picture]);
+    expect(draws(thickFloorStackScale)).toBe(draws(thickFloorStretch));
+    const reversedStretch = {
+      ...model('backWall', 'stretch'),
+      valAxisOrientation: 'maxMin',
+    } satisfies ChartModel;
+    const reversedStackScale = {
+      ...model('backWall', 'stackScale'),
+      valAxisOrientation: 'maxMin',
+    } satisfies ChartModel;
+    expect(collectChartMarkerImageFills(reversedStretch)).toEqual([picture]);
+    expect(collectChartMarkerImageFills(reversedStackScale)).toEqual([picture]);
+    expect(draws(reversedStretch)).toBe(backStretch);
+    expect(draws(reversedStackScale)).toBe(backStackScale);
+    const invalidProvenance = model('backWall', 'stretch');
+    invalidProvenance.threeD!.backWall!.pictureOptions = {
+      applyToFront: true,
+      pictureFormatAuthored: true,
+      pictureStackUnitAuthored: true,
+    };
+    expect(collectChartMarkerImageFills(invalidProvenance)).toEqual([]);
+    const croppedPicture = {
+      ...picture,
+      srcRect: { l: 0.25, t: 0, r: 0, b: 0 },
+    };
+    const cropped = model('backWall', 'stretch');
+    cropped.threeD!.backWall!.style!.fillPaints = [croppedPicture];
+    expect(collectChartMarkerImageFills(cropped)).toEqual([croppedPicture]);
+    const croppedRec = recordingCtx();
+    renderChartCore(croppedRec.ctx, cropped, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+    const croppedSourceXs = croppedRec.drawImages
+      .filter(call => call[0] === bitmap)
+      .map(call => Number(call[1]));
+    expect(croppedSourceXs.length).toBeGreaterThan(0);
+    expect(Math.min(...croppedSourceXs)).toBeGreaterThan(15);
+    expect(collectChartMarkerImageFills({
+      ...model('backWall', 'stackScale'),
+      valMax: 8_192,
+    })).toEqual([picture]);
+    expect(collectChartMarkerImageFills({
+      ...model('backWall', 'stackScale'),
+      valMax: 8_194,
+    })).toEqual([]);
+  });
+
+  it('projects bounded DrawingML tile grids across planar and thick Surface faces', () => {
+    const tiled = {
+      fillType: 'image' as const,
+      imagePath: 'xl/media/surface-tile.png',
+      mimeType: 'image/png',
+      stretch: false,
+      dpi: 96,
+      tile: { tx: 0, ty: 0, sx: 1, sy: 1, flip: 'none', algn: 'tl' },
+    };
+    const model = (
+      thicknessPercent: number,
+      scale = 1,
+      srcRect?: { l: number; t: number; r: number; b: number },
+    ) => baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorGridlines: false,
+      threeD: {
+        rotationX: 20,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        backWall: {
+          thicknessPercent,
+          style: {
+            fillPaints: [{
+              ...tiled,
+              srcRect,
+              tile: { ...tiled.tile, sx: scale, sy: scale },
+            }],
+            fillPaintAuthored: true,
+          },
+          pictureOptions: {
+            applyToFront: true,
+            applyToSides: true,
+            applyToEnd: true,
+            pictureFormat: 'stretch',
+          },
+        },
+      },
+      series: [series({ values: [2, 8, 4], showMarker: false })],
+    });
+    const bitmap = { width: 80, height: 40 } as unknown as CanvasImageSource;
+    const draws = (chart: ChartModel) => {
+      expect(collectChartMarkerImageFills(chart)).toHaveLength(1);
+      const rec = recordingCtx();
+      class TestOffscreenCanvas {
+        readonly width: number;
+        readonly height: number;
+        constructor(width: number, height: number) {
+          this.width = width;
+          this.height = height;
+        }
+        getContext(): CanvasRenderingContext2D { return rec.ctx; }
+      }
+      vi.stubGlobal('OffscreenCanvas', TestOffscreenCanvas);
+      try {
+        renderChartCore(rec.ctx, chart, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+        return rec.drawImages.length;
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    };
+    const planar = draws(model(0));
+    expect(planar).toBeGreaterThan(0);
+    expect(draws(model(0, 0.5))).toBeGreaterThan(planar);
+    expect(draws(model(25))).toBeGreaterThan(0);
+    expect(draws(model(0, 1, { l: 0.25, t: 0, r: 0, b: 0 }))).toBeGreaterThan(0);
+    expect(draws(model(25, 1, { l: -0.25, t: 0, r: 0, b: 0 }))).toBeGreaterThan(0);
+  });
+
+  it('uses the same planar CT_Surface picture path for Surface3D', () => {
+    const picture = {
+      fillType: 'image' as const,
+      imagePath: 'xl/media/surface-wall.png',
+      mimeType: 'image/png',
+      stretch: true,
+    };
+    const model = baseModel({
+      chartType: 'surface3D',
+      categories: ['A', 'B'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorUnit: 2,
+      threeD: {
+        rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30,
+        sideWall: {
+          thicknessPercent: 0,
+          lineColor: 'FF0000',
+          style: { fillPaints: [picture], fillPaintAuthored: true },
+          pictureOptions: {
+            applyToSides: true, pictureFormat: 'stackScale', pictureStackUnit: 2,
+          },
+        },
+      },
+      series: [
+        series({ values: [2, 8] }),
+        series({ values: [4, 6] }),
+      ],
+    });
+    const bitmap = { width: 80, height: 40 } as unknown as CanvasImageSource;
+    expect(collectChartMarkerImageFills(model)).toEqual([picture]);
+    const rec = recordingCtx();
+    renderChartCore(rec.ctx, model, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+    expect(rec.drawImages.length).toBeGreaterThan(1);
+    expect(rec.paintEvents).toContainEqual({ kind: 'stroke', strokeStyle: '#FF0000' });
+    const reversed = { ...model, valAxisOrientation: 'maxMin' as const };
+    expect(collectChartMarkerImageFills(reversed)).toEqual([picture]);
+    const reversedRec = recordingCtx();
+    renderChartCore(reversedRec.ctx, reversed, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+    expect(reversedRec.drawImages.length).toBe(rec.drawImages.length);
+    expect(reversedRec.paintEvents).toContainEqual({ kind: 'stroke', strokeStyle: '#FF0000' });
+  });
+
+  it('uses structured direct and linked floor/wall paint with direct noFill precedence', () => {
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color: '112233' },
+        { position: 1, color: 'DDEEFF' },
+      ],
+    };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      valAxisMajorGridlines: false,
+      chartStyleRoles: {
+        floor: { fillPaints: [gradient], fillPaintAuthored: true },
+        wall: { fillPaints: [gradient], fillPaintAuthored: true },
+      },
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        floor: { fillHidden: true },
+        sideWall: { style: { fillPaints: [gradient], fillPaintAuthored: true } },
+      },
+      series: [series({ values: [5, 15] })],
+    }), RECT, 1);
+    // Direct floor noFill suppresses the linked floor role. The direct side
+    // wall and linked back wall each resolve one bounded gradient recipe.
+    expect(rec.gradients).toHaveLength(2);
+  });
+
+  it('uses plotArea3D for a 3-D plot unless direct plot-area paint wins', () => {
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color: '112233' },
+        { position: 1, color: 'DDEEFF' },
+      ],
+    };
+    const render = (direct: boolean) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line',
+        categories: ['A', 'B'],
+        chartStyleRoles: {
+          plotArea3D: { fillPaints: [gradient], fillPaintAuthored: true },
+        },
+        plotAreaBg: direct ? 'FF0000' : null,
+        plotAreaFillPaintAuthored: direct,
+        threeD: { rotationX: 15, rotationY: 20 },
+        series: [series({ values: [5, 15] })],
+      }), RECT, 1);
+      return rec;
+    };
+    expect(render(false).gradients).toHaveLength(1);
+    expect(render(true).gradients).toHaveLength(0);
+  });
+
+  it.each(['clusteredBar', 'pie'] as const)(
+    'applies linked dataPoint3D paint to %s and keeps direct point noFill authoritative',
+    chartType => {
+      const gradient = {
+        fillType: 'gradient' as const,
+        gradType: 'linear' as const,
+        angle: 0,
+        stops: [
+          { position: 0, color: '112233' },
+          { position: 1, color: 'DDEEFF' },
+        ],
+      };
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        valAxisMajorGridlines: false,
+        chartStyleRoles: {
+          dataPoint3D: {
+            fillPaints: [gradient],
+            fillPaintAuthored: true,
+            linePaints: [gradient],
+            linePaintAuthored: true,
+            lineWidthEmu: 12_700,
+          },
+        },
+        threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+        series: [series({
+          values: [5, 15],
+          dataPointOverrides: [{
+            idx: 0,
+            fillHidden: true,
+            lineHidden: true,
+            chartexStyle: { fillHidden: true, lineHidden: true },
+          }],
+        })],
+      }), RECT, 1);
+      // Only point 1 consumes the linked fill and outline recipes. Each is
+      // resolved once for the complete datum, not once for every mesh face.
+      expect(rec.gradients).toHaveLength(2);
+    },
+  );
+
+  it('preflights percent-stack paint without overflowing finite magnitudes', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A'],
+      chartStyleRoles: {
+        dataPoint3D: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096, color: '112233',
+            })),
+          }],
+          fillPaintAuthored: true,
+        },
+      },
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [
+        series({ values: [Number.MAX_VALUE] }),
+        series({ values: [Number.MAX_VALUE] }),
+      ],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+  });
+
+  it('does not charge saturated stacked-bar segments that paint no mesh', () => {
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: Array.from({ length: 4_096 }, (_, index) => ({
+        position: index / 4_095, color: '112233',
+      })),
+    };
+    const values = new Array(129).fill(Number.MAX_VALUE) as number[];
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedBar',
+      categories: values.map((_, index) => `C${index}`),
+      chartStyleRoles: {
+        dataPoint3D: { fillPaints: [gradient], fillPaintAuthored: true },
+      },
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [series({ values }), series({ values: [...values] })],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('(too many data points)');
+    expect(rec.gradients).toHaveLength(values.length);
+  });
+
+  it('plans percent-stack denominators once per category', () => {
+    let valueReads = 0;
+    const measuredSeries = Array.from({ length: 200 }, (_, index) => {
+      const values = [index + 1];
+      Object.defineProperty(values, 0, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          valueReads++;
+          return index + 1;
+        },
+      });
+      return series({ values });
+    });
+    renderChart(recordingCtx().ctx, baseModel({
+      chartType: 'stackedBarPct',
+      categories: ['A'],
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: measuredSeries,
+    }), RECT, 1);
+    // A per-datum denominator scan is quadratic (well over 80,000 reads for
+    // this boundary). The shared category plan keeps all consumers linear.
+    expect(valueReads).toBeLessThan(10_000);
+  });
+
+  it('preflights stacked-line paint from the cumulative plotted value', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedLine',
+      categories: ['A', 'B'],
+      valMin: 10,
+      valMax: 20,
+      chartStyleRoles: {
+        dataPoint3D: {
+          linePaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096, color: '112233',
+            })),
+          }],
+          linePaintAuthored: true,
+        },
+      },
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [
+        series({ values: [6, 6], showMarker: false }),
+        series({ values: [6, 6], showMarker: false }),
+      ],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+  });
+
+  it('indexes linked 3-D bar paint by series instead of category', () => {
+    const palette = ['AA0000', '00AA00', '0000AA'].map(color => ({
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color },
+        { position: 1, color: 'FFFFFF' },
+      ],
+    }));
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B', 'C'],
+      valAxisMajorGridlines: false,
+      chartStyleRoles: {
+        dataPoint3D: { fillPaints: palette, fillPaintAuthored: true },
+      },
+      threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+      series: [
+        series({ values: [1] }),
+        series({ values: [1, 1, 1] }),
+      ],
+    }), RECT, 1);
+    const firstStops = rec.gradients.map(gradient => gradient.stops[0]?.color);
+    expect(firstStops.filter(color => color === 'rgba(170,0,0,1)')).toHaveLength(1);
+    expect(firstStops.filter(color => color === 'rgba(0,170,0,1)')).toHaveLength(3);
+    expect(firstStops).not.toContain('rgba(0,0,170,1)');
+  });
+
+  it('indexes linked 3-D paint by point for a single varyColors bar series', () => {
+    const palette = ['AA0000', '00AA00', '0000AA'].map(color => ({
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color },
+        { position: 1, color: 'FFFFFF' },
+      ],
+    }));
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B', 'C'],
+      varyColors: true,
+      valAxisMajorGridlines: false,
+      chartStyleRoles: {
+        dataPoint3D: { fillPaints: palette, fillPaintAuthored: true },
+      },
+      threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+      series: [series({ values: [1, 1, 1] })],
+    }), RECT, 1);
+    expect(new Set(rec.gradients.map(gradient => gradient.stops[0]?.color))).toEqual(new Set([
+      'rgba(170,0,0,1)',
+      'rgba(0,170,0,1)',
+      'rgba(0,0,170,1)',
+    ]));
+  });
+
+  it.each([
+    ['line', 1],
+    ['area', 2],
+  ] as const)('resolves linked dataPoint3D paint once for a 3-D %s series', (chartType, count) => {
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color: '112233' },
+        { position: 1, color: 'DDEEFF' },
+      ],
+    };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType,
+      categories: ['A', 'B', 'C'],
+      valAxisMajorGridlines: false,
+      chartStyleRoles: {
+        dataPoint3D: {
+          fillPaints: [gradient],
+          fillPaintAuthored: true,
+          linePaints: [gradient],
+          linePaintAuthored: true,
+        },
+      },
+      threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+      series: [series({ values: [5, 15, 10], showMarker: false })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(count);
+  });
+
+  it.each(['clusteredBar', 'pie'] as const)(
+    'keeps direct point structured/unresolved paint above linked dataPoint3D for %s',
+    chartType => {
+      const linked = {
+        fillType: 'gradient' as const, gradType: 'linear' as const, angle: 0,
+        stops: [{ position: 0, color: '112233' }, { position: 1, color: 'DDEEFF' }],
+      };
+      const direct = {
+        fillType: 'gradient' as const, gradType: 'linear' as const, angle: 90,
+        stops: [{ position: 0, color: 'AA0000' }, { position: 1, color: 'FFCCCC' }],
+      };
+      const render = (chartexStyle: NonNullable<ChartSeries['dataPointOverrides']>[number]['chartexStyle']) => {
+        const rec = recordingCtx();
+        renderChart(rec.ctx, baseModel({
+          chartType,
+          categories: ['A'],
+          valAxisMajorGridlines: false,
+          chartStyleRoles: {
+            dataPoint3D: {
+              fillPaints: [linked], fillPaintAuthored: true,
+              linePaints: [linked], linePaintAuthored: true,
+            },
+          },
+          threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+          series: [series({
+            values: [10],
+            dataPointOverrides: [{ idx: 0, chartexStyle }],
+          })],
+        }), RECT, 1);
+        return rec;
+      };
+
+      const authored = render({
+        fillPaints: [direct], fillPaintAuthored: true,
+        linePaints: [direct], linePaintAuthored: true,
+      });
+      expect(authored.gradients).toHaveLength(2);
+      expect(authored.gradients.every(gradient =>
+        gradient.stops[0]?.color === 'rgba(170,0,0,1)'
+      )).toBe(true);
+      const unresolved = render({ fillPaintAuthored: true, linePaintAuthored: true });
+      expect(unresolved.gradients).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['line', 1],
+    ['area', 2],
+  ] as const)(
+    'keeps direct series structured/unresolved paint above linked dataPoint3D for %s',
+    (chartType, expectedGradients) => {
+      const linked = {
+        fillType: 'gradient' as const, gradType: 'linear' as const, angle: 0,
+        stops: [{ position: 0, color: '112233' }, { position: 1, color: 'DDEEFF' }],
+      };
+      const direct = {
+        fillType: 'gradient' as const, gradType: 'linear' as const, angle: 90,
+        stops: [{ position: 0, color: 'AA0000' }, { position: 1, color: 'FFCCCC' }],
+      };
+      const render = (chartexStyle: ChartSeries['chartexStyle']) => {
+        const rec = recordingCtx();
+        renderChart(rec.ctx, baseModel({
+          chartType,
+          categories: ['A', 'B'],
+          valAxisMajorGridlines: false,
+          chartStyleRoles: {
+            dataPoint3D: {
+              fillPaints: [linked], fillPaintAuthored: true,
+              linePaints: [linked], linePaintAuthored: true,
+            },
+          },
+          threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+          series: [series({ values: [5, 10], showMarker: false, chartexStyle })],
+        }), RECT, 1);
+        return rec;
+      };
+
+      const authored = render({
+        fillPaints: [direct], fillPaintAuthored: true,
+        linePaints: [direct], linePaintAuthored: true,
+      });
+      expect(authored.gradients).toHaveLength(expectedGradients);
+      expect(authored.gradients.every(gradient =>
+        gradient.stops[0]?.color === 'rgba(170,0,0,1)'
+      )).toBe(true);
+      expect(render({ fillPaintAuthored: true, linePaintAuthored: true }).gradients)
+        .toHaveLength(0);
+    },
+  );
+
+  it('rejects oversized 3-D datum paint work before resolving any point recipe', () => {
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: Array.from({ length: 4_096 }, (_, index) => ({
+        position: index / 4_095,
+        color: index % 2 ? '112233' : 'DDEEFF',
+      })),
+    };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: Array.from({ length: 257 }, (_, index) => `C${index}`),
+      valAxisMajorGridlines: false,
+      chartStyleRoles: {
+        dataPoint3D: { fillPaints: [gradient], fillPaintAuthored: true },
+      },
+      threeD: { rotationX: 15, rotationY: 20, perspective: 30 },
+      series: [series({ values: new Array(257).fill(1) })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
+  });
+
+  it('rejects an oversized linked 3-D wall recipe before painting the chart', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A'],
+      chartStyleRoles: {
+        wall: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096, color: '112233',
+            })),
+          }],
+          fillPaintAuthored: true,
+        },
+      },
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [series({ values: [1] })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toEqual(['(too many data points)']);
+  });
+
+  it('does not charge an oversized 3-D line recipe when the series has no geometry', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      chartStyleRoles: {
+        dataPoint3D: {
+          linePaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096, color: '112233',
+            })),
+          }],
+          linePaintAuthored: true,
+        },
+      },
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [series({ values: [null, Number.NaN], showMarker: false })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).not.toContain('(too many data points)');
+  });
+
+  it.each([
+    ['zero bar', 'clusteredBar', [0], null, null],
+    ['fully clipped bar', 'clusteredBar', [1], 2, 3],
+    ['fully clipped line', 'line', [1, 2], 3, 4],
+    ['line collapsed at the lower boundary', 'line', [1, 2], 2, 3],
+  ] as const)(
+    'does not charge unused structured paint for a %s',
+    (_name, chartType, values, valMin, valMax) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: values.map((_, index) => `C${index}`),
+        valMin,
+        valMax,
+        chartStyleRoles: {
+          dataPoint3D: {
+            fillPaints: [{
+              fillType: 'gradient', gradType: 'linear', angle: 0,
+              stops: Array.from({ length: 4_097 }, (_, index) => ({
+                position: index / 4_096, color: '112233',
+              })),
+            }],
+            fillPaintAuthored: true,
+            linePaints: [{
+              fillType: 'gradient', gradType: 'linear', angle: 0,
+              stops: Array.from({ length: 4_097 }, (_, index) => ({
+                position: index / 4_096, color: '445566',
+              })),
+            }],
+            linePaintAuthored: true,
+          },
+        },
+        threeD: { rotationX: 15, rotationY: 20 },
+        series: [series({ values: [...values], showMarker: false })],
+      }), RECT, 1);
+      expect(rec.gradients).toHaveLength(0);
+      expect(rec.texts.map(text => text.text)).not.toContain('(too many data points)');
+    },
+  );
+
   it('paints authored floor/side/back CT_Surface rules and keeps standard depth substantial', () => {
     const rec = strokedPolylineCtx();
     renderChart(rec.ctx, baseModel({
@@ -1017,6 +2522,133 @@ describe('classic 3-D compatibility projection', () => {
       && index + 1 < sequence.length
       && color !== sequence[index - 1]
       && color === sequence[index + 1])).toBe(true);
+  });
+
+  it('applies a direct 3-D line point style to the segment ending at that point', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B', 'C'],
+      valMin: 0,
+      valMax: 10,
+      threeD: { rotationX: 0, rotationY: 0, perspective: 0 },
+      series: [series({
+        values: [2, 8, 4],
+        lineColor: '0000FF',
+        showMarker: false,
+        dataPointOverrides: [{ idx: 1, lineColor: 'FF0000' }],
+      })],
+    }), RECT, 1);
+    const red = rec.filledPaths.filter(path => path.fillStyle === '#FF0000');
+    const blue = rec.filledPaths.filter(path => path.fillStyle === '#0000FF');
+    expect(red.length).toBeGreaterThan(0);
+    expect(blue.length).toBeGreaterThan(0);
+    const centerX = (paths: typeof red) => {
+      const points = paths.flatMap(path => path.points);
+      return points.reduce((sum, point) => sum + point.x, 0) / points.length;
+    };
+    // Office assigns dPt idx=1 to the incoming A→B segment. The following
+    // B→C segment remains owned by the series style.
+    expect(centerX(red)).toBeLessThan(centerX(blue));
+  });
+
+  it('suppresses only the incoming 3-D line segment for direct point noFill', () => {
+    const render = (lineHidden: boolean | undefined) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line', categories: ['A', 'B', 'C'], valMin: 0, valMax: 10,
+        threeD: { rotationX: 0, rotationY: 0, perspective: 0 },
+        series: [series({
+          values: [2, 8, 4], lineColor: '0000FF', showMarker: false,
+          dataPointOverrides: lineHidden == null ? undefined : [{ idx: 1, lineHidden }],
+        })],
+      }), RECT, 1);
+      return rec.filledPaths.filter(path => path.fillStyle === '#0000FF');
+    };
+    const baseline = render(undefined);
+    const hidden = render(true);
+    expect(hidden.length).toBeGreaterThan(0);
+    expect(hidden.length).toBeLessThan(baseline.length);
+    const centerX = (paths: typeof hidden) => paths
+      .flatMap(path => path.points)
+      .reduce((sum, point) => sum + point.x, 0)
+      / paths.flatMap(path => path.points).length;
+    // idx=1 hides A→B. The later B→C segment remains visible.
+    expect(centerX(hidden)).toBeGreaterThan(centerX(baseline));
+  });
+
+  it('resolves one structured point paint for its incoming 3-D line segment', () => {
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color: 'FF0000' },
+        { position: 1, color: 'FFFFFF' },
+      ],
+    };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B', 'C'],
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [series({
+        values: [2, 8, 4], lineColor: '0000FF', showMarker: false,
+        dataPointOverrides: [{
+          idx: 1,
+          chartexStyle: { linePaints: [gradient], linePaintAuthored: true },
+        }],
+      })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(1);
+    expect(rec.texts.map(text => text.text)).not.toContain('(too many data points)');
+  });
+
+  it('rejects an oversized direct point line paint before any 3-D geometry', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line', categories: ['A', 'B'],
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [series({
+        values: [2, 8], lineColor: '0000FF', showMarker: false,
+        dataPointOverrides: [{
+          idx: 1,
+          chartexStyle: {
+            linePaints: [{
+              fillType: 'gradient', gradType: 'linear', angle: 0,
+              stops: Array.from({ length: 4_097 }, (_, index) => ({
+                position: index / 4_096, color: 'FF0000',
+              })),
+            }],
+            linePaintAuthored: true,
+          },
+        }],
+      })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.texts.map(text => text.text)).toEqual(['(too many data points)']);
+  });
+
+  it('does not apply direct point paint to a 3-D area body', () => {
+    const gradient = {
+      fillType: 'gradient' as const, gradType: 'linear' as const, angle: 0,
+      stops: [{ position: 0, color: 'FF0000' }, { position: 1, color: 'FFFFFF' }],
+    };
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'area', categories: ['A', 'B', 'C'],
+      threeD: { rotationX: 15, rotationY: 20 },
+      series: [series({
+        values: [2, 8, 4], color: '4472C4', showMarker: false,
+        dataPointOverrides: [{
+          idx: 1,
+          chartexStyle: {
+            fillPaints: [gradient], fillPaintAuthored: true,
+            linePaints: [gradient], linePaintAuthored: true,
+          },
+        }],
+      })],
+    }), RECT, 1);
+    expect(rec.gradients).toHaveLength(0);
   });
 
   it('builds stacked 3-D area layers from cumulative boundaries', () => {
@@ -1637,6 +3269,78 @@ describe('classic 3-D compatibility projection', () => {
     expect(classicMarkerPaintWorkCount(model)).toBe(1_048_576);
   });
 
+  it('charges direct bubble shape fill and outline recipes once per visible point', () => {
+    const model = baseModel({
+      chartType: 'bubble', categories: ['0'],
+      series: [series({
+        values: [0.5], bubbleSizes: [100],
+        chartexStyle: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 0.5, color: '778899' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          fillPaintAuthored: true,
+          linePaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '000000' },
+              { position: 1, color: 'FFFFFF' },
+            ],
+          }],
+          linePaintAuthored: true,
+        },
+      })],
+      catAxisMin: 0, catAxisMax: 1, valMin: 0, valMax: 1,
+    });
+    expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(5);
+  });
+
+  it('charges the fixed bubble3D material for plot, legend, and label keys', () => {
+    const model = baseModel({
+      chartType: 'bubble', showLegend: true, categories: ['0'],
+      series: [series({
+        values: [0.5], bubbleSizes: [100], bubble3D: true,
+        seriesDataLabels: {
+          showVal: true, showCatName: false, showSerName: false,
+          showPercent: false, showLegendKey: true,
+        },
+      })],
+      catAxisMin: 0, catAxisMax: 1, valMin: 0, valMax: 1,
+    });
+    expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(15);
+
+    model.series[0].chartexStyle = {
+      fillHidden: true, fillPaintAuthored: true,
+    };
+    expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(0);
+  });
+
+  it('does not charge structured bubble paint for invisible bubble sizes', () => {
+    const count = 257;
+    const stops = Array.from({ length: 4_096 }, (_, index) => ({
+      position: index / 4_095,
+      color: '112233',
+    }));
+    const model = baseModel({
+      chartType: 'bubble',
+      categories: Array.from({ length: count }, (_, index) => String(index)),
+      series: [series({
+        values: Array<number | null>(count).fill(1),
+        bubbleSizes: Array<number | null>(count).fill(0),
+        chartexStyle: {
+          fillPaints: [{ fillType: 'gradient', gradType: 'linear', angle: 0, stops }],
+          fillPaintAuthored: true,
+        },
+      })],
+      catAxisMin: 0, catAxisMax: count, valMin: 0, valMax: 2,
+    });
+    expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(0);
+  });
+
   it('charges the normal legend marker after plot marker work', () => {
     const count = 256;
     const model = baseModel({
@@ -2200,6 +3904,37 @@ describe('classic 3-D compatibility projection', () => {
     expect(materialFills(rec, '123456').length).toBeGreaterThan(0);
     expect(materialFills(rec, 'ABCDEF').length).toBeGreaterThan(0);
     expect(rec.paintEvents.some(event => event.kind === 'stroke' && event.strokeStyle === '#FFFFFF')).toBe(false);
+  });
+
+  it('uses authored pie3D hPercent as a thickness multiplier, not a scene aspect ratio', () => {
+    const render = (heightPercent: number, authored: boolean) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'pie',
+        threeD: {
+          rotationX: 0,
+          rotationY: 0,
+          perspective: 0,
+          heightPercent,
+          heightPercentAuthored: authored,
+        },
+        series: [series({ values: [1], color: '4472C4' })],
+      }), RECT, 1);
+      const paths = rec.filledPaths
+        .filter(path => isMaterialColor(path.fillStyle, '4472C4'))
+        .map(path => path.points.map(point => ({ x: point.x, y: point.y })));
+      const points = paths.flat();
+      return {
+        paths,
+        spanY: Math.max(...points.map(point => point.y)) - Math.min(...points.map(point => point.y)),
+      };
+    };
+
+    const omitted = render(50, false);
+    const half = render(50, true);
+    const full = render(100, true);
+    expect(omitted.spanY).toBeCloseTo(full.spanY, 6);
+    expect(half.spanY).toBeLessThan(full.spanY);
   });
 
   it('uses the radial-family zero-yaw default when 3-D pie rotY is omitted', () => {
@@ -3366,6 +5101,13 @@ describe('bar chart authored layout and fills', () => {
         series({
           seriesType: 'scatter', categories: ['0.5', '1.5'], values: [2, 8],
           markerSymbol: 'circle', markerFill: '1696D2', showMarker: true,
+          useSecondaryAxis: true,
+        }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, { grouping: 'clustered', barDirection: 'bar' }),
+        plotGroup('scatter', 1, 1, {
+          categoryAxis: 'secondary', valueAxis: 'secondary', scatterStyle: 'marker',
         }),
       ],
       secondaryCatAxis: {
@@ -3380,6 +5122,94 @@ describe('bar chart authored layout and fills', () => {
     expect(points).toHaveLength(2);
     expect(points[0].x).toBeLessThan(points[1].x);
     expect(points[0].y).toBeGreaterThan(points[1].y);
+  });
+
+  it('retains an Office-authored horizontal bar/scatter overlay with ambiguous bottom axes', () => {
+    const rec = recordingCtx();
+    const hiddenAxis = {
+      min: 0,
+      max: 2,
+      title: null,
+      hidden: true,
+      lineHidden: true,
+      majorTickMark: 'none',
+    } as const;
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: ['A', 'B'],
+      series: [
+        series({ seriesType: 'bar', values: [0, 0] }),
+        series({
+          seriesType: 'scatter', categories: ['0.5', '1.5'], values: [2, 1],
+          markerSymbol: 'circle', markerFill: '1696D2', showMarker: true,
+          useSecondaryAxis: true,
+        }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, {
+          grouping: 'clustered', barDirection: 'bar', valueAxis: 'unresolved',
+        }),
+        plotGroup('scatter', 1, 1, {
+          categoryAxis: 'unresolved', valueAxis: 'secondary', scatterStyle: 'marker',
+        }),
+      ],
+      secondaryCatAxis: hiddenAxis,
+      secondaryValAxis: hiddenAxis,
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('Unsupported chart');
+    expect(rec.arcs).toHaveLength(2);
+  });
+
+  it('retains a primary stacked-area group with a primary line overlay', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A', 'B'],
+      series: [
+        series({ color: '99CCFF', seriesType: 'area', values: [20, 30] }),
+        series({ color: '4472C4', seriesType: 'area', values: [10, 15] }),
+        series({ color: '000000', seriesType: 'line', values: [25, 35] }),
+      ],
+      plotGroups: [
+        plotGroup('area', 0, 2, { grouping: 'stacked' }),
+        plotGroup('line', 2, 1, { grouping: 'standard' }),
+      ],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('Unsupported chart');
+    expect(rec.filledPaths.length).toBeGreaterThan(0);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#000000')).toBe(true);
+  });
+
+  it('retains two same-direction column groups with a secondary line group', () => {
+    const rec = recordingCtx();
+    const secondary = {
+      min: 0,
+      max: 1,
+      title: null,
+      hidden: false,
+      lineHidden: false,
+      majorTickMark: 'none',
+    } as const;
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      secondaryValAxis: secondary,
+      series: [
+        series({ color: '4472C4', seriesType: 'bar', values: [100, 120] }),
+        series({ color: 'EEEEEE', seriesType: 'bar', values: [0.2, 0.4], useSecondaryAxis: true }),
+        series({ color: 'ED7D31', seriesType: 'line', values: [0.3, 0.5], useSecondaryAxis: true }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, { grouping: 'clustered', barDirection: 'col' }),
+        plotGroup('bar', 1, 1, {
+          grouping: 'clustered', barDirection: 'col', valueAxis: 'secondary',
+        }),
+        plotGroup('line', 2, 1, { grouping: 'standard', valueAxis: 'secondary' }),
+      ],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('Unsupported chart');
+    expect(rec.rects.some(rect => rect.fs === '#4472C4')).toBe(true);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#ED7D31')).toBe(true);
   });
 
   it('renders a secondary bar group against its right value axis and top category axis', () => {
@@ -5188,6 +7018,28 @@ describe('CH3 — labels are locale-independent (§18.8.30)', () => {
 });
 
 describe('ChartEx flat layouts dispatch to semantic renderers', () => {
+  it('fails closed for an unknown future ChartEx layout without guessing from its data', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'futureLayout',
+      categories: ['A', 'B'],
+      series: [series({ values: [2, -1] })],
+    }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toEqual(['Unsupported chart']);
+    expect(rec.rects).toHaveLength(0);
+    expect(rec.strokeRects).toHaveLength(0);
+    expect(rec.gradients).toHaveLength(0);
+  });
+
+  it('keeps unsupported-layout placeholder work constant for an unbounded public identifier', () => {
+    const rec = recordingCtx();
+    const chartType = 'x'.repeat(1_000_000);
+    renderChart(rec.ctx, baseModel({ chartType, series: [series({ values: [1] })] }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toEqual(['Unsupported chart']);
+  });
+
   it('measures the same semantic ChartEx column legend that it paints', () => {
     const renderPlot = (extraSeries: ChartSeries[]): RectCall => {
       const rec = recordingCtx();
@@ -7841,6 +9693,164 @@ describe('CH9 — bubble scale and numeric-X trendlines', () => {
     expect(rec.arcs.map(arc => arc.fillStyle)).toEqual(['#4472C4', '#ED7D31', '#A5A5A5']);
   });
 
+  it('resolves bubble3D as point over series over owning-group provenance', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['1', '2', '3'],
+      series: [
+        series({
+          values: [1, 2, 3], bubbleSizes: [100, 100, 100],
+          bubble3DGroupDefault: false,
+          bubble3D: true,
+          dataPointOverrides: [{ idx: 0, bubble3D: false }],
+        }),
+        series({
+          values: [1, 2, 3], bubbleSizes: [100, 100, 100],
+          bubble3DGroupDefault: true,
+          bubble3D: false,
+          dataPointOverrides: [{ idx: 2, bubble3D: true }],
+        }),
+        series({
+          values: [1, 2, 3], bubbleSizes: [100, 100, 100],
+          bubble3DGroupDefault: true,
+        }),
+      ],
+      catAxisMin: 0,
+      catAxisMax: 4,
+      valMin: 0,
+      valMax: 4,
+    }), RECT, 1);
+
+    const materials = rec.gradients.filter(gradient => gradient.kind === 'radial');
+    expect(materials).toHaveLength(6);
+    expect(materials.every(gradient => gradient.stops.length === 5)).toBe(true);
+  });
+
+  it('paints one bounded Office-observed material in local bubble coordinates', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble', categories: ['1'],
+      series: [series({
+        values: [1], bubbleSizes: [100], bubble3D: true,
+        chartexStyle: {
+          fillColors: ['4472C4'], fillPaintAuthored: true,
+        },
+      })],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+
+    const material = rec.gradients.find(gradient => gradient.kind === 'radial');
+    expect(material).toBeDefined();
+    expect(material!.stops).toHaveLength(5);
+    const bubble = rec.arcs.at(-1)!;
+    const size = bubble.r * 2;
+    const [highlightX, highlightY, innerRadius, , , outerRadius] = material!.args;
+    expect((highlightX - (bubble.x - bubble.r)) / size).toBeCloseTo(0.42, 2);
+    expect((highlightY - (bubble.y - bubble.r)) / size).toBeCloseTo(0.33, 2);
+    expect(innerRadius).toBe(0);
+    expect(outerRadius / size).toBeCloseTo(0.72, 2);
+    expect(rec.compositeModes).toContain('source-atop');
+  });
+
+  it('keeps noFill and outline independent from the bubble3D material', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble', categories: ['1'],
+      series: [series({
+        values: [1], bubbleSizes: [100], bubble3D: true,
+        chartexStyle: {
+          fillHidden: true, fillPaintAuthored: true,
+          lineColors: ['FF0000'], lineWidthEmu: 25_400,
+          linePaintAuthored: true,
+        },
+      })],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+
+    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(0);
+    expect(rec.strokeDetails.some(stroke =>
+      stroke.strokeStyle === 'rgba(255,0,0,1)' && stroke.lineWidth === 2
+    )).toBe(true);
+  });
+
+  it('always inverts visible negative bubble fill while retaining point outline', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble', showNegativeBubbles: true, categories: ['1'],
+      series: [
+        series({
+          values: [1], bubbleSizes: [-100], bubble3D: false, invertIfNegative: false,
+          dataPointOverrides: [{
+            idx: 0, color: 'FF0000', lineColor: '7F6000', lineWidthEmu: 25_400,
+          }],
+        }),
+        series({
+          values: [1], bubbleSizes: [-100], bubble3D: true, invertIfNegative: true,
+          dataPointOverrides: [{
+            idx: 0, color: 'FF0000', lineColor: '7F6000', lineWidthEmu: 25_400,
+          }],
+        }),
+      ],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+
+    expect(rec.paintEvents.some(event =>
+      event.kind === 'fill' && event.fillStyle === '#FF0000'
+    )).toBe(false);
+    expect(rec.paintEvents.some(event =>
+      event.kind === 'fill' && event.fillStyle === '#FFFFFF'
+    )).toBe(true);
+    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(1);
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '#7F6000')).toHaveLength(2);
+  });
+
+  it('applies bubble3D to the series legend key as well as the plotted bubble', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble', showLegend: true, legendPos: 'r', categories: ['1'],
+      series: [series({
+        name: '3-D bubbles', values: [1], bubbleSizes: [100], bubble3D: true,
+        chartexStyle: { fillColors: ['70AD47'], fillPaintAuthored: true },
+      })],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+
+    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(2);
+  });
+
+  it('lists textual bubble x values as point legend entries', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      showLegend: true,
+      legendPos: 'r',
+      varyColors: false,
+      categories: ['Project A', 'Project B', 'Project C', 'Project D'],
+      series: [series({
+        name: 'Investment vs Profit',
+        bubbleXSourceIsString: true,
+        values: [15, 35, 10, 60],
+        bubbleSizes: [5, 20, 15, 10],
+        dataPointColors: ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000'],
+      })],
+      valMin: 0,
+      valMax: 70,
+    }), RECT, 1);
+
+    const labels = rec.texts.map(text => text.text);
+    expect(labels).toEqual(expect.arrayContaining([
+      'Project A', 'Project B', 'Project C', 'Project D',
+    ]));
+    expect(labels).not.toContain('Investment vs Profit');
+    expect(rec.arcs.slice(-4).map(arc => arc.fillStyle)).toEqual([
+      '#4472C4', '#ED7D31', '#A5A5A5', '#FFC000',
+    ]);
+    // Office maps a string-backed bubble X source to one-based ordinal
+    // positions, yielding the automatic 0..5 axis for four points.
+    expect(labels).toContain('5');
+  });
+
   it('composes showBubbleSize labels with point-level visibility overrides', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -7893,6 +9903,220 @@ describe('CH9 — bubble scale and numeric-X trendlines', () => {
     // The one-series legend key uses the same authored transparent series fill;
     // varyColors does not silently revive it with a theme accent.
     expect(rec.arcs.at(-1)?.fillStyle).toBe('#00000000');
+  });
+
+  it('keeps direct bubble shape paint above the linked marker role', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0', '1'],
+      chartStyleRoles: {
+        dataPointMarker: { fillColors: ['FF0000'], fillPaintAuthored: true },
+      },
+      series: [series({
+        values: [0.25, 0.75],
+        bubbleSizes: [100, 100],
+        chartexStyle: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          fillPaintAuthored: true,
+        },
+      })],
+      catAxisMin: 0,
+      catAxisMax: 1,
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(2);
+    expect(rec.gradients.every(gradient => gradient.stops.length === 2)).toBe(true);
+  });
+
+  it('uses the linked dataPoint shape role for unauthored bubbles', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0', '1'],
+      chartStyleRoles: {
+        dataPoint: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          fillPaintAuthored: true,
+        },
+      },
+      series: [series({ values: [0.25, 0.75], bubbleSizes: [100, 100] })],
+      catAxisMin: 0,
+      catAxisMax: 1,
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(2);
+  });
+
+  it('keeps legacy direct bubble series paint above the linked dataPoint role', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0'],
+      chartStyleRoles: {
+        dataPoint: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          fillPaintAuthored: true,
+          lineColors: ['00FF00'],
+          linePaintAuthored: true,
+        },
+      },
+      series: [series({
+        color: 'FF0000',
+        lineColor: '0000FF',
+        values: [0.5],
+        bubbleSizes: [100],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 1,
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.paintEvents.some(event => event.kind === 'fill' && event.fillStyle === '#FF0000'))
+      .toBe(true);
+    expect(rec.paintEvents.some(event => event.kind === 'stroke' && event.strokeStyle === '#0000FF'))
+      .toBe(true);
+  });
+
+  it('keeps point bubble noFill above direct series structured paint', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0', '1'],
+      series: [series({
+        values: [0.25, 0.75],
+        bubbleSizes: [100, 100],
+        chartexStyle: {
+          fillPaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          fillPaintAuthored: true,
+        },
+        dataPointOverrides: [{
+          idx: 0,
+          chartexStyle: { fillHidden: true, fillPaintAuthored: true },
+        }],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 1,
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(1);
+    expect(rec.paintEvents.filter(event => event.kind === 'fill')).toHaveLength(1);
+  });
+
+  it('keeps direct bubble outline paint above the linked marker line', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0', '1'],
+      chartStyleRoles: {
+        dataPointMarker: { lineColors: ['FF0000'], linePaintAuthored: true },
+      },
+      series: [series({
+        values: [0.25, 0.75],
+        bubbleSizes: [100, 100],
+        chartexStyle: {
+          linePaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          linePaintAuthored: true,
+          lineWidthEmu: 12700,
+        },
+        dataPointOverrides: [{
+          idx: 0,
+          chartexStyle: { lineHidden: true, linePaintAuthored: true },
+        }],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 1,
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(1);
+  });
+
+  it('merges point outline geometry over the series bubble paint property by property', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['0'],
+      chartStyleRoles: {
+        dataPoint: { lineColors: ['FF0000'], linePaintAuthored: true },
+      },
+      series: [series({
+        values: [0.5],
+        bubbleSizes: [100],
+        chartexStyle: {
+          linePaints: [{
+            fillType: 'gradient', gradType: 'linear', angle: 0,
+            stops: [
+              { position: 0, color: '112233' },
+              { position: 1, color: 'DDEEFF' },
+            ],
+          }],
+          linePaintAuthored: true,
+        },
+        dataPointOverrides: [{
+          idx: 0,
+          chartexStyle: {
+            lineWidthEmu: 25_400,
+            lineDash: 'dash',
+            lineDashAuthored: true,
+            lineCap: 'rnd',
+            lineJoin: 'bevel',
+          },
+        }],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 1,
+      valMin: 0,
+      valMax: 1,
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(1);
+    const bubbleStroke = rec.strokeDetails.find(event =>
+      event.strokeStyle === '[object Object]'
+    );
+    expect(bubbleStroke).toMatchObject({
+      lineWidth: 2, cap: 'round', join: 'bevel',
+    });
+    expect(bubbleStroke?.dash.length).toBeGreaterThan(0);
   });
 
   it('uses one automatic numeric-axis density for equal X and Y bubble ranges', () => {
@@ -12546,6 +14770,61 @@ describe('ofPie secondary plots (§21.2.2.126)', () => {
     );
     expect(detailBars).toHaveLength(2);
   });
+
+  it('uses the Office omission rule without a fixed three-point tail', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      ...ofPieModel('pie'),
+      ofPie: {
+        ...ofPieModel('pie').ofPie as NonNullable<ChartModel['ofPie']>,
+        splitType: 'auto',
+        splitTypeAuthored: false,
+        splitPos: null,
+      },
+    }), RECT, 1);
+    const arcsPerCenter = new Map<string, number>();
+    for (const arc of rec.arcs) {
+      const center = `${arc.x.toFixed(2)},${arc.y.toFixed(2)}`;
+      arcsPerCenter.set(center, (arcsPerCenter.get(center) ?? 0) + 1);
+    }
+    // Six points => ceil(6 / 3) = two details. The primary has four source
+    // slices plus the aggregate; the secondary has exactly two slices.
+    expect([...arcsPerCenter.values()].sort((a, b) => a - b)).toEqual([2, 5]);
+  });
+
+  it('does not invent a secondary split for Office-prohibited explicit auto', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      ...ofPieModel('pie'),
+      ofPie: {
+        ...ofPieModel('pie').ofPie as NonNullable<ChartModel['ofPie']>,
+        splitType: 'auto',
+        splitTypeAuthored: true,
+        splitPos: null,
+      },
+    }), RECT, 1);
+    const centers = new Set(rec.arcs.map(arc => `${arc.x.toFixed(2)},${arc.y.toFixed(2)}`));
+    expect(centers.size).toBe(1);
+    expect(rec.arcs).toHaveLength(6);
+  });
+
+  it.each([
+    { splitType: 'pos' as const, splitPos: 6, customSplitIndices: null },
+    { splitType: 'cust' as const, splitPos: null, customSplitIndices: [0, 1, 2, 3, 4, 5] },
+  ])('keeps an aggregate-only primary plot when $splitType selects every point', split => {
+    const rec = recordingCtx();
+    const model = ofPieModel('pie');
+    renderChart(rec.ctx, {
+      ...model,
+      ofPie: { ...model.ofPie as NonNullable<ChartModel['ofPie']>, ...split },
+    }, RECT, 1);
+    const arcsPerCenter = new Map<string, number>();
+    for (const arc of rec.arcs) {
+      const center = `${arc.x.toFixed(2)},${arc.y.toFixed(2)}`;
+      arcsPerCenter.set(center, (arcsPerCenter.get(center) ?? 0) + 1);
+    }
+    expect([...arcsPerCenter.values()].sort((a, b) => a - b)).toEqual([1, 6]);
+  });
 });
 
 describe('classic line-chart group decorations', () => {
@@ -13722,6 +16001,371 @@ describe('CH13 — stock chart (high/low/close)', () => {
 });
 
 describe('surface contour charts', () => {
+  const wireframeSurfaceModel = (over: Partial<ChartModel> = {}): ChartModel => baseModel({
+    chartType: 'surface3D',
+    categories: ['X1', 'X2'],
+    valMin: 0,
+    valMax: 10,
+    valAxisMajorUnit: 10,
+    surfaceWireframe: true,
+    catAxisHidden: true,
+    valAxisHidden: true,
+    catAxisMajorGridlines: false,
+    valAxisMajorGridlines: false,
+    threeD: {
+      rotationX: 30,
+      rotationY: 20,
+      perspective: 30,
+      seriesAxis: { hidden: true, lineHidden: true, majorTickMark: 'none' },
+    },
+    series: [
+      series({ name: 'Y1', values: [2, 4] }),
+      series({ name: 'Y2', values: [6, 8] }),
+    ],
+    ...over,
+  });
+
+  it('renders surface3D as the same bounded source-grid mesh without flattening it to another family', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'surface3D',
+      categories: ['X1', 'X2'],
+      valMin: 0,
+      valMax: 4,
+      valAxisMajorUnit: 1,
+      surfaceWireframe: false,
+      threeD: { rotationX: 30, rotationY: 20, perspective: 30 },
+      series: [
+        series({ name: 'Y1', values: [1, 2] }),
+        series({ name: 'Y2', values: [3, 4] }),
+      ],
+    }), RECT, 1);
+    expect(rec.texts.map(text => text.text)).not.toContain('Unsupported chart');
+    expect(rec.filledPaths.length).toBeGreaterThan(0);
+  });
+
+  it('uses the linked dataPointWireframe line for a Surface wireframe mesh', () => {
+    const rec = recordingCtx();
+    const wireframeGradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: Array.from({ length: 4_096 }, (_, index) => ({
+        position: index / 4_095,
+        color: index === 0 ? '123456' : 'ABCDEF',
+      })),
+    };
+    const filledSurfaceGradient = {
+      ...wireframeGradient,
+      stops: [
+        { position: 0, color: 'FF0000' },
+        { position: 1, color: 'FFCCCC' },
+      ],
+    };
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      chartStyleRoles: {
+        dataPoint3D: {
+          linePaints: [filledSurfaceGradient],
+          linePaintAuthored: true,
+        },
+        dataPointWireframe: {
+          linePaints: [wireframeGradient],
+          linePaintAuthored: true,
+          lineColorIndex: 0,
+          lineWidthEmu: 25_400,
+          lineDash: 'dash',
+          lineCap: 'rnd',
+          lineJoin: 'bevel',
+        },
+      },
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(1);
+    expect(rec.gradients[0].stops).toHaveLength(4_096);
+    expect(rec.gradients[0].stops[0]?.color).toBe('rgba(18,52,86,1)');
+    const wireframe = rec.strokeDetails.filter(stroke =>
+      stroke.lineWidth === 2
+      && stroke.dash.length > 0
+      && stroke.cap === 'round'
+      && stroke.join === 'bevel'
+    );
+    expect(wireframe).toHaveLength(4);
+  });
+
+  it('keeps unresolved, no-fill, and compound dataPointWireframe lines fail-closed', () => {
+    for (const role of [
+      { linePaintAuthored: true, lineColorIndex: 0 },
+      { lineHidden: true, lineColorIndex: 0 },
+      { lineCompound: 'dbl' },
+    ]) {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, wireframeSurfaceModel({
+        chartStyleRoles: { dataPointWireframe: role },
+      }), RECT, 1);
+      expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#595959')).toBe(false);
+    }
+  });
+
+  it('does not guess a relative dataPointWireframe palette index', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      chartStyleRoles: {
+        dataPointWireframe: {
+          lineColors: ['123456', 'ABCDEF'],
+          linePaintAuthored: true,
+        },
+      },
+    }), RECT, 1);
+
+    expect(rec.strokeDetails.some(stroke =>
+      stroke.strokeStyle === '#123456' || stroke.strokeStyle === '#ABCDEF'
+    )).toBe(false);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#595959')).toBe(false);
+  });
+
+  it('does not let a linked wireframe line overwrite direct series or band outlines', () => {
+    const linked = {
+      lineColors: ['123456'],
+      lineColorIndex: 0,
+      linePaintAuthored: true,
+    };
+    const directModels: Array<Partial<ChartModel>> = [
+      {
+        series: [
+          series({ name: 'Y1', values: [2, 4], lineColor: 'AA0000' }),
+          series({ name: 'Y2', values: [6, 8] }),
+        ],
+      },
+      {
+        series: [
+          series({
+            name: 'Y1', values: [2, 4],
+            chartexStyle: { lineHidden: true, linePaintAuthored: true },
+          }),
+          series({ name: 'Y2', values: [6, 8] }),
+        ],
+      },
+      { surfaceBandFormats: [{ idx: 0, lineColor: '00AA00' }] },
+    ];
+    for (const direct of directModels) {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, wireframeSurfaceModel({
+        ...direct,
+        chartStyleRoles: { dataPointWireframe: linked },
+      }), RECT, 1);
+      expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#123456')).toBe(false);
+      expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#595959')).toBe(false);
+    }
+  });
+
+  it('does not apply dataPointWireframe paint to a filled Surface', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      surfaceWireframe: false,
+      chartStyleRoles: {
+        dataPointWireframe: {
+          linePaints: [{
+            fillType: 'gradient',
+            gradType: 'linear',
+            angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096,
+              color: '123456',
+            })),
+          }],
+          linePaintAuthored: true,
+          lineColorIndex: 0,
+        },
+      },
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.filledPaths.length).toBeGreaterThan(0);
+  });
+
+  it('rejects an oversized dataPointWireframe line before resolving it', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      chartStyleRoles: {
+        dataPointWireframe: {
+          linePaints: [{
+            fillType: 'gradient',
+            gradType: 'linear',
+            angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096,
+              color: '123456',
+            })),
+          }],
+          linePaintAuthored: true,
+          lineColorIndex: 0,
+        },
+      },
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.strokeDetails).toHaveLength(0);
+  });
+
+  it('resolves Surface band paint once with direct structured/unresolved/no-fill precedence', () => {
+    const rec = recordingCtx();
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: [
+        { position: 0, color: '112233' },
+        { position: 1, color: 'DDEEFF' },
+      ],
+    };
+    const directGradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 90,
+      stops: [
+        { position: 0, color: 'AA0000' },
+        { position: 1, color: 'FFCCCC' },
+      ],
+    };
+    renderChart(rec.ctx, baseModel({
+      chartType: 'surface',
+      categories: ['X1', 'X2'],
+      valMin: 0,
+      valMax: 40,
+      valAxisMajorUnit: 10,
+      surfaceWireframe: false,
+      chartStyleRoles: {
+        dataPoint3D: { fillPaints: [gradient], fillPaintAuthored: true, lineHidden: true },
+      },
+      surfaceBandFormats: [
+        {
+          idx: 0,
+          style: { fillHidden: true, fillPaintAuthored: true },
+          fillHidden: true,
+        },
+        { idx: 1, style: { fillPaintAuthored: true } },
+        {
+          idx: 2,
+          style: { fillPaints: [directGradient], fillPaintAuthored: true },
+        },
+      ],
+      series: [
+        series({ name: 'Y1', values: [5, 35] }),
+        series({ name: 'Y2', values: [35, 5] }),
+      ],
+    }), RECT, 1);
+
+    // Band 0 is direct noFill, band 1 is authored-but-unresolved, band 2 uses
+    // its direct recipe, and band 3 uses the linked role. Each visible recipe
+    // is registered once despite spanning several clipped polygons.
+    expect(rec.gradients).toHaveLength(2);
+    expect(rec.gradients.map(item => item.stops[0]?.color)).toEqual([
+      'rgba(170,0,0,1)',
+      'rgba(17,34,51,1)',
+    ]);
+    expect(rec.filledPaths.length).toBeGreaterThan(1);
+  });
+
+  it('paints Surface3D wall roles and keeps direct unresolved/no-fill authoritative', () => {
+    const rec = recordingCtx();
+    const gradient = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 90,
+      stops: [
+        { position: 0, color: '334455' },
+        { position: 1, color: 'CCDDEE' },
+      ],
+    };
+    renderChart(rec.ctx, baseModel({
+      chartType: 'surface3D',
+      categories: ['X1', 'X2'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorUnit: 10,
+      surfaceWireframe: false,
+      chartStyleRoles: {
+        floor: { fillPaints: [gradient], fillPaintAuthored: true },
+        wall: { fillPaints: [gradient], fillPaintAuthored: true },
+      },
+      threeD: {
+        rotationX: 30,
+        rotationY: 20,
+        perspective: 30,
+        floor: { fillHidden: true },
+        backWall: { style: { fillPaintAuthored: true } },
+      },
+      series: [
+        series({ name: 'Y1', values: [2, 4] }),
+        series({ name: 'Y2', values: [6, 8] }),
+      ],
+    }), RECT, 1);
+
+    // floor=noFill and authored-but-unresolved backWall both suppress linked
+    // paint. Only sideWall consumes the linked wall gradient.
+    expect(rec.gradients).toHaveLength(1);
+  });
+
+  it('uses the same authored wall-thickness slabs for Surface3D', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'surface3D',
+      categories: ['X1', 'X2'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorUnit: 10,
+      surfaceWireframe: false,
+      threeD: {
+        rotationX: 20,
+        rotationY: 20,
+        perspective: 30,
+        floor: { fillColor: 'FF0000', thicknessPercent: 25 },
+        sideWall: { fillColor: '00B050', thicknessPercent: 25 },
+        backWall: { fillColor: 'AA00FF', thicknessPercent: 25 },
+      },
+      series: [
+        series({ name: 'Y1', values: [2, 4] }),
+        series({ name: 'Y2', values: [6, 8] }),
+      ],
+    }), RECT, 1);
+    for (const color of ['#FF0000', '#00B050', '#AA00FF']) {
+      expect(rec.filledPaths.filter(path => path.fillStyle === color).length).toBeGreaterThan(1);
+    }
+  });
+
+  it('rejects an oversized linked Surface recipe before resolving any paint', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'surface',
+      categories: ['X1', 'X2'],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorUnit: 10,
+      surfaceWireframe: false,
+      chartStyleRoles: {
+        dataPoint3D: {
+          fillPaints: [{
+            fillType: 'gradient',
+            gradType: 'linear',
+            angle: 0,
+            stops: Array.from({ length: 4_097 }, (_, index) => ({
+              position: index / 4_096,
+              color: '112233',
+            })),
+          }],
+          fillPaintAuthored: true,
+        },
+      },
+      series: [
+        series({ name: 'Y1', values: [2, 4] }),
+        series({ name: 'Y2', values: [6, 8] }),
+      ],
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.filledPaths).toHaveLength(0);
+  });
+
   it('centres category points but places Surface series on axis endpoints', () => {
     const rec = strokedPolylineCtx();
     renderChart(rec.ctx, baseModel({

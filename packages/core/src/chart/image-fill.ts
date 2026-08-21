@@ -15,12 +15,25 @@ import {
   markerSymbolConsumesFill,
   seriesHasMarkerDetail,
   seriesLegendMarkerIsVisible,
+  visibleBubbleSize,
 } from './marker-style.js';
 import {
   MAX_CANVAS_CHART_POINTS,
+  MAX_CHART_IMAGE_FILL_TILES,
   MAX_CHART_MARKER_IMAGE_SOURCES,
   sourceChartStructureCount,
 } from './resource-limits.js';
+import { indexChartPlotGroups, markerChartTypeForPlotGroup } from './plot-groups.js';
+import { chartThreeDSurfacePaint } from './style-paint.js';
+import { planChartThreeDSurfacePicture } from './three-d-surface-picture-plan.js';
+
+const SURFACE_PICTURE_FAMILIES = new Set([
+  'line', 'stackedLine', 'stackedLinePct',
+  'area', 'stackedArea', 'stackedAreaPct',
+  'clusteredBar', 'clusteredBarH',
+  'stackedBar', 'stackedBarH', 'stackedBarPct', 'stackedBarHPct',
+  'surface', 'surface3D',
+]);
 
 export type ChartImageLookup = (fill: ImageFill) => CanvasImageSource | null | undefined;
 
@@ -74,14 +87,20 @@ function alignmentOffset(
   return { x, y };
 }
 
-const MAX_CHART_IMAGE_FILL_TILES = 4_096;
 const TILE_ALIGNMENTS = new Set(['tl', 't', 'tr', 'l', 'ctr', 'r', 'bl', 'b', 'br']);
 const TILE_FLIPS = new Set(['none', 'x', 'y', 'xy']);
 
-interface TileGeometry {
+export interface ChartImageTileMetrics {
   alignment: string;
   tileW: number;
   tileH: number;
+  offsetX: number;
+  offsetY: number;
+  flipX: boolean;
+  flipY: boolean;
+}
+
+interface TileGeometry extends ChartImageTileMetrics {
   columns: number;
   rows: number;
   repetitions: number;
@@ -94,13 +113,20 @@ function imageFillModeIsPaintable(fill: ImageFill): boolean {
     && srcRectHasVisibleArea(fill.srcRect);
 }
 
-function imageTileGeometry(
+/** Return the synchronously preloaded source for a validated chart image fill.
+ * Kept internal to chart modules; hosts still own all fetch/decode work. */
+export function chartImageFillSource(fill: ImageFill): CanvasImageSource | null {
+  if (!imageFillModeIsPaintable(fill)) return null;
+  return activeLookup?.(fill) ?? null;
+}
+
+/** Resolve the shared DrawingML tile size, offset, alignment and mirroring.
+ * Destination-specific repetition counts remain with each consumer. */
+export function chartImageTileMetrics(
   fill: ImageFill,
   image: CanvasImageSource,
-  w: number,
-  h: number,
-  ptToPx: number,
-): TileGeometry | null {
+  ptToPx = PT_TO_PX,
+): ChartImageTileMetrics | null {
   const tile = fill.tile;
   // CT_TileInfoProperties@flip defaults to none. Its remaining placement
   // attributes and CT_BlipFillProperties@dpi have no usable schema default.
@@ -122,11 +148,48 @@ function imageTileGeometry(
   const tileW = natural.w * (sx as number) * cssPixelsPerImagePixel;
   const tileH = natural.h * (sy as number) * cssPixelsPerImagePixel;
   if (!(tileW > 0) || !(tileH > 0)) return null;
+  return {
+    alignment: algn,
+    tileW,
+    tileH,
+    offsetX: (tx as number) / EMU_PER_PT * ptToPx,
+    offsetY: (ty as number) / EMU_PER_PT * ptToPx,
+    flipX: flip === 'x' || flip === 'xy',
+    flipY: flip === 'y' || flip === 'xy',
+  };
+}
+
+/** Place the authored tile-grid origin in one destination's local coordinates. */
+export function chartImageTileOrigin(
+  metrics: ChartImageTileMetrics,
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  const anchor = alignmentOffset(
+    metrics.alignment,
+    width,
+    height,
+    metrics.tileW,
+    metrics.tileH,
+  );
+  return { x: anchor.x + metrics.offsetX, y: anchor.y + metrics.offsetY };
+}
+
+function imageTileGeometry(
+  fill: ImageFill,
+  image: CanvasImageSource,
+  w: number,
+  h: number,
+  ptToPx: number,
+): TileGeometry | null {
+  const metrics = chartImageTileMetrics(fill, image, ptToPx);
+  if (!metrics) return null;
+  const { tileW, tileH } = metrics;
   const columns = Math.ceil(w / tileW) + 2;
   const rows = Math.ceil(h / tileH) + 2;
   const repetitions = columns * rows;
   if (!Number.isSafeInteger(repetitions)) return null;
-  return { alignment: algn, tileW, tileH, columns, rows, repetitions };
+  return { ...metrics, columns, rows, repetitions };
 }
 
 /** Exact Canvas image-draw work for one picture fill at the destination size.
@@ -217,8 +280,36 @@ function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageF
       ? null
       : undefined;
   };
-  const scatterHasNumericX = chart.series.some(series => {
-    const family = series.seriesType ?? chart.chartType;
+  const finiteSurfaceValue = chart.series.some(series =>
+    series.values.some(value => value != null && Number.isFinite(value))
+  );
+  const surfaceColumnCount = Math.max(
+    chart.categories.length,
+    ...chart.series.map(series => series.categories?.length ?? series.values.length),
+  );
+  const surfaceGeometryCanPaint = chart.chartType === 'surface' || chart.chartType === 'surface3D'
+    ? chart.series.length >= 2 && surfaceColumnCount >= 2 && finiteSurfaceValue
+    : finiteSurfaceValue;
+  if (chart.threeD && SURFACE_PICTURE_FAMILIES.has(chart.chartType) && surfaceGeometryCanPaint) {
+    const explicitSpan = chart.valMin != null && Number.isFinite(chart.valMin)
+      && chart.valMax != null && Number.isFinite(chart.valMax)
+      ? chart.valMax - chart.valMin
+      : undefined;
+    for (const [kind, role] of [
+      ['floor', 'floor'], ['sideWall', 'wall'], ['backWall', 'wall'],
+    ] as const) {
+      const surface = chart.threeD[kind];
+      const fill = chartThreeDSurfacePaint(chart, surface, role).fill;
+      if (fill?.fillType === 'image'
+        && planChartThreeDSurfacePicture(fill, surface, kind, explicitSpan)) add(fill);
+    }
+  }
+  const plotGroupBySeries = indexChartPlotGroups(chart);
+  const scatterHasNumericX = chart.series.some((series, seriesIndex) => {
+    const group = plotGroupBySeries[seriesIndex];
+    const family = group?.kind === 'bubble' || group?.kind === 'scatter'
+      ? 'scatter'
+      : series.seriesType ?? (chart.chartType === 'bubble' ? 'scatter' : chart.chartType);
     return family === 'scatter' && (series.categories ?? chart.categories).some(category =>
       Number.isFinite(Number.parseFloat(category))
     );
@@ -230,13 +321,26 @@ function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageF
     || chart.series.some(series => series.values.length > 0);
   for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
     const series = chart.series[seriesIndex];
-    const family = series.seriesType ?? chart.chartType;
+    const group = plotGroupBySeries[seriesIndex];
+    const isBubble = group?.kind === 'bubble'
+      || (group == null && chart.chartType === 'bubble');
+    const family = group?.kind === 'bubble' || group?.kind === 'scatter'
+      ? 'scatter'
+      : series.seriesType ?? (chart.chartType === 'bubble' ? 'scatter' : chart.chartType);
+    const effectiveChartType = markerChartTypeForPlotGroup(chart.chartType, group);
+    const effectiveScatterStyle = group?.scatterStyle ?? chart.scatterStyle;
+    const effectiveRadarStyle = group?.radarStyle ?? chart.radarStyle;
+    const markerContext = {
+      chartType: effectiveChartType,
+      bubbleScale: group?.bubbleScale ?? chart.bubbleScale,
+      showNegativeBubbles: group?.showNegativeBubbles ?? chart.showNegativeBubbles,
+    };
     const markerFamily = family === 'line' || family === 'stackedLine'
       || family === 'stackedLinePct' || family === 'area'
       || family === 'stackedArea' || family === 'stackedAreaPct'
       || family === 'scatter' || family === 'radar' || family === 'stock';
     if (!markerFamily || markersSuppressedByChartStyle(
-      family, chart.chartType, chart.scatterStyle, chart.radarStyle,
+      family, effectiveChartType, effectiveScatterStyle, effectiveRadarStyle,
     )) continue;
     const areaFamily = family === 'area' || family === 'stackedArea'
       || family === 'stackedAreaPct';
@@ -251,18 +355,26 @@ function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageF
       series.values.length, series.categories?.length ?? 0, chart.categories.length,
     );
     const labelKeyVisible = dataLabelLegendKeyCount(
-      chart, series, family, pointCount, scatterHasNumericX,
+      chart, series, family, pointCount, scatterHasNumericX, markerContext,
     ) > 0;
     const seriesKeyVisible = seriesLegendMarkerIsVisible(
-      chart.chartType, chart.scatterStyle, series, chart.radarStyle,
+      effectiveChartType, effectiveScatterStyle, series, effectiveRadarStyle,
     ) && ((chart.showLegend && !legendDeleted)
       || (chart.dataTable?.showKeys === true && chartDataTableFamilyIsPainted(chart.chartType)
         && chartHasCategories)
       || labelKeyVisible);
     const seriesKeySymbol = series.markerSymbol ?? (family === 'stock' ? 'none' : 'circle');
     if (seriesKeyVisible && markerSymbolConsumesFill(seriesKeySymbol)) {
-      add(series.markerFillPaint);
-      if (series.markerFillPaint === undefined && series.markerFill == null
+      if (isBubble) {
+        const seriesShape = styleImageDecision(series.chartexStyle, seriesIndex);
+        if (seriesShape) add(seriesShape);
+        if (seriesShape === undefined && series.color == null) {
+          const linkedShape = styleImageDecision(chart.chartStyleRoles?.dataPoint, seriesIndex);
+          if (linkedShape) add(linkedShape);
+        }
+      } else add(series.markerFillPaint);
+      if (!isBubble
+        && series.markerFillPaint === undefined && series.markerFill == null
         && series.markerFillPaintAuthored !== true) {
         add(selectedStylePaint(linkedMarkerStyle, seriesIndex));
       }
@@ -271,11 +383,33 @@ function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageF
     const overrides = new Map((series.dataPointOverrides ?? []).map(point => [point.idx, point]));
     for (let index = 0; index < pointCount; index++) {
       if (!classicMarkerPointIsPainted(
-        chart, series, family, index, scatterHasNumericX,
+        chart, series, family, index, scatterHasNumericX, markerContext,
       )) continue;
       const point = overrides.get(index);
       const symbol = effectiveMarkerSymbol(series, point, 'circle', seriesVisible);
       if (!markerSymbolConsumesFill(symbol)) continue;
+      if (isBubble) {
+        const effectiveBubbleSettings = {
+          showNegativeBubbles: group?.showNegativeBubbles ?? chart.showNegativeBubbles,
+        };
+        if ((group?.bubbleScale ?? chart.bubbleScale ?? 100) <= 0
+          || visibleBubbleSize(effectiveBubbleSettings, series.bubbleSizes?.[index]) == null) continue;
+        // MS-OE376 §2.1.1504(b): a visible negative bubble uses the
+        // application's inverted fill, not its positive direct/linked image.
+        // The current wire model's alternate bubble default is solid/noFill,
+        // so none of these positive image sources is reachable.
+        if ((series.bubbleSizes?.[index] ?? 0) < 0) continue;
+        const pointShape = styleImageDecision(point?.chartexStyle, index);
+        if (pointShape) add(pointShape);
+        if (pointShape !== undefined || point?.fillHidden === true || point?.color != null) continue;
+        if (series.dataPointColors?.[index] != null) continue;
+        const seriesShape = styleImageDecision(series.chartexStyle, index);
+        if (seriesShape) add(seriesShape);
+        if (seriesShape !== undefined || series.color != null) continue;
+        const linkedShape = styleImageDecision(chart.chartStyleRoles?.dataPoint, index);
+        if (linkedShape) add(linkedShape);
+        continue;
+      }
       const paint = markerFillPaintFor(series, point, index);
       add(paint);
       if (paint === undefined && point?.markerFill == null && point?.color == null
@@ -320,7 +454,7 @@ export function collectChartMarkerImageFills(chart: ChartModel): ImageFill[] {
   return collectChartMarkerImageFillResult(chart).fills;
 }
 
-/** Collect marker images for one host render pass. Hosts retain the decoded
+/** Collect chart picture fills for one host render pass. Hosts retain the decoded
  * sources until that page/slide/viewport paint completes, so the count ceiling
  * applies to the aggregate rather than independently to each chart. */
 export function collectChartMarkerImageFillsForCharts(
@@ -380,14 +514,14 @@ export function paintChartImageFill(
     ctx.restore();
     return false;
   }
-  const { alignment, tileW, tileH, columns, rows } = geometry;
-  const anchor = alignmentOffset(alignment, w, h, tileW, tileH);
-  const originX = x + anchor.x + (fill.tile.tx as number) / EMU_PER_PT * ptToPx;
-  const originY = y + anchor.y + (fill.tile.ty as number) / EMU_PER_PT * ptToPx;
+  const {
+    tileW, tileH, flipX, flipY, columns, rows,
+  } = geometry;
+  const origin = chartImageTileOrigin(geometry, w, h);
+  const originX = x + origin.x;
+  const originY = y + origin.y;
   const firstColumn = Math.floor((x - originX) / tileW) - 1;
   const firstRow = Math.floor((y - originY) / tileH) - 1;
-  const flipX = fill.tile.flip === 'x' || fill.tile.flip === 'xy';
-  const flipY = fill.tile.flip === 'y' || fill.tile.flip === 'xy';
   for (let row = firstRow; row < firstRow + rows; row++) {
     for (let column = firstColumn; column < firstColumn + columns; column++) {
       const dx = originX + column * tileW;

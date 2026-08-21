@@ -8,12 +8,14 @@ import type {
   ChartSeries,
 } from '../types/chart.js';
 import type { Fill } from '../types/common.js';
-import { paintChartImageFill } from './image-fill.js';
+import { chartImageFillSource, paintChartImageFill } from './image-fill.js';
+import { paintChartThreeDSurfacePicture } from './three-d-surface-picture.js';
 import {
   effectiveMarkerSymbol,
   hasVisiblePointMarkerOverride,
   markerFillColorFor,
   markerFillPaintFor,
+  markerPaintComponents,
   seriesMarkerFillColor,
   seriesMarkerFillPaint,
   seriesHasMarkerDetail,
@@ -58,6 +60,9 @@ import {
 } from './data-label-style.js';
 import {
   fitChartThreeDProjectionToPoints,
+  fitChartThreeDProjectionToWallThickness,
+  pieThreeDThicknessMultiplier,
+  planChartThreeDSurfaceGeometry,
   planChartThreeDProjection,
   planThreeDBarClusterSlot,
   threeDToMaxScale,
@@ -84,12 +89,21 @@ import {
   buildProjectedStrokePrimitives,
   MAX_PROJECTED_STROKE_PRIMITIVES,
   type ProjectedStrokePoint,
-  type ProjectedStrokePrimitive,
 } from './three-d-stroke.js';
 import { buildThreeDOutlineTopology } from './three-d-outline.js';
 import { paintLegendFrame } from './legend-frame.js';
 import { paintPlotAreaFrame } from './plot-area-frame.js';
 import { resolveFill } from '../shape/paint.js';
+import {
+  chartThreeDSurfacePaint,
+  chartStyleFillDecision,
+  chartStyleLineDecision,
+} from './style-paint.js';
+import { drawingmlLineDashArray } from '../draw/dash.js';
+import {
+  MAX_CHART_PAINT_COMPONENTS,
+  MAX_CHART_PAINT_RECIPE_COMPONENTS,
+} from './resource-limits.js';
 
 interface ThreeDLegendTextStyle {
   fontPx: number;
@@ -130,6 +144,8 @@ function threeDLegendTextStyle(
 }
 
 const PALETTE = ['4472C4', 'ED7D31', '70AD47', 'A5A5A5', 'FFC000', '5B9BD5'] as const;
+const MAX_THREE_D_PAINT_RECIPE_COMPONENTS = MAX_CHART_PAINT_RECIPE_COMPONENTS;
+const MAX_THREE_D_PAINT_COMPONENTS = MAX_CHART_PAINT_COMPONENTS;
 const SUPPORTED_CARTESIAN_THREE_D_TYPES = new Set([
   'line', 'stackedLine', 'stackedLinePct',
   'area', 'stackedArea', 'stackedAreaPct',
@@ -179,6 +195,10 @@ interface Point { x: number; y: number }
 interface SceneFace {
   points: readonly Point[];
   color: string;
+  /** One already-resolved paint shared by every face of the same datum.
+   * `null` is authored noFill/unresolved and suppresses the automatic solid. */
+  paint?: string | CanvasGradient | CanvasPattern | null;
+  paintRole: 'fill' | 'outline';
   shade: number;
   cameraDepth: number;
   cameraDepths?: readonly number[];
@@ -207,34 +227,407 @@ interface ScenePrimitiveBudget {
 const colorFor = (index: number, series?: ChartSeries): string =>
   `#${series?.color ?? PALETTE[index % PALETTE.length]}`;
 
-/** Whether a bar/column face has an authored DrawingML outline.
- *
- * A chart-space `<c:spPr><a:ln>` is the chart object's border; it must never
- * leak onto every 3-D datum.  Classic 3-D bar series with no local line paint
- * are material surfaces only: their apparent dark edges come from shaded side
- * faces.  Point formatting is more specific than series formatting, while an
- * explicit point/series noFill remains authoritative.
- */
-function hasAuthoredDatumOutline(
+interface ThreeDDatumPaint {
+  color: string;
+  fill: Fill | null | undefined;
+  lineColor: string | null;
+  lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
+  lineWidthEmu: number | null | undefined;
+  lineDash: string | null | undefined;
+  lineCustomDash: ChartModel['plotAreaLineCustomDash'];
+  lineCap: CanvasLineCap;
+  lineJoin: CanvasLineJoin;
+}
+
+function threeDPaintsWithinBudget<T>(
+  items: readonly T[],
+  fillFor: (item: T) => Fill | null | undefined,
+  lineFor: (item: T) => ChartModel['plotAreaLineFill'] | null | undefined,
+): boolean {
+  let total = 0;
+  for (const item of items) {
+    for (const recipe of [fillFor(item), lineFor(item)]) {
+      if (recipe == null) continue;
+      const components = markerPaintComponents(recipe);
+      if ((recipe.fillType === 'gradient'
+          && components > MAX_THREE_D_PAINT_RECIPE_COMPONENTS)
+        || components > MAX_THREE_D_PAINT_COMPONENTS - total) return false;
+      total += components;
+    }
+  }
+  return true;
+}
+
+interface ThreeDPercentCategoryScale {
+  maxMagnitude: number;
+  scaledTotal: number;
+}
+
+/** Plan percent denominators once per category in O(series × categories).
+ * Dividing by the category maximum first keeps finite Number.MAX_VALUE inputs
+ * proportional without overflowing their absolute-value sum. */
+function planThreeDPercentCategoryScales(
+  chart: ChartModel,
+  categoryCount: number,
+): ThreeDPercentCategoryScale[] {
+  const scales = Array.from({ length: categoryCount }, () => ({
+    maxMagnitude: 0,
+    scaledTotal: 0,
+  }));
+  for (const series of chart.series) {
+    for (let index = 0; index < categoryCount; index++) {
+      const candidate = series.values[index];
+      if (candidate != null && Number.isFinite(candidate)) {
+        scales[index].maxMagnitude = Math.max(
+          scales[index].maxMagnitude,
+          Math.abs(candidate),
+        );
+      }
+    }
+  }
+  for (const series of chart.series) {
+    for (let index = 0; index < categoryCount; index++) {
+      const candidate = series.values[index];
+      const maxMagnitude = scales[index].maxMagnitude;
+      if (candidate != null && Number.isFinite(candidate) && maxMagnitude > 0) {
+        scales[index].scaledTotal += Math.abs(candidate) / maxMagnitude;
+      }
+    }
+  }
+  return scales;
+}
+
+/** Convert one value into the plotted percent-stack domain from the bounded
+ * category plan shared by preflight, extent planning, and geometry paint. */
+function threeDPlottedValue(
+  chart: ChartModel,
+  seriesIndex: number,
+  categoryIndex: number,
+  percentScales: readonly ThreeDPercentCategoryScale[] | undefined,
+): number {
+  const raw = chart.series[seriesIndex]?.values[categoryIndex] ?? 0;
+  if (!Number.isFinite(raw)) return 0;
+  if (!percentScales) return raw;
+  const { maxMagnitude, scaledTotal } = percentScales[categoryIndex]
+    ?? { maxMagnitude: 0, scaledTotal: 0 };
+  if (!(maxMagnitude > 0)) return 0;
+  return scaledTotal > 0 ? raw / maxMagnitude / scaledTotal * 100 : 0;
+}
+
+function threeDSafeAdd(left: number, right: number): number {
+  const sum = left + right;
+  if (Number.isFinite(sum)) return sum;
+  return right < 0 ? -Number.MAX_VALUE : Number.MAX_VALUE;
+}
+
+/** Preflight every structured recipe that the selected optional 3-D family
+ * can consume before title, plot, wall, or datum paint begins. This keeps a
+ * public model or linked style with an oversized gradient atomic instead of
+ * leaving a partially painted chart behind. */
+function threeDChartPaintsWithinBudget(chart: ChartModel): boolean {
+  const paints: Array<{
+    fill: Fill | null | undefined;
+    line: ChartModel['plotAreaLineFill'] | null | undefined;
+  }> = [];
+  for (const [surface, role] of [
+    [chart.threeD?.floor, 'floor'],
+    [chart.threeD?.sideWall, 'wall'],
+    [chart.threeD?.backWall, 'wall'],
+  ] as const) {
+    const paint = chartThreeDSurfacePaint(chart, surface, role);
+    paints.push({ fill: paint.fill, line: paint.line });
+  }
+
+  if (chart.chartType === 'pie') {
+    const series = chart.series[0];
+    if (series) {
+      const overrides = new Map(
+        series.dataPointOverrides?.map(point => [point.idx, point]) ?? [],
+      );
+      for (let index = 0; index < series.values.length; index++) {
+        const value = series.values[index];
+        if (value == null || !Number.isFinite(value) || Math.abs(value) <= 0) continue;
+        const paint = threeDDatumPaint(chart, series, overrides.get(index), index, 0);
+        paints.push({ fill: paint.fill, line: paint.lineFill });
+      }
+    }
+  } else {
+    const bars = chart.chartType === 'clusteredBar'
+      || chart.chartType === 'clusteredBarH'
+      || chart.chartType.startsWith('stackedBar');
+    if (bars) {
+      const stacked = chart.chartType.startsWith('stacked');
+      const percent = chart.chartType.endsWith('Pct');
+      const zeroBlanks = stacked || chart.dispBlanksAs === 'zero';
+      const logarithmic = chart.valAxisLogBase != null
+        && Number.isFinite(chart.valAxisLogBase) && chart.valAxisLogBase >= 2;
+      const categoryCount = Math.max(
+        1,
+        chart.categories.length,
+        ...chart.series.map(series => Math.max(
+          series.values.length,
+          series.categories?.length ?? 0,
+        )),
+      );
+      const percentScales = percent
+        ? planThreeDPercentCategoryScales(chart, categoryCount)
+        : undefined;
+      const visibleInterval = (base: number, end: number): boolean => {
+        if (base === end) return false;
+        const lower = Math.min(base, end);
+        const upper = Math.max(base, end);
+        const min = chart.valMin;
+        const max = chart.valMax;
+        if (min != null && Number.isFinite(min) && upper <= min) return false;
+        if (max != null && Number.isFinite(max) && lower >= max) return false;
+        return !logarithmic || upper > 0;
+      };
+      const positiveBase = new Array(categoryCount).fill(0) as number[];
+      const negativeBase = new Array(categoryCount).fill(0) as number[];
+      for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
+        const series = chart.series[seriesIndex];
+        const overrides = new Map(
+          series.dataPointOverrides?.map(point => [point.idx, point]) ?? [],
+        );
+        for (let index = 0; index < categoryCount; index++) {
+          const value = series.values[index];
+          const visible = value != null && Number.isFinite(value)
+            && (!logarithmic || value > 0)
+            || (value == null && zeroBlanks);
+          if (!visible) continue;
+          const plottedValue = threeDPlottedValue(chart, seriesIndex, index, percentScales);
+          const base = stacked
+            ? (plottedValue >= 0 ? positiveBase[index] : negativeBase[index])
+            : 0;
+          const end = threeDSafeAdd(base, plottedValue);
+          if (stacked) {
+            if (plottedValue >= 0) positiveBase[index] = end;
+            else negativeBase[index] = end;
+          }
+          if (!visibleInterval(base, end)) continue;
+          const paint = threeDDatumPaint(
+            chart, series, overrides.get(index), index, seriesIndex,
+          );
+          paints.push({ fill: paint.fill, line: paint.lineFill });
+        }
+      }
+    } else {
+      const area = chart.chartType.toLowerCase().includes('area');
+      const stacked = chart.chartType.startsWith('stacked');
+      const percent = chart.chartType.endsWith('Pct');
+      const zeroBlanks = stacked || chart.dispBlanksAs === 'zero';
+      const logarithmic = chart.valAxisLogBase != null
+        && Number.isFinite(chart.valAxisLogBase) && chart.valAxisLogBase >= 2;
+      const categoryCount = Math.max(
+        chart.categories.length,
+        ...chart.series.map(series => Math.max(
+          series.categories?.length ?? 0,
+          series.values.length,
+        )),
+      );
+      const percentScales = percent
+        ? planThreeDPercentCategoryScales(chart, categoryCount)
+        : undefined;
+      const stackedUpper = chart.series.map(() => new Array<number>(categoryCount).fill(0));
+      if (stacked) {
+        const positive = new Array<number>(categoryCount).fill(0);
+        const negative = new Array<number>(categoryCount).fill(0);
+        for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
+          for (let index = 0; index < categoryCount; index++) {
+            const value = threeDPlottedValue(chart, seriesIndex, index, percentScales);
+            const base = value >= 0 ? positive[index] : negative[index];
+            const end = threeDSafeAdd(base, value);
+            stackedUpper[seriesIndex][index] = end;
+            if (value >= 0) positive[index] = end;
+            else negative[index] = end;
+          }
+        }
+      }
+      for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
+        const series = chart.series[seriesIndex];
+        const overrides = new Map(
+          series.dataPointOverrides?.map(point => [point.idx, point]) ?? [],
+        );
+        const pointCount = categoryCount;
+        let runLength = 0;
+        let previousValue: number | null = null;
+        let hasGeometry = false;
+        let defaultLinePaintUsed = false;
+        for (let index = 0; index < pointCount; index++) {
+          const value = series.values[index];
+          const visible = value != null && Number.isFinite(value)
+            && (!logarithmic || value > 0)
+            || (value == null && zeroBlanks);
+          if (visible) {
+            runLength++;
+            const currentValue = stacked
+              ? stackedUpper[seriesIndex][index]
+              : threeDPlottedValue(chart, seriesIndex, index, percentScales);
+            const lower = previousValue == null ? currentValue : Math.min(previousValue, currentValue);
+            const upper = previousValue == null ? currentValue : Math.max(previousValue, currentValue);
+            const outsideAuthoredAxis = chart.valMin != null && Number.isFinite(chart.valMin)
+              && upper <= chart.valMin
+              || chart.valMax != null && Number.isFinite(chart.valMax) && lower >= chart.valMax;
+            if (runLength >= 2 && (area || series.smooth === true || !outsideAuthoredAxis)) {
+              hasGeometry = true;
+              if (area) break;
+              const point = overrides.get(index);
+              if (threeDPointOwnsLineSegment(point)) {
+                const paint = threeDDatumPaint(chart, series, point, index, seriesIndex);
+                paints.push({ fill: undefined, line: paint.lineFill });
+              } else {
+                defaultLinePaintUsed = true;
+              }
+            }
+            previousValue = currentValue;
+          } else if ((chart.dispBlanksAs ?? 'gap') === 'gap') {
+            runLength = 0;
+            previousValue = null;
+          }
+        }
+        if (!hasGeometry) continue;
+        const paint = threeDDatumPaint(chart, series, undefined, seriesIndex, seriesIndex);
+        if (area) paints.push({ fill: paint.fill, line: paint.lineFill });
+        else if (defaultLinePaintUsed) paints.push({ fill: undefined, line: paint.lineFill });
+      }
+    }
+  }
+  return threeDPaintsWithinBudget(paints, paint => paint.fill, paint => paint.line);
+}
+
+function solidOrStructured(
+  decision: Fill | null | undefined,
+  fallbackColor: string,
+): { color: string; fill: Fill | null | undefined } {
+  if (decision?.fillType === 'solid') {
+    return { color: `#${decision.color}`, fill: undefined };
+  }
+  return { color: fallbackColor, fill: decision };
+}
+
+/** Resolve one classic 3-D datum without materializing per-face style state.
+ * Direct point > direct series > linked dataPoint3D > automatic. Solid colors
+ * continue through the bounded automatic material; structured recipes are
+ * resolved once for the complete datum after projection. */
+function threeDDatumPaint(
+  chart: ChartModel,
   series: ChartSeries,
   point: ChartDataPointOverride | undefined,
+  pointIndex: number,
+  seriesIndex: number,
+): ThreeDDatumPaint {
+  // `ChartSeries.color` and `dataPointColors` are effective legacy colors:
+  // the parser may materialize the automatic accent palette there. Keep them
+  // as the final automatic fallback so an authored/linked 3-D paint recipe can
+  // still own the mark. Direct spPr provenance is carried by chartexStyle.
+  const automaticColor = series.dataPointColors?.[pointIndex]
+    ? `#${series.dataPointColors[pointIndex]}`
+    : colorFor(seriesIndex, series);
+  // Chart Style palettes normally advance by series. Pie slices, and the
+  // single-series bar case explicitly carrying varyColors, advance by point.
+  // Keep this independent from `pointIndex`: that index still selects direct
+  // dPt formatting, while linked/series roles describe the owning series.
+  const styleIndex = chart.chartType === 'pie'
+    || (chart.varyColors === true
+      && chart.series.length === 1
+      && chart.chartType.includes('Bar'))
+    ? pointIndex
+    : seriesIndex;
+  let fill: Fill | null | undefined;
+  let color = automaticColor;
+  const pointDecision = chartStyleFillDecision(point?.chartexStyle, pointIndex);
+  if (pointDecision !== undefined) {
+    ({ color, fill } = solidOrStructured(pointDecision, color));
+  } else if (point?.fillHidden === true || point?.color === '00000000') {
+    fill = null;
+  } else if (point?.color) {
+    color = `#${point.color}`;
+  } else {
+    const seriesDecision = chartStyleFillDecision(series.chartexStyle, styleIndex);
+    if (seriesDecision !== undefined) {
+      ({ color, fill } = solidOrStructured(seriesDecision, color));
+    } else {
+      const linkedDecision = chartStyleFillDecision(
+        chart.chartStyleRoles?.dataPoint3D, styleIndex,
+      );
+      if (linkedDecision !== undefined) {
+        ({ color, fill } = solidOrStructured(linkedDecision, color));
+      }
+    }
+  }
+
+  let lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
+  let lineColor: string | null = null;
+  const pointLine = chartStyleLineDecision(point?.chartexStyle, pointIndex);
+  if (pointLine !== undefined) {
+    if (pointLine?.fillType === 'solid') lineColor = `#${pointLine.color}`;
+    else lineFill = pointLine;
+  } else if (point?.lineHidden === true) lineFill = null;
+  else if (point?.lineColor) lineColor = `#${point.lineColor}`;
+  else {
+    const seriesLine = chartStyleLineDecision(series.chartexStyle, styleIndex);
+    if (seriesLine !== undefined) {
+      if (seriesLine?.fillType === 'solid') lineColor = `#${seriesLine.color}`;
+      else lineFill = seriesLine;
+    } else if (series.lineHidden === true) lineFill = null;
+    else if (series.lineColor) lineColor = `#${series.lineColor}`;
+    else {
+      const linkedLine = chartStyleLineDecision(
+        chart.chartStyleRoles?.dataPoint3D, styleIndex,
+      );
+      if (linkedLine !== undefined) {
+        if (linkedLine?.fillType === 'solid') lineColor = `#${linkedLine.color}`;
+        else lineFill = linkedLine;
+      }
+    }
+  }
+  const linkedGeometry = chart.chartStyleRoles?.dataPoint3D?.lineNoStyle === true
+    ? undefined : chart.chartStyleRoles?.dataPoint3D;
+  const lineCapValue = point?.chartexStyle?.lineCap
+    ?? series.chartexStyle?.lineCap ?? linkedGeometry?.lineCap;
+  const lineJoinValue = point?.chartexStyle?.lineJoin
+    ?? series.chartexStyle?.lineJoin ?? linkedGeometry?.lineJoin;
+  return {
+    color,
+    fill,
+    lineColor,
+    lineFill,
+    lineWidthEmu: point?.lineWidthEmu ?? point?.chartexStyle?.lineWidthEmu
+      ?? series.lineWidthEmu ?? series.chartexStyle?.lineWidthEmu
+      ?? linkedGeometry?.lineWidthEmu,
+    lineDash: point?.lineDash ?? point?.chartexStyle?.lineDash
+      ?? series.chartexStyle?.lineDash ?? linkedGeometry?.lineDash,
+    lineCustomDash: point?.chartexStyle?.lineCustomDash
+      ?? series.chartexStyle?.lineCustomDash ?? linkedGeometry?.lineCustomDash,
+    lineCap: lineCapValue === 'rnd' ? 'round' : lineCapValue === 'sq' ? 'square' : 'butt',
+    lineJoin: lineJoinValue === 'round' || lineJoinValue === 'bevel'
+      ? lineJoinValue : 'miter',
+  };
+}
+
+/** A 3-D line dPt owns only the incoming segment's line component. Shape fill
+ * remains irrelevant to Excel's line ribbon, and area dPt paint is not applied
+ * to the series body. Keep this predicate narrow so color-only fill overrides
+ * do not split or recolor line geometry. */
+function threeDPointOwnsLineSegment(
+  point: ChartDataPointOverride | undefined,
 ): boolean {
-  if (point?.lineHidden != null
-    || point?.lineColor != null
-    || point?.lineWidthEmu != null
-    || point?.lineDash != null) return point.lineHidden !== true;
-  const style = series.chartexStyle;
-  const authored = series.lineHidden != null
-    || series.lineColor != null
-    || series.lineWidthEmu != null
+  if (!point) return false;
+  const style = point.chartexStyle;
+  return point.lineHidden != null
+    || point.lineColor != null
+    || point.lineWidthEmu != null
+    || point.lineDash != null
+    || style?.linePaintAuthored === true
     || style?.lineHidden != null
-    || style?.lineNoStyle != null
-    || style?.lineColors != null
+    || style?.lineNoStyle === true
+    || style?.lineColors?.some(color => color != null) === true
+    || style?.linePaints?.some(paint => paint != null) === true
     || style?.lineWidthEmu != null
     || style?.lineDash != null
+    || style?.lineCustomDash != null
     || style?.lineCap != null
     || style?.lineJoin != null;
-  return authored && series.lineHidden !== true && style?.lineHidden !== true;
 }
 
 /** Automatic 3-D chart material evaluated from a real camera-space face
@@ -407,6 +800,7 @@ function projectThreeDMesh(
     const face: SceneFace = {
       points,
       color: scaleHexColor(color, meshMaterialFactor(projection, scenePoints)),
+      paintRole: 'fill',
       shade: 0,
       cameraDepth: scenePoints.reduce(
         (sum, point) => sum + projection.cameraDepth(point.x, point.y, point.depth),
@@ -522,6 +916,7 @@ function projectThreeDMesh(
       return {
         points: primitive.points,
         color: outlineStyle.color,
+        paintRole: 'outline' as const,
         shade: 0,
         cameraDepth: primitive.cameraDepth + bias,
         cameraDepths: primitive.cameraDepths?.map(depth => depth + bias),
@@ -562,6 +957,7 @@ function projectThreeDMesh(
     visibleFaces.push({
       points: primitive.points,
       color: outlineStyle.color,
+      paintRole: 'outline',
       shade: 0,
       cameraDepth: primitive.cameraDepth + bias,
       cameraDepths: primitive.cameraDepths?.map(depth => depth + bias),
@@ -648,6 +1044,7 @@ function projectThreeDPieOutline(
       result.push({
         points: primitive.points,
         color: style.color,
+        paintRole: 'outline',
         shade: 0,
         cameraDepth: primitive.cameraDepth + bias,
         cameraDepths: primitive.cameraDepths?.map(depth => depth + bias),
@@ -746,7 +1143,14 @@ function projectThreeDPieOutline(
 }
 
 function paintSceneFace(ctx: CanvasRenderingContext2D, item: SceneFace): void {
-  face(ctx, item.points, item.color, item.shade);
+  if (item.paint === null) return;
+  if (item.paint !== undefined) {
+    polygon(ctx, item.points);
+    ctx.fillStyle = item.paint;
+    ctx.fill();
+  } else {
+    face(ctx, item.points, item.color, item.shade);
+  }
   if (!item.outline) return;
   ctx.strokeStyle = item.outlineColor ?? 'rgba(0,0,0,0.42)';
   ctx.lineWidth = item.outlineWidth ?? 0.75;
@@ -760,15 +1164,32 @@ function paintSceneFace(ctx: CanvasRenderingContext2D, item: SceneFace): void {
   ctx.setLineDash([]);
 }
 
-function paintProjectedStrokePrimitive(
+/** Resolve one authored fill recipe once for a complete projected datum, then
+ * share the Canvas paint across its faces. This keeps gradient-stop work
+ * O(datums × stops), never O(faces × stops). */
+function applyScenePaint(
   ctx: CanvasRenderingContext2D,
-  item: ProjectedStrokePrimitive,
-  color: string,
+  faces: SceneFace[],
+  role: SceneFace['paintRole'],
+  fill: Fill | null | undefined,
+  shapeRotationDeg: number,
 ): void {
-  if (item.points.length < 3 || isTransparentPaint(color)) return;
-  polygon(ctx, item.points);
-  ctx.fillStyle = color;
-  ctx.fill();
+  if (fill === undefined) return;
+  const targets = faces.filter(face => face.paintRole === role);
+  if (!targets.length) return;
+  if (fill === null) {
+    for (const face of targets) face.paint = null;
+    return;
+  }
+  const points = targets.flatMap(face => face.points);
+  const minX = Math.min(...points.map(point => point.x));
+  const maxX = Math.max(...points.map(point => point.x));
+  const minY = Math.min(...points.map(point => point.y));
+  const maxY = Math.max(...points.map(point => point.y));
+  const paint = resolveFill(
+    fill, ctx, minX, minY, maxX - minX, maxY - minY, shapeRotationDeg,
+  );
+  for (const face of targets) face.paint = paint;
 }
 
 function paintThreeDTooManyDataPoints(
@@ -1795,19 +2216,76 @@ function walls(
   const {
     sideX: farX, floorY, oppositeFloorY, nearDepth, farDepth,
   } = geometry;
-  const drawSurfaceFill = (
-    points: readonly Point[],
+  const projectedSurfaceFaces = (
+    kind: 'floor' | 'sideWall' | 'backWall',
     surface: NonNullable<ChartModel['threeD']>['floor'],
+  ) => {
+    const slab = planChartThreeDSurfaceGeometry(projection, kind, surface?.thicknessPercent);
+    return { slab, faces: slab.faces
+      .map((scenePoints, faceIndex) => ({ scenePoints, faceIndex }))
+      .filter(({ scenePoints }) => slab.thickness === 0 || projection.cameraFacing(scenePoints))
+      .map(({ scenePoints, faceIndex }) => ({
+        faceIndex,
+        scenePoints,
+        points: scenePoints.map(point =>
+          projection.projectUnbounded(point.x, point.y, point.depth)
+        ),
+        depth: scenePoints.reduce(
+          (sum, point) => sum + projection.cameraDepth(point.x, point.y, point.depth),
+          0,
+        ) / scenePoints.length,
+      }))
+      .sort((left, right) => left.depth - right.depth) };
+  };
+  const floorSurface = projectedSurfaceFaces('floor', chart.threeD?.floor);
+  const sideWallSurface = projectedSurfaceFaces('sideWall', chart.threeD?.sideWall);
+  const backWallSurface = projectedSurfaceFaces('backWall', chart.threeD?.backWall);
+  const floorFaces = floorSurface.faces;
+  const sideWallFaces = sideWallSurface.faces;
+  const backWallFaces = backWallSurface.faces;
+  const drawSurfaceFill = (
+    group: ReturnType<typeof projectedSurfaceFaces>,
+    surface: NonNullable<ChartModel['threeD']>['floor'],
+    role: 'floor' | 'wall',
+    kind: 'floor' | 'sideWall' | 'backWall',
   ) => {
     // CT_Surface does not imply a paint when c:spPr/fill is omitted. Excel's
     // classic 3-D default leaves these faces unfilled; only an authored fill
     // creates an opaque wall. The wall/grid rules are painted independently.
-    if (surface?.fillHidden === true || !surface?.fillColor) return;
-    face(ctx, points, `#${surface.fillColor}`, 0);
+    const effective = chartThreeDSurfacePaint(chart, surface, role);
+    const faces = group.faces;
+    if (!effective.fill || !faces.length) return;
+    if (effective.fill.fillType === 'image') {
+      const image = chartImageFillSource(effective.fill);
+      if (!image) return;
+      const project = (point: ThreeDScenePoint): Point =>
+        projection.projectUnbounded(point.x, point.y, point.depth);
+      paintChartThreeDSurfacePicture(
+        ctx, effective.fill, image, surface, kind,
+        group.slab, group.faces.map(face => face.faceIndex),
+        project, axis.max - axis.min,
+      );
+      return;
+    }
+    const points = faces.flatMap(face => face.points);
+    const minX = Math.min(...points.map(point => point.x));
+    const maxX = Math.max(...points.map(point => point.x));
+    const minY = Math.min(...points.map(point => point.y));
+    const maxY = Math.max(...points.map(point => point.y));
+    const fill = effective.fill.fillType === 'solid'
+      ? `#${effective.fill.color}`
+      : resolveFill(effective.fill, ctx, minX, minY, maxX - minX, maxY - minY);
+    if (!fill) return;
+    for (const face of faces) {
+      if (face.points.length < 3) continue;
+      polygon(ctx, face.points);
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
   };
-  drawSurfaceFill(geometry.floor, chart.threeD?.floor);
-  drawSurfaceFill(geometry.sideWall, chart.threeD?.sideWall);
-  drawSurfaceFill(geometry.backWall, chart.threeD?.backWall);
+  drawSurfaceFill(floorSurface, chart.threeD?.floor, 'floor', 'floor');
+  drawSurfaceFill(sideWallSurface, chart.threeD?.sideWall, 'wall', 'sideWall');
+  drawSurfaceFill(backWallSurface, chart.threeD?.backWall, 'wall', 'backWall');
   const drawValueGrid = (values: readonly number[], stroke: ThreeDStroke) => {
     applyThreeDStroke(ctx, stroke);
     for (const value of values) {
@@ -1871,29 +2349,55 @@ function walls(
     }
   }
   const strokeSurface = (
-    points: readonly Point[],
+    faces: readonly { points: readonly Point[] }[],
     surface: NonNullable<ChartModel['threeD']>['floor'],
+    role: 'floor' | 'wall',
   ) => {
-    if (surface?.lineHidden === true || points.length < 2) return;
-    applyThreeDStroke(ctx, threeDStroke(
-      surface?.lineColor, surface?.lineWidthEmu, surface?.lineDash,
-      ptToPx, '898989', 1,
+    if (!faces.length) return;
+    const effective = chartThreeDSurfacePaint(chart, surface, role);
+    if (effective.line === null) return;
+    const linePaint = effective.line ?? { fillType: 'solid' as const, color: '898989' };
+    const points = faces.flatMap(face => face.points);
+    const minX = Math.min(...points.map(point => point.x));
+    const maxX = Math.max(...points.map(point => point.x));
+    const minY = Math.min(...points.map(point => point.y));
+    const maxY = Math.max(...points.map(point => point.y));
+    const line = linePaint.fillType === 'solid'
+      ? `#${linePaint.color}`
+      : resolveFill(linePaint, ctx, minX, minY, maxX - minX, maxY - minY);
+    if (!line) return;
+    const width = effective.lineWidthEmu != null
+      ? Math.max(0.25, effective.lineWidthEmu / EMU_PER_PT * ptToPx)
+      : ptToPx;
+    ctx.strokeStyle = line;
+    ctx.lineWidth = width;
+    ctx.setLineDash(drawingmlLineDashArray(
+      effective.lineCustomDash,
+      effective.lineDash,
+      width,
     ));
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let index = 1; index < points.length; index++) {
-      ctx.lineTo(points[index].x, points[index].y);
+    ctx.lineCap = effective.lineCap === 'rnd'
+      ? 'round' : effective.lineCap === 'sq' ? 'square' : 'butt';
+    ctx.lineJoin = effective.lineJoin === 'round' || effective.lineJoin === 'bevel'
+      ? effective.lineJoin : 'miter';
+    for (const face of faces) {
+      if (face.points.length < 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(face.points[0].x, face.points[0].y);
+      for (let index = 1; index < face.points.length; index++) {
+        ctx.lineTo(face.points[index].x, face.points[index].y);
+      }
+      ctx.lineTo(face.points[0].x, face.points[0].y);
+      ctx.closePath();
+      ctx.stroke();
     }
-    ctx.lineTo(points[0].x, points[0].y);
-    ctx.closePath();
-    ctx.stroke();
   };
   // Paint each CT_Surface perimeter in chart order. The back wall is last, so
   // its authored rule owns the shared floor/back separator without drawing an
   // extra synthetic line. This also restores the complete side-wall outline.
-  strokeSurface(geometry.floor, chart.threeD?.floor);
-  strokeSurface(geometry.sideWall, chart.threeD?.sideWall);
-  strokeSurface(geometry.backWall, chart.threeD?.backWall);
+  strokeSurface(floorFaces, chart.threeD?.floor, 'floor');
+  strokeSurface(sideWallFaces, chart.threeD?.sideWall, 'wall');
+  strokeSurface(backWallFaces, chart.threeD?.backWall, 'wall');
   ctx.setLineDash([]);
 }
 
@@ -2214,7 +2718,7 @@ function renderCartesian(
   const { plot, legend, legendMeasure } = titleAndPlot(
     ctx, chart, rect, ptToPx, horizontal ? 'horizontal' : 'vertical', shapeRotationDeg,
   );
-  const projection = planChartThreeDProjection(chart.threeD, plot, {
+  let projection = planChartThreeDProjection(chart.threeD, plot, {
     // Office places bar/column prisms in a compact depth box, while line and
     // area series planes span a substantially deeper Z scene. Projection and
     // view angles remain identical; only the authored family geometry differs.
@@ -2231,10 +2735,14 @@ function renderCartesian(
     perspectiveTangentGain: depthArranged ? 1 : 2,
   });
   if (!projection) return true;
+  projection = fitChartThreeDProjectionToWallThickness(projection, chart.threeD, plot);
   const percent = chart.chartType.endsWith('Pct');
   const categories = chart.series.find(series => (series.categories?.length ?? 0) > 0)?.categories
     ?? chart.categories;
   const categoryCount = Math.max(1, categories.length, ...chart.series.map(series => series.values.length));
+  const percentScales = percent
+    ? planThreeDPercentCategoryScales(chart, categoryCount)
+    : undefined;
   const categoryReversed = chart.catAxisOrientation === 'maxMin';
   const categoryBetween = chart.catAxisCrossBetween === 'between';
   const dispBlanks = chart.dispBlanksAs ?? 'gap';
@@ -2247,30 +2755,7 @@ function renderCartesian(
       || (raw == null && (stacked || dispBlanks === 'zero'));
   };
   const valueAt = (seriesIndex: number, categoryIndex: number): number => {
-    const raw = chart.series[seriesIndex]?.values[categoryIndex] ?? 0;
-    if (!Number.isFinite(raw)) return 0;
-    if (!percent) return raw;
-    let maxMagnitude = 0;
-    for (const series of chart.series) {
-      const candidate = series.values[categoryIndex];
-      if (candidate != null && Number.isFinite(candidate)) {
-        maxMagnitude = Math.max(maxMagnitude, Math.abs(candidate));
-      }
-    }
-    if (!(maxMagnitude > 0)) return 0;
-    let scaledTotal = 0;
-    for (const series of chart.series) {
-      const candidate = series.values[categoryIndex];
-      if (candidate != null && Number.isFinite(candidate)) {
-        scaledTotal += Math.abs(candidate) / maxMagnitude;
-      }
-    }
-    return scaledTotal > 0 ? raw / maxMagnitude / scaledTotal * 100 : 0;
-  };
-  const safeAdd = (left: number, right: number): number => {
-    const sum = left + right;
-    if (Number.isFinite(sum)) return sum;
-    return right < 0 ? -Number.MAX_VALUE : Number.MAX_VALUE;
+    return threeDPlottedValue(chart, seriesIndex, categoryIndex, percentScales);
   };
   let dataMin = 0;
   // Percent-stacked extents follow the data signs. Starting every percent
@@ -2283,8 +2768,8 @@ function renderCartesian(
       let negative = 0;
       for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
         const value = valueAt(seriesIndex, categoryIndex);
-        if (value >= 0) positive = safeAdd(positive, value);
-        else negative = safeAdd(negative, value);
+        if (value >= 0) positive = threeDSafeAdd(positive, value);
+        else negative = threeDSafeAdd(negative, value);
       }
       dataMin = Math.min(dataMin, negative);
       dataMax = Math.max(dataMax, positive);
@@ -2323,10 +2808,12 @@ function renderCartesian(
     if (!Number.isFinite(value)) return axis.min;
     return Math.max(axis.min, Math.min(axis.max, value));
   };
-  walls(
-    ctx, chart, projection, axis, horizontal ? 'horizontal' : 'vertical',
-    categoryCount, categoryBetween, categoryReversed, ptToPx,
-  );
+  if (!bars) {
+    walls(
+      ctx, chart, projection, axis, horizontal ? 'horizontal' : 'vertical',
+      categoryCount, categoryBetween, categoryReversed, ptToPx,
+    );
+  }
   const { front } = projection;
   const seriesCount = Math.max(1, chart.series.length);
   const deferredDataLabels: Array<() => void> = [];
@@ -2350,10 +2837,13 @@ function renderCartesian(
       x: number; y: number; width: number; height: number;
       nearDepth: number; farDepth: number;
       categoryIndex: number; seriesIndex: number; color: string;
+      fillPaint: Fill | null | undefined;
+      lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
       shape: string; baseCoord: number; endCoord: number; endScale: number;
       baseScale: number; omitBaseCap: boolean; omitEndCap: boolean;
       outline: boolean; outlineColor: string; outlineWidth: number;
-      outlineDash: string; outlineCap: CanvasLineCap; outlineJoin: CanvasLineJoin;
+      outlineDash: string; outlineCustomDash: ChartModel['plotAreaLineCustomDash'];
+      outlineCap: CanvasLineCap; outlineJoin: CanvasLineJoin;
       labelValue: number;
       plottedLabelValue: number;
     }> = [];
@@ -2381,24 +2871,14 @@ function renderCartesian(
         if (!hasFiniteValue(seriesIndex, categoryIndex)) continue;
         const value = valueAt(seriesIndex, categoryIndex);
         const pointOverride = pointOverrides[seriesIndex].get(categoryIndex);
-        const pointColor = pointOverride?.fillHidden === true
-          ? 'transparent'
-          : pointOverride?.color ?? series.dataPointColors?.[categoryIndex];
-        const color = pointColor === '00000000'
-          ? 'transparent'
-          : pointColor ? `#${pointColor}`
-            : series.color === '00000000' ? 'transparent' : colorFor(seriesIndex, series);
-        const outline = hasAuthoredDatumOutline(series, pointOverride);
-        const lineColor = pointOverride?.lineColor ?? series.lineColor;
-        const lineWidthEmu = pointOverride?.lineWidthEmu ?? series.lineWidthEmu;
-        const lineDash = pointOverride?.lineDash ?? series.chartexStyle?.lineDash ?? 'solid';
-        const lineCap: CanvasLineCap = series.chartexStyle?.lineCap === 'rnd'
-          ? 'round' : series.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt';
-        const lineJoin: CanvasLineJoin = series.chartexStyle?.lineJoin === 'round'
-          || series.chartexStyle?.lineJoin === 'bevel'
-          ? series.chartexStyle.lineJoin : 'miter';
+        const paint = threeDDatumPaint(
+          chart, series, pointOverride, categoryIndex, seriesIndex,
+        );
+        const color = paint.fill === null ? 'transparent' : paint.color;
+        const outline = paint.lineFill !== null
+          && (paint.lineColor != null || paint.lineFill !== undefined);
         const base = stacked ? (value >= 0 ? positiveBase[categoryIndex] : negativeBase[categoryIndex]) : 0;
-        const end = safeAdd(base, value);
+        const end = threeDSafeAdd(base, value);
         if (stacked) {
           if (value >= 0) positiveBase[categoryIndex] = end;
           else negativeBase[categoryIndex] = end;
@@ -2457,18 +2937,20 @@ function renderCartesian(
             x: Math.min(x0, x1), y: top,
             width: Math.abs(x1 - x0), height: clusterSlot.size,
             nearDepth: depthInterval.near, farDepth: depthInterval.far,
-            categoryIndex, seriesIndex, color,
+            categoryIndex, seriesIndex, color, fillPaint: paint.fill,
+            lineFill: paint.lineFill,
             shape,
             baseCoord: x0, endCoord: x1,
             baseScale, endScale, omitBaseCap: false, omitEndCap: false,
             outline,
-            outlineColor: lineColor ? `#${lineColor}` : 'rgba(0,0,0,0.42)',
-            outlineWidth: lineWidthEmu != null
-              ? threeDMeshOutlineWidthPx(lineWidthEmu, ptToPx)
+            outlineColor: paint.lineColor ?? 'rgba(0,0,0,0.42)',
+            outlineWidth: paint.lineWidthEmu != null
+              ? threeDMeshOutlineWidthPx(paint.lineWidthEmu, ptToPx)
               : 0.75 * ptToPx / PT_TO_PX,
-            outlineDash: lineDash,
-            outlineCap: lineCap,
-            outlineJoin: lineJoin,
+            outlineDash: paint.lineDash ?? 'solid',
+            outlineCustomDash: paint.lineCustomDash,
+            outlineCap: paint.lineCap,
+            outlineJoin: paint.lineJoin,
             labelValue: percent ? value / 100 : value,
             plottedLabelValue: end,
           });
@@ -2481,18 +2963,20 @@ function renderCartesian(
             x: left, y: Math.min(y0, y1),
             width: clusterSlot.size, height: Math.abs(y1 - y0),
             nearDepth: depthInterval.near, farDepth: depthInterval.far,
-            categoryIndex, seriesIndex, color,
+            categoryIndex, seriesIndex, color, fillPaint: paint.fill,
+            lineFill: paint.lineFill,
             shape,
             baseCoord: y0, endCoord: y1,
             baseScale, endScale, omitBaseCap: false, omitEndCap: false,
             outline,
-            outlineColor: lineColor ? `#${lineColor}` : 'rgba(0,0,0,0.42)',
-            outlineWidth: lineWidthEmu != null
-              ? threeDMeshOutlineWidthPx(lineWidthEmu, ptToPx)
+            outlineColor: paint.lineColor ?? 'rgba(0,0,0,0.42)',
+            outlineWidth: paint.lineWidthEmu != null
+              ? threeDMeshOutlineWidthPx(paint.lineWidthEmu, ptToPx)
               : 0.75 * ptToPx / PT_TO_PX,
-            outlineDash: lineDash,
-            outlineCap: lineCap,
-            outlineJoin: lineJoin,
+            outlineDash: paint.lineDash ?? 'solid',
+            outlineCustomDash: paint.lineCustomDash,
+            outlineCap: paint.lineCap,
+            outlineJoin: paint.lineJoin,
             labelValue: percent ? value / 100 : value,
             plottedLabelValue: end,
           });
@@ -2551,6 +3035,10 @@ function renderCartesian(
         }
       }
     }
+    walls(
+      ctx, chart, projection, axis, horizontal ? 'horizontal' : 'vertical',
+      categoryCount, categoryBetween, categoryReversed, ptToPx,
+    );
     // Build one scene list and sort every visible face by camera-space depth.
     // A logical series index is not a view depth after rotation, and painting
     // a complete cuboid at a time can still put one of its far faces over a
@@ -2559,8 +3047,8 @@ function renderCartesian(
       remaining: MAX_PROJECTED_STROKE_PRIMITIVES,
       exceeded: false,
     };
-    const sceneFaces = primitives.flatMap(item =>
-      shapeMeshFaces(
+    const sceneFaces = primitives.flatMap(item => {
+      const faces = shapeMeshFaces(
         projection,
         item.shape,
         horizontal,
@@ -2574,13 +3062,18 @@ function renderCartesian(
         item.outline && item.outlineColor ? {
           color: item.outlineColor,
           width: item.outlineWidth,
-          dash: pptxPresetDashArray(item.outlineDash, item.outlineWidth),
+          dash: drawingmlLineDashArray(
+            item.outlineCustomDash, item.outlineDash, item.outlineWidth,
+          ),
           cap: item.outlineCap,
           join: item.outlineJoin,
         } : undefined,
         meshBudget,
-      )
-    );
+      );
+      applyScenePaint(ctx, faces, 'fill', item.fillPaint, shapeRotationDeg);
+      applyScenePaint(ctx, faces, 'outline', item.lineFill, shapeRotationDeg);
+      return faces;
+    });
     if (meshBudget.exceeded) {
       paintThreeDTooManyDataPoints(ctx, rect);
       return true;
@@ -2624,9 +3117,9 @@ function renderCartesian(
           const value = valueAt(seriesIndex, categoryIndex);
           const base = value >= 0 ? positive[categoryIndex] : negative[categoryIndex];
           stackedLower[seriesIndex][categoryIndex] = base;
-          stackedUpper[seriesIndex][categoryIndex] = safeAdd(base, value);
-          if (value >= 0) positive[categoryIndex] = safeAdd(positive[categoryIndex], value);
-          else negative[categoryIndex] = safeAdd(negative[categoryIndex], value);
+          stackedUpper[seriesIndex][categoryIndex] = threeDSafeAdd(base, value);
+          if (value >= 0) positive[categoryIndex] = threeDSafeAdd(positive[categoryIndex], value);
+          else negative[categoryIndex] = threeDSafeAdd(negative[categoryIndex], value);
         }
       }
     }
@@ -2651,6 +3144,9 @@ function renderCartesian(
     const seriesOrder = chart.series.map((_, seriesIndex) => seriesIndex).sort((a, b) =>
       seriesAverageDepth(a) - seriesAverageDepth(b) || b - a
     );
+    const seriesPaints = chart.series.map((series, seriesIndex) =>
+      threeDDatumPaint(chart, series, undefined, seriesIndex, seriesIndex)
+    );
     const sceneCommands: Array<ProjectedSceneFace & {
       layer: 0 | 1;
       paint: () => void;
@@ -2660,7 +3156,8 @@ function renderCartesian(
     for (const seriesIndex of seriesOrder) {
       if (strokeBudgetExceeded) break;
       const series = chart.series[seriesIndex];
-      const color = colorFor(seriesIndex, series);
+      const seriesPaint = seriesPaints[seriesIndex];
+      const color = seriesPaint.fill === null ? 'transparent' : seriesPaint.color;
       const depthInterval = stacked
         ? projection.prismInterval(0, 1, true)
         : projection.prismInterval(seriesIndex, seriesCount, false);
@@ -2779,6 +3276,7 @@ function renderCartesian(
       }
       if (run) runs.push(run);
       const areaStrokeRuns: ProjectedStrokePoint[][] = [];
+      const areaPaintFaces: SceneFace[] = [];
       if (chart.chartType.toLowerCase().includes('area')) {
         for (const item of runs) {
           let strokeRun: ProjectedStrokePoint[] | null = null;
@@ -2840,6 +3338,7 @@ function renderCartesian(
                   layer: 0,
                   paint: () => paintSceneFace(ctx, areaFace),
                 });
+                areaPaintFaces.push(areaFace);
               }
               if (strokeBudgetExceeded) break;
             }
@@ -2848,15 +3347,17 @@ function renderCartesian(
           if (strokeRun && strokeRun.length >= 2) areaStrokeRuns.push(strokeRun);
           if (strokeBudgetExceeded) break;
         }
+        applyScenePaint(ctx, areaPaintFaces, 'fill', seriesPaint.fill, shapeRotationDeg);
       }
       const lineStrokeRuns: Array<{
         path: ProjectedStrokePoint[];
+        ownerIndex: number;
         startClipped: boolean;
         endClipped: boolean;
         dashOffset: number;
       }> = [];
       if (!chart.chartType.toLowerCase().includes('area')) {
-        type ModelLinePoint = { x: number; fraction: number };
+        type ModelLinePoint = { x: number; fraction: number; ownerIndex: number };
         const modelRuns: ModelLinePoint[][] = [];
         let modelRun: ModelLinePoint[] | null = null;
         for (let categoryIndex = 0; categoryIndex < categoryCount; categoryIndex++) {
@@ -2875,6 +3376,7 @@ function renderCartesian(
               categoryIndex, categoryCount, categoryBetween, categoryReversed,
             ) * front.w,
             fraction,
+            ownerIndex: categoryIndex,
           });
         }
         if (modelRun) modelRuns.push(modelRun);
@@ -2919,6 +3421,7 @@ function renderCartesian(
                 fraction: u * u * u * p1.fraction
                   + 3 * u * u * t * c1.fraction
                   + 3 * u * t * t * c2.fraction + t * t * t * p2.fraction,
+                ownerIndex: p2.ownerIndex,
               });
             }
           }
@@ -2957,6 +3460,7 @@ function renderCartesian(
               x: startModel.x + (endModel.x - startModel.x) * t,
               fraction: startModel.fraction
                 + (endModel.fraction - startModel.fraction) * t,
+              ownerIndex: endModel.ownerIndex,
             });
             const projectedClipStart = projectUnclipped(at(clipped.startT));
             const clippedPrefixLength = Math.hypot(
@@ -2968,11 +3472,12 @@ function renderCartesian(
             const continues = visible != null && Math.hypot(
               visible.path.at(-1)!.x - start.x,
               visible.path.at(-1)!.y - start.y,
-            ) <= 1e-8;
+            ) <= 1e-8 && visible.ownerIndex === endModel.ownerIndex;
             if (!continues) {
               finishVisibleRun(visible);
               visible = {
                 path: [start, end],
+                ownerIndex: endModel.ownerIndex,
                 startClipped: index > 0 || clipped.startT > 0,
                 endClipped: index + 1 < sampled.length - 1 || clipped.endT < 1,
                 dashOffset: traversedLength + (Number.isFinite(clippedPrefixLength)
@@ -2996,39 +3501,50 @@ function renderCartesian(
         || series.chartexStyle?.lineWidthEmu != null
         || series.chartexStyle?.lineDash != null
         || series.chartexStyle?.lineCap != null
-        || series.chartexStyle?.lineJoin != null;
-      if (series.lineHidden !== true && (!areaFamily || authoredAreaLine)) {
-        // Automatic 3-D line/area edges use the darker Chart Style line role.
-        // Existing Office vectors across both families resolve near 70% of the
-        // corresponding accent luminance; direct series color stays exact.
-        const strokeStyle = series.lineColor ? `#${series.lineColor}` : scaleHexColor(color, 0.70);
-        const lineWidth = series.lineWidthEmu
-          ? Math.max(0.5, series.lineWidthEmu / EMU_PER_PT) * ptToPx
-          : areaFamily
-            ? 0.75 * ptToPx
-            : Math.max(1, 2 * ptToPx);
-        const lineDash = pptxPresetDashArray(series.chartexStyle?.lineDash ?? 'solid', lineWidth);
-        const lineCap = series.chartexStyle?.lineCap === 'rnd'
-          ? 'round'
-          : series.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt';
-        const lineJoin = series.chartexStyle?.lineJoin === 'round'
-          || series.chartexStyle?.lineJoin === 'bevel'
-          ? series.chartexStyle.lineJoin
-          : 'miter';
+        || series.chartexStyle?.lineJoin != null
+        || seriesPaint.lineColor != null
+        || seriesPaint.lineFill !== undefined;
+      if (areaFamily ? seriesPaint.lineFill !== null && authoredAreaLine : true) {
+        const pointLinePaints = new Map<number, ThreeDDatumPaint>();
+        const paintForLineRun = (ownerIndex: number): ThreeDDatumPaint => {
+          const point = pointOverrides[seriesIndex].get(ownerIndex);
+          if (!threeDPointOwnsLineSegment(point)) return seriesPaint;
+          let paint = pointLinePaints.get(ownerIndex);
+          if (!paint) {
+            paint = threeDDatumPaint(chart, series, point, ownerIndex, seriesIndex);
+            pointLinePaints.set(ownerIndex, paint);
+          }
+          return paint;
+        };
+        const strokeFaceGroups = new Map<ThreeDDatumPaint, SceneFace[]>();
         const pushStrokeGeometry = (
           path: readonly ProjectedStrokePoint[],
+          paint: ThreeDDatumPaint,
           startCap: CanvasLineCap,
           endCap: CanvasLineCap = startCap,
           dashOffset = 0,
         ) => {
+          if (paint.lineFill === null) return;
+          // Automatic 3-D line/area edges use the darker Chart Style line
+          // role. Direct point line paint owns only its incoming segment.
+          const automaticStrokeBase = paint === seriesPaint ? color : paint.color;
+          const strokeStyle = paint.lineColor ?? scaleHexColor(automaticStrokeBase, 0.70);
+          const lineWidth = paint.lineWidthEmu
+            ? Math.max(0.5, paint.lineWidthEmu / EMU_PER_PT) * ptToPx
+            : areaFamily
+              ? 0.75 * ptToPx
+              : Math.max(1, 2 * ptToPx);
+          const lineDash = drawingmlLineDashArray(
+            paint.lineCustomDash, paint.lineDash, lineWidth,
+          );
           const strokes = buildProjectedStrokePrimitives(path, {
             width: lineWidth,
             dash: lineDash,
             dashOffset,
-            lineCap,
+            lineCap: paint.lineCap,
             startCap,
             endCap,
-            lineJoin,
+            lineJoin: paint.lineJoin,
           });
           if (strokes == null) {
             strokeBudgetExceeded = true;
@@ -3039,25 +3555,47 @@ function renderCartesian(
             return;
           }
           for (const stroke of strokes) {
+            const strokeFace: SceneFace = {
+              points: stroke.points,
+              color: strokeStyle,
+              paintRole: 'outline',
+              shade: 0,
+              cameraDepth: stroke.cameraDepth,
+              cameraDepths: stroke.cameraDepths,
+              cameraWeights: stroke.cameraWeights,
+              outline: false,
+            };
+            const group = strokeFaceGroups.get(paint) ?? [];
+            group.push(strokeFace);
+            strokeFaceGroups.set(paint, group);
             sceneCommands.push({
               points: stroke.points,
               cameraDepth: stroke.cameraDepth,
               cameraDepths: stroke.cameraDepths,
               cameraWeights: stroke.cameraWeights,
               layer: 1,
-              paint: () => paintProjectedStrokePrimitive(ctx, stroke, strokeStyle),
+              paint: () => paintSceneFace(ctx, strokeFace),
             });
           }
         };
         if (areaFamily) {
-          for (const path of areaStrokeRuns) pushStrokeGeometry(path, lineCap);
+          for (const path of areaStrokeRuns) {
+            pushStrokeGeometry(path, seriesPaint, seriesPaint.lineCap);
+          }
         } else {
-          for (const item of lineStrokeRuns) pushStrokeGeometry(
-            item.path,
-            item.startClipped ? 'butt' : lineCap,
-            item.endClipped ? 'butt' : lineCap,
-            item.dashOffset,
-          );
+          for (const item of lineStrokeRuns) {
+            const paint = paintForLineRun(item.ownerIndex);
+            pushStrokeGeometry(
+              item.path,
+              paint,
+              item.startClipped ? 'butt' : paint.lineCap,
+              item.endClipped ? 'butt' : paint.lineCap,
+              item.dashOffset,
+            );
+          }
+        }
+        for (const [paint, faces] of strokeFaceGroups) {
+          applyScenePaint(ctx, faces, 'outline', paint.lineFill, shapeRotationDeg);
         }
       }
       const seriesMarkersVisible = (areaFamily
@@ -3117,9 +3655,9 @@ function renderCartesian(
             stacked ? stackedUpper[seriesIndex][categoryIndex] : sourceValue,
             shapeRotationDeg,
           ));
+          }
         }
       }
-    }
     // Area faces and explicit stroke polygons participate in one local-overlap
     // depth graph. Average series depth is insufficient when two projected
     // surfaces cross at only one side of the chart.
@@ -3377,6 +3915,10 @@ function renderPie(
     // at zero: the first-slice ray remains at twelve o'clock. An authored
     // rotY still rotates the complete solid and its slice seams.
     rotationY: chart.threeD.rotationY ?? 0,
+    // MS-OE376 §2.1.1501(b): pie3D hPercent scales the default pie
+    // thickness. It is not the cartesian scene-height ratio used by the
+    // other 3-D families.
+    heightPercent: undefined,
     depthPercent: 100,
   }, plot, {
     sceneDepthScale: 1,
@@ -3407,7 +3949,7 @@ function renderPie(
   const centerDepth = 0.5;
   // Office's default pie wall is about .29r. The camera now decides which
   // side is visible; no screen-down wall or abs(rotX) special case remains.
-  const thickness = radius * 0.30;
+  const thickness = radius * 0.30 * pieThreeDThicknessMultiplier(chart.threeD);
   // rotY is already part of the camera and must not be added to the seam a
   // second time. Slice angles are resolved in the X/Z model plane below.
   let cumulativeFraction = 0;
@@ -3416,16 +3958,18 @@ function renderPie(
     start: number;
     end: number;
     color: string;
+    fillPaint: Fill | null | undefined;
     value: number;
     percentValue: number;
     centerX: number;
     centerDepth: number;
     segments: number;
     mesh: ThreeDMesh;
-    lineHidden: boolean;
     lineColor: string | null;
+    lineFill: ChartModel['plotAreaLineFill'] | null | undefined;
     lineWidthEmu: number | null;
     lineDash: string;
+    lineCustomDash: ChartModel['plotAreaLineCustomDash'];
     lineCap: CanvasLineCap;
     lineJoin: CanvasLineJoin;
   }> = [];
@@ -3445,9 +3989,7 @@ function renderPie(
       chart.firstSliceAngle, cumulativeFraction, percentValue,
     );
     const pointOverride = pointOverrides.get(item.index);
-    const authoredColor = pointOverride?.fillHidden === true
-      ? '00000000'
-      : pointOverride?.color ?? series.dataPointColors?.[item.index] ?? series.color;
+    const paint = threeDDatumPaint(chart, series, pointOverride, item.index, 0);
     const middle = angles.middle;
     const explosion = pointOverride?.explosion != null && Number.isFinite(pointOverride.explosion)
       ? Math.max(0, Math.min(100, pointOverride.explosion)) / 100
@@ -3475,24 +4017,21 @@ function renderPie(
       index: item.index,
       start: angles.start,
       end: angles.end,
-      color: authoredColor === '00000000'
-        ? 'transparent'
-        : authoredColor ? `#${authoredColor}` : colorFor(item.index),
+      color: paint.fill === null ? 'transparent' : paint.color,
+      fillPaint: paint.fill,
       value: item.value,
       percentValue,
       centerX: sliceCenterX,
       centerDepth: sliceCenterDepth,
       segments,
       mesh,
-      lineHidden: pointOverride?.lineHidden ?? series.lineHidden ?? false,
-      lineColor: pointOverride?.lineColor ?? series.lineColor ?? null,
-      lineWidthEmu: pointOverride?.lineWidthEmu ?? series.lineWidthEmu ?? null,
-      lineDash: pointOverride?.lineDash ?? series.chartexStyle?.lineDash ?? 'solid',
-      lineCap: series.chartexStyle?.lineCap === 'rnd'
-        ? 'round' : series.chartexStyle?.lineCap === 'sq' ? 'square' : 'butt',
-      lineJoin: series.chartexStyle?.lineJoin === 'round'
-        || series.chartexStyle?.lineJoin === 'bevel'
-        ? series.chartexStyle.lineJoin : 'miter',
+      lineColor: paint.lineColor,
+      lineFill: paint.lineFill,
+      lineWidthEmu: paint.lineWidthEmu ?? null,
+      lineDash: paint.lineDash ?? 'solid',
+      lineCustomDash: paint.lineCustomDash,
+      lineCap: paint.lineCap,
+      lineJoin: paint.lineJoin,
     });
     cumulativeFraction += percentValue;
   }
@@ -3511,10 +4050,11 @@ function renderPie(
     const width = slice.lineWidthEmu != null
       ? Math.max(0.25, slice.lineWidthEmu / EMU_PER_PT * ptToPx)
       : 0.75 * ptToPx;
-    return !slice.lineHidden && slice.lineColor ? {
-      color: `#${slice.lineColor}`,
+    return slice.lineFill !== null
+      && (slice.lineColor != null || slice.lineFill !== undefined) ? {
+      color: slice.lineColor ?? 'rgba(0,0,0,0.42)',
       width,
-      dash: pptxPresetDashArray(slice.lineDash, width),
+      dash: drawingmlLineDashArray(slice.lineCustomDash, slice.lineDash, width),
       cap: slice.lineCap,
       join: slice.lineJoin,
     } : undefined;
@@ -3522,9 +4062,13 @@ function renderPie(
   // Fill solids remain independently colored and depth-sorted. A uniform,
   // non-exploded pie uses semantic continuous outline paths; differently
   // styled or exploded points retain independent authored solid outlines.
-  const pieFillFaces = slices.flatMap(slice => projectThreeDMesh(
-    projection, slice.mesh, slice.color, undefined, pieBudget,
-  ));
+  const pieFillFaces = slices.flatMap(slice => {
+    const faces = projectThreeDMesh(
+      projection, slice.mesh, slice.color, undefined, pieBudget,
+    );
+    applyScenePaint(ctx, faces, 'fill', slice.fillPaint, shapeRotationDeg);
+    return faces;
+  });
   const pieOutlineFaces: SceneFace[] = [];
   const outlineStyles = slices.map(outlineStyleForSlice);
   const firstOutline = outlineStyles[0];
@@ -3532,6 +4076,7 @@ function renderPie(
     style.color, style.width, style.dash.join(','), style.cap, style.join,
   ].join('|');
   const uniformOutline = firstOutline != null
+    && slices.every(slice => slice.lineFill === undefined)
     && outlineStyles.every(style => outlineKey(style) === outlineKey(firstOutline))
     && slices.every(slice => Math.abs(slice.centerX - centerX) < 1e-9
       && Math.abs(slice.centerDepth - centerDepth) < 1e-9);
@@ -3543,9 +4088,11 @@ function renderPie(
     for (let index = 0; index < slices.length; index++) {
       const style = outlineStyles[index];
       if (!style) continue;
-      pieOutlineFaces.push(...projectThreeDMesh(
+      const faces = projectThreeDMesh(
         projection, slices[index].mesh, 'transparent', style, pieBudget, true,
-      ));
+      );
+      applyScenePaint(ctx, faces, 'outline', slices[index].lineFill, shapeRotationDeg);
+      pieOutlineFaces.push(...faces);
     }
   }
   if (pieBudget.exceeded) {
@@ -3680,7 +4227,13 @@ export function renderSimpleThreeDChart(
   shapeRotationDeg = 0,
 ): boolean {
   if (!chart.threeD) return false;
+  const supported = chart.chartType === 'pie'
+    || SUPPORTED_CARTESIAN_THREE_D_TYPES.has(chart.chartType);
+  if (!supported) return false;
+  if (!threeDChartPaintsWithinBudget(chart)) {
+    paintThreeDTooManyDataPoints(ctx, rect);
+    return true;
+  }
   if (renderPie(ctx, chart, rect, ptToPx, shapeRotationDeg)) return true;
-  if (!SUPPORTED_CARTESIAN_THREE_D_TYPES.has(chart.chartType)) return false;
   return renderCartesian(ctx, chart, rect, ptToPx, shapeRotationDeg);
 }

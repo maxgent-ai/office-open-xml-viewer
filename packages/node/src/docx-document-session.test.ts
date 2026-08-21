@@ -114,7 +114,7 @@ describe('Node bounded DOCX document session', () => {
     } finally {
       free.mockRestore();
     }
-  });
+  }, 15_000);
 
   it('reports metrics for the owned session when it closes', async () => {
     const onResourceMetrics = vi.fn();

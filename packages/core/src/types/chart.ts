@@ -130,6 +130,10 @@ export interface ChartSeries {
    * `ChartModel.categories` as X.
    */
   categories?: string[] | null;
+  /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
+   * exposes such a lone bubble series as one legend entry per point while a
+   * numeric X source keeps the ordinary one-entry-per-series legend. */
+  bubbleXSourceIsString?: boolean | null;
   /**
    * Resolved marker visibility for line/scatter series. ECMA-376 §21.2.2.32
    * `<c:marker><c:symbol>` defaults to "none" for line charts unless the
@@ -209,6 +213,11 @@ export interface ChartSeries {
    * series.
    */
   bubbleSizes?: (number | null)[] | null;
+  /** `<c:bubbleChart><c:bubble3D>` copied from this series' owning group.
+   * Kept per series so multiple bubble groups cannot leak defaults. */
+  bubble3DGroupDefault?: boolean | null;
+  /** Direct `<c:bubbleChart><c:ser><c:bubble3D>` override. */
+  bubble3D?: boolean | null;
   /**
    * `<c:ser><c:smooth val>` (ECMA-376 §21.2.2.194) — line/area series flag
    * requesting a smoothed (spline) curve through the points instead of straight
@@ -317,6 +326,10 @@ export interface ChartDataPointOverride {
   color?: string;
   /** Direct point `<a:noFill/>`; suppresses series/style fill fallback. */
   fillHidden?: boolean;
+  /** Direct `<c:dPt><c:spPr>` DrawingML shape paint. Bubble charts consume
+   * this carrier for gradient, pattern, picture, and unresolved fill
+   * provenance; other classic families retain their established point model. */
+  chartexStyle?: ChartExElementStyle | null;
   /** Direct point outline color (no `#`). */
   lineColor?: string;
   /** Direct point outline width in EMU. */
@@ -336,6 +349,8 @@ export interface ChartDataPointOverride {
   markerLine?: string;
   /** Direct point marker-outline width in EMU. */
   markerLineWidthEmu?: number;
+  /** Direct `<c:dPt><c:bubble3D>` override. Only bubble charts consume it. */
+  bubble3D?: boolean | null;
   /**
    * `<c:dPt><c:explosion val>` (ECMA-376 §21.2.2.61) — the amount this
    * pie/doughnut slice is moved out from the center. The schema type is
@@ -548,6 +563,43 @@ export type ChartType =
   | 'boxWhisker' | 'sunburst' | 'treemap'
   | string;
 
+/** Exact classic chart-group element retained from `<c:plotArea>` source
+ * order. These names deliberately do not fold 3-D or bubble groups into a
+ * canonical 2-D family. */
+export type ChartPlotGroupKind =
+  | 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar'
+  | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D'
+  | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
+
+/** Resolved ownership of one axis role for a classic plot group. */
+export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
+
+/**
+ * Bounded source-order metadata for one direct classic chart-group child of
+ * `<c:plotArea>`. Series are stored once in `ChartModel.series`; this record
+ * owns a contiguous slice and therefore avoids a second scene graph or
+ * group-by-series copying.
+ */
+export interface ChartPlotGroup {
+  kind: ChartPlotGroupKind;
+  seriesStart: number;
+  seriesCount: number;
+  categoryAxis: ChartPlotGroupAxisSlot;
+  valueAxis: ChartPlotGroupAxisSlot;
+  seriesAxis: ChartPlotGroupAxisSlot;
+  /** Authored `axId` values in group-child order, retained as provenance. */
+  axisIds?: string[] | null;
+  grouping?: string | null;
+  barDirection?: string | null;
+  scatterStyle?: string | null;
+  radarStyle?: string | null;
+  gapWidth?: number | null;
+  overlap?: number | null;
+  bubbleScale?: number | null;
+  bubbleSizeRepresents?: 'area' | 'w' | null;
+  showNegativeBubbles?: boolean | null;
+}
+
 /** Backward-compatible chart name for the shared DrawingML dash atom. */
 export type ChartLineDashSegment = DrawingMLCustomDashSegment;
 
@@ -632,6 +684,9 @@ export type ChartStyleRole =
 /** Authored low-to-high formatting for one classic surface-chart band. */
 export interface ChartSurfaceBandFormat {
   idx: number;
+  /** Direct outline geometry/paint and fill-authorship provenance. The one
+   * authoritative direct fill recipe is carried by `fill`. */
+  style?: ChartExElementStyle | null;
   fill?: SolidFill | GradientFill | PatternFill | null;
   fillHidden?: boolean | null;
   lineColor?: string | null;
@@ -676,6 +731,9 @@ export interface ChartModel {
    */
   categoryLevels?: string[][] | null;
   series: ChartSeries[];
+  /** Ordered classic chart groups. Absent keeps legacy public models on the
+   * existing single-family compatibility path. */
+  plotGroups?: ChartPlotGroup[] | null;
   /** Text boxes in the Chart Drawing part referenced by `<c:userShapes>`.
    *  Coordinates are chart-space fractions from `<cdr:relSizeAnchor>`. */
   chartTextBoxes?: ChartTextBox[] | null;
@@ -1412,7 +1470,11 @@ export interface ChartBarGroupDecorations {
 export interface ChartOfPie {
   type: 'pie' | 'bar';
   splitType: 'auto' | 'cust' | 'percent' | 'pos' | 'val';
+  /** Whether `<c:splitType>` was authored rather than omitted. */
+  splitTypeAuthored?: boolean | null;
   splitPos?: number | null;
+  /** Whether `<c:splitPos>` was authored, including an invalid/missing value. */
+  splitPosAuthored?: boolean | null;
   customSplitIndices?: number[] | null;
   /** Secondary pie diameter relative to the primary pie, 5–200%. */
   secondPieSizePercent: number;
@@ -1426,22 +1488,48 @@ export interface ChartOfPie {
  * surface is a real face of the shared projected scene, not a renderer
  * decoration. */
 export interface ChartThreeDSurface {
+  /** Full direct `<c:spPr>` paint/line recipe. */
+  style?: ChartExElementStyle | null;
   fillColor?: string | null;
   fillHidden?: boolean | null;
   lineColor?: string | null;
   lineWidthEmu?: number | null;
   lineDash?: string | null;
   lineHidden?: boolean | null;
+  /** `<c:thickness val>`, normalized to percent when authored. */
+  thicknessPercent?: number | null;
+  pictureOptions?: ChartThreeDPictureOptions | null;
+}
+
+export interface ChartThreeDPictureOptions {
+  applyToFront?: boolean | null;
+  applyToSides?: boolean | null;
+  applyToEnd?: boolean | null;
+  pictureFormat?: 'stretch' | 'stack' | 'stackScale' | string | null;
+  /** Whether `<c:pictureFormat>` was authored, including an unsupported value. */
+  pictureFormatAuthored?: boolean | null;
+  pictureStackUnit?: number | null;
+  /** Whether `<c:pictureStackUnit>` was authored, including an invalid value. */
+  pictureStackUnitAuthored?: boolean | null;
 }
 
 export interface ChartThreeD {
+  /** Whether `<c:view3D>` itself was authored. */
+  view3DPresent?: boolean | null;
   rotationX?: number | null;
+  rotationXAuthored?: boolean | null;
   rotationY?: number | null;
+  rotationYAuthored?: boolean | null;
   heightPercent?: number | null;
+  heightPercentAuthored?: boolean | null;
   depthPercent?: number | null;
+  depthPercentAuthored?: boolean | null;
   perspective?: number | null;
+  perspectiveAuthored?: boolean | null;
   rightAngleAxes?: boolean | null;
+  rightAngleAxesAuthored?: boolean | null;
   gapDepthPercent?: number | null;
+  gapDepthPercentAuthored?: boolean | null;
   shape?: string | null;
   /** `<c:bar3DChart><c:grouping val>` (§21.2.2.77). `standard` uses the
    *  series/depth axis; `clustered` uses adjacent category-axis slots. */

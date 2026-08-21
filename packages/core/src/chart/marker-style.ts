@@ -36,6 +36,29 @@ export function pointHasMarkerDetail(point: ChartDataPointOverride | undefined):
   );
 }
 
+/** Apply CT_BubbleChart.showNegBubbles before bubble paint/prefetch/work. */
+export function visibleBubbleSize(
+  chart: Pick<ChartModel, 'showNegativeBubbles'>,
+  value: number | null | undefined,
+): number | null {
+  if (value == null || !Number.isFinite(value) || value === 0) return null;
+  if (value < 0 && chart.showNegativeBubbles !== true) return null;
+  return Math.abs(value);
+}
+
+/** Effective ECMA-376 `bubble3D` provenance for one bubble. A point override
+ * wins over its series, then the owning bubble-chart group copied onto the
+ * series. Complete omission means the ordinary flat bubble. */
+export function bubblePointIsThreeD(
+  series: ChartSeries,
+  point: ChartDataPointOverride | undefined,
+): boolean {
+  return point?.bubble3D
+    ?? series.bubble3D
+    ?? series.bubble3DGroupDefault
+    ?? false;
+}
+
 /** Open stroke-only symbols do not consume a fill recipe. */
 export function markerSymbolConsumesFill(symbol: string | null | undefined): boolean {
   return symbol !== 'none' && symbol !== 'x' && symbol !== 'plus';
@@ -49,26 +72,33 @@ export function classicMarkerPointIsPainted(
   family: string,
   index: number,
   scatterHasNumericX: boolean,
+  groupSettings?: {
+    chartType?: string;
+    bubbleScale?: number | null;
+    showNegativeBubbles?: boolean | null;
+  },
 ): boolean {
+  const chartType = groupSettings?.chartType ?? chart.chartType;
   const value = series.values[index];
   let painted = value != null;
   if (!painted && (family === 'line' || family === 'stackedLine'
     || family === 'stackedLinePct')) {
-    const renderedByLineFamily = chart.chartType === 'line'
-      || chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
+    const renderedByLineFamily = chartType === 'line'
+      || chartType === 'stackedLine' || chartType === 'stackedLinePct';
     painted = renderedByLineFamily
-      && (chart.chartType !== 'line' || chart.dispBlanksAs === 'zero');
+      && (chartType !== 'line' || chart.dispBlanksAs === 'zero');
   }
   if (!painted) return false;
   if (family === 'scatter' && scatterHasNumericX) {
     const category = (series.categories ?? chart.categories)[index];
     if (category == null || !Number.isFinite(Number.parseFloat(category))) return false;
   }
-  if (family === 'scatter' && chart.chartType === 'bubble') {
+  if (family === 'scatter' && chartType === 'bubble') {
     const size = series.bubbleSizes?.[index];
     if (size == null || !Number.isFinite(size) || size === 0) return false;
-    if (size < 0 && chart.showNegativeBubbles !== true) return false;
-    return (chart.bubbleScale ?? 100) > 0;
+    const showNegative = groupSettings?.showNegativeBubbles ?? chart.showNegativeBubbles;
+    if (size < 0 && showNegative !== true) return false;
+    return (groupSettings?.bubbleScale ?? chart.bubbleScale ?? 100) > 0;
   }
   return true;
 }
@@ -80,6 +110,7 @@ export function dataLabelLegendKeyCount(
   family: string,
   pointCount: number,
   scatterHasNumericX: boolean,
+  groupSettings?: Parameters<typeof classicMarkerPointIsPainted>[5],
 ): number {
   // Radar currently has no data-label consumer; do not prefetch or charge keys
   // that the family renderer cannot paint.
@@ -91,7 +122,9 @@ export function dataLabelLegendKeyCount(
     const point = overrides.get(index);
     if (dataLabelIsDeleted(series.seriesDataLabels, point)) continue;
     if ((point?.showLegendKey ?? series.seriesDataLabels?.showLegendKey ?? false) !== true) continue;
-    if (!classicMarkerPointIsPainted(chart, series, family, index, scatterHasNumericX)) continue;
+    if (!classicMarkerPointIsPainted(
+      chart, series, family, index, scatterHasNumericX, groupSettings,
+    )) continue;
     count++;
   }
   return count;
@@ -140,7 +173,7 @@ export function seriesLegendMarkerIsVisible(
   const family = series.seriesType ?? chartType;
   const lineFamily = family === 'line' || family === 'stackedLine'
     || family === 'stackedLinePct' || family === 'stock' || family === 'radar';
-  if (!lineFamily && family !== 'scatter') return false;
+  if (!lineFamily && family !== 'scatter' && family !== 'bubble') return false;
   if (family === 'radar' && radarStyle === 'filled') return false;
   if (family === 'scatter'
     && (scatterStyle === 'lineNoMarker' || scatterStyle === 'smoothNoMarker')) return false;

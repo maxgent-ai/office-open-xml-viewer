@@ -122,4 +122,17 @@ describe('chartVariesColorsByPoint', () => {
     expect(chartVariesColorsByPoint(model({ chartType: 'line', series: oneSeries, varyColors: true }))).toBe(false);
     expect(chartVariesColorsByPoint(model({ chartType: 'pie', series: oneSeries, varyColors: true }))).toBe(false);
   });
+
+  it('uses point entries for a lone bubble series whose x source is textual', () => {
+    expect(chartVariesColorsByPoint(model({
+      chartType: 'bubble',
+      varyColors: false,
+      series: [{ ...oneSeries[0], bubbleXSourceIsString: true }],
+    }))).toBe(true);
+    expect(chartVariesColorsByPoint(model({
+      chartType: 'bubble',
+      varyColors: true,
+      series: [{ ...oneSeries[0], bubbleXSourceIsString: false }],
+    }))).toBe(false);
+  });
 });
